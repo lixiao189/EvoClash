@@ -1,0 +1,16 @@
+[package]
+name = "evoclash-game"
+description = "Shared protocol, map and deterministic simulation for EvoClash"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+client = ["lightyear/client"]
+server = ["lightyear/server"]
+
+[dependencies]
+bevy.workspace = true
+lightyear.workspace = true
+serde.workspace = true
+rand.workspace = true

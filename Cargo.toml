@@ -1,0 +1,51 @@
+[workspace]
+resolver = "3"
+members = ["crates/game", "crates/server", "crates/client", "crates/matchmaker"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+evoclash-game = { path = "crates/game" }
+# The headless server only needs the ECS/app core; the client crate adds rendering features.
+bevy = { version = "0.20", default-features = false, features = [
+  "std",
+  "async_executor",
+  "multi_threaded",
+  "bevy_log",
+  "bevy_state",
+  "bevy_color",
+  "bevy_curve",
+  "serialize",
+] }
+lightyear = { version = "0.31", default-features = false, features = [
+  "std",
+  "netcode",
+  "udp",
+  "input_native",
+  "replication",
+  "prediction",
+  "interpolation",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.9"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "signal", "sync", "time"] }
+axum = "0.8"
+ureq = { version = "3", features = ["json"] }
+base64 = "0.22"
+hmac = "0.12"
+sha2 = "0.10"
+
+# Bevy is slow in debug builds; optimize dependencies but keep our own crates fast to compile.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

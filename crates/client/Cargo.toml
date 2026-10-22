@@ -1,0 +1,16 @@
+[package]
+name = "evoclash"
+description = "EvoClash game client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+evoclash-game = { workspace = true, features = ["client"] }
+bevy = { workspace = true, features = ["2d", "ui"] }
+lightyear = { workspace = true, features = ["client"] }
+serde.workspace = true
+serde_json.workspace = true
+rand.workspace = true
+ureq.workspace = true
+base64.workspace = true

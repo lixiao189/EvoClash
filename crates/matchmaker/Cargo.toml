@@ -1,0 +1,18 @@
+[package]
+name = "evoclash-matchmaker"
+description = "Stateless-friendly matchmaker: queues players, allocates match servers, issues netcode connect tokens"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+evoclash-game.workspace = true
+lightyear.workspace = true
+tokio.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+rand.workspace = true
+hmac.workspace = true
+sha2.workspace = true
