@@ -47,7 +47,19 @@ pub struct Player {
 }
 
 /// World position. Predicted for the local player, interpolated for everyone else.
-#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Reflect, Deref, DerefMut, Default)]
+#[derive(
+    Component,
+    Serialize,
+    Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Reflect,
+    Deref,
+    DerefMut,
+    Default,
+)]
 pub struct Pos(pub Vec2);
 
 impl Ease for Pos {
@@ -72,7 +84,9 @@ impl Diffable for Pos {
 }
 
 /// Facing direction, used for rendering remote players.
-#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Reflect, Deref, Default)]
+#[derive(
+    Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Reflect, Deref, Default,
+)]
 pub struct Aim(pub Vec2);
 
 impl Ease for Aim {
@@ -228,7 +242,9 @@ impl Plugin for ProtocolPlugin {
             .predict()
             .add_linear_interpolation()
             .add_correction();
-        app.component::<Aim>().replicate().add_linear_interpolation();
+        app.component::<Aim>()
+            .replicate()
+            .add_linear_interpolation();
         app.component::<Dash>().replicate().predict();
         app.component::<Vitals>().replicate();
         app.component::<Loadout>().replicate();

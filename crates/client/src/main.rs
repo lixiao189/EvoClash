@@ -47,7 +47,10 @@ fn parse_args() -> ClientArgs {
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
-        let mut value = |name: &str| it.next().unwrap_or_else(|| panic!("missing value for {name}"));
+        let mut value = |name: &str| {
+            it.next()
+                .unwrap_or_else(|| panic!("missing value for {name}"))
+        };
         match arg.as_str() {
             "--name" => args.name = value("--name"),
             "--matchmaker" => args.matchmaker = Some(value("--matchmaker")),
@@ -56,7 +59,9 @@ fn parse_args() -> ClientArgs {
             "--headless" => args.headless = true,
             "--autopilot" => args.autopilot = true,
             "--fake-latency" => {
-                args.fake_latency_ms = value("--fake-latency").parse().expect("invalid --fake-latency")
+                args.fake_latency_ms = value("--fake-latency")
+                    .parse()
+                    .expect("invalid --fake-latency")
             }
             "-h" | "--help" => {
                 println!(
@@ -69,7 +74,10 @@ fn parse_args() -> ClientArgs {
         }
     }
     if args.matchmaker.is_none() && args.server.is_none() {
-        args.server = Some(format!("127.0.0.1:{}", evoclash_game::net::DEFAULT_GAME_PORT));
+        args.server = Some(format!(
+            "127.0.0.1:{}",
+            evoclash_game::net::DEFAULT_GAME_PORT
+        ));
     }
     args
 }
@@ -87,7 +95,9 @@ fn main() {
     let mut app = App::new();
     if args.headless {
         app.add_plugins((
-            MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(1.0 / 60.0))),
+            MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
+                1.0 / 60.0,
+            ))),
             LogPlugin::default(),
             StatesPlugin,
         ));

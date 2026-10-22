@@ -6,6 +6,7 @@ members = ["crates/game", "crates/server", "crates/client", "crates/matchmaker"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+publish = false
 
 [workspace.dependencies]
 evoclash-game = { path = "crates/game" }
@@ -38,6 +39,11 @@ ureq = { version = "3", features = ["json"] }
 base64 = "0.22"
 hmac = "0.12"
 sha2 = "0.10"
+
+# Bevy systems routinely take many params and nested query types; these lints are noise there.
+[workspace.lints.clippy]
+type_complexity = "allow"
+too_many_arguments = "allow"
 
 # Bevy is slow in debug builds; optimize dependencies but keep our own crates fast to compile.
 [profile.dev]

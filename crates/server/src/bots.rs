@@ -2,8 +2,8 @@
 
 use bevy::prelude::*;
 use evoclash_game::map::ARENA_HALF;
-use evoclash_game::protocol::*;
 use evoclash_game::nav::{NavGrid, next_waypoint};
+use evoclash_game::protocol::*;
 use evoclash_game::sim::{Arena, DT, PLAYER_RADIUS};
 use rand::Rng;
 
@@ -15,7 +15,14 @@ use crate::gameplay::{CurrentInput, SimSet, spawn_combatant};
 const SIGHT: f32 = 820.0;
 const THINK_EVERY: u16 = 4;
 const NAMES: [&str; 8] = [
-    "拾荒者", "锈牙", "灰烬", "铁皮", "辐射鼠", "流浪者", "野狗", "老枪",
+    "拾荒者",
+    "锈牙",
+    "灰烬",
+    "铁皮",
+    "辐射鼠",
+    "流浪者",
+    "野狗",
+    "老枪",
 ];
 
 #[derive(Component)]
@@ -38,7 +45,10 @@ impl Plugin for BotsPlugin {
     fn build(&self, app: &mut App) {
         let grid = NavGrid::new(&app.world().resource::<Arena>().0, PLAYER_RADIUS + 6.0);
         app.insert_resource(Nav(grid));
-        app.add_systems(FixedUpdate, (balance_bots, think).chain().in_set(SimSet::Input));
+        app.add_systems(
+            FixedUpdate,
+            (balance_bots, think).chain().in_set(SimSet::Input),
+        );
     }
 }
 
@@ -82,11 +92,11 @@ fn balance_bots(
             think_in: 0,
             aim_error: rand::rng().random_range(-0.08..0.08),
         });
-    } else if bot_count > wanted {
-        if let Some((entity, player)) = bots.iter().next() {
-            info!("bot {} leaves to make room", player.name);
-            commands.entity(entity).despawn();
-        }
+    } else if bot_count > wanted
+        && let Some((entity, player)) = bots.iter().next()
+    {
+        info!("bot {} leaves to make room", player.name);
+        commands.entity(entity).despawn();
     }
 }
 
@@ -169,7 +179,8 @@ fn think(
             steer(&mut input, dir);
             input.fire = dist < range && rng.random_bool(0.85);
             input.dash = dist < 260.0 && rng.random_bool(0.04);
-            input.throw = loadout.emps > 0 && enemy_armor >= 50.0 && dist < 420.0 && rng.random_bool(0.1);
+            input.throw =
+                loadout.emps > 0 && enemy_armor >= 50.0 && dist < 420.0 && rng.random_bool(0.1);
         } else {
             // Scavenge: head for the closest upgrade in sight, otherwise roam.
             let upgrade = items
@@ -197,4 +208,3 @@ fn think(
         current.0 = input;
     }
 }
-

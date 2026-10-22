@@ -338,7 +338,7 @@ fn resolve_damage(
             vitals.emp_slow = 3 * TICKS_PER_SEC as u16;
             // Energy weapons short out too.
             if matches!(loadout.weapon, WeaponKind::Laser | WeaponKind::Railgun) {
-                loadout.ammo = loadout.ammo / 2;
+                loadout.ammo /= 2;
             }
         }
         let (hp_hit, armor_hit) = absorb(&mut vitals, dmg.amount, dmg.armor_mult);
@@ -372,17 +372,32 @@ fn resolve_damage(
                 kind: loadout.weapon,
                 ammo: loadout.ammo,
             };
-            spawn_pickup(&mut commands, item, drop_at + Vec2::new(-14.0, 0.0), Some(DROP_TTL_TICKS));
+            spawn_pickup(
+                &mut commands,
+                item,
+                drop_at + Vec2::new(-14.0, 0.0),
+                Some(DROP_TTL_TICKS),
+            );
         }
         if vitals.armor != ArmorKind::None && vitals.armor_points > 0.0 {
             let item = Item::Armor {
                 kind: vitals.armor,
                 points: vitals.armor_points,
             };
-            spawn_pickup(&mut commands, item, drop_at + Vec2::new(14.0, 0.0), Some(DROP_TTL_TICKS));
+            spawn_pickup(
+                &mut commands,
+                item,
+                drop_at + Vec2::new(14.0, 0.0),
+                Some(DROP_TTL_TICKS),
+            );
         }
         if loadout.emps > 0 {
-            spawn_pickup(&mut commands, Item::Emp, drop_at + Vec2::new(0.0, 14.0), Some(DROP_TTL_TICKS));
+            spawn_pickup(
+                &mut commands,
+                Item::Emp,
+                drop_at + Vec2::new(0.0, 14.0),
+                Some(DROP_TTL_TICKS),
+            );
         }
         *loadout = Loadout::default();
         vitals.armor = ArmorKind::None;
@@ -395,7 +410,10 @@ fn resolve_damage(
                 killer_stats.streak += 1;
                 killer_stats.score += if had_bounty { 3 } else { 1 };
                 if killer_stats.streak == sim::BOUNTY_STREAK {
-                    outbox.announce(format!("{} 连杀 {} 人，已被悬赏！", killer_player.name, killer_stats.streak));
+                    outbox.announce(format!(
+                        "{} 连杀 {} 人，已被悬赏！",
+                        killer_player.name, killer_stats.streak
+                    ));
                 }
                 killer_player.name.clone()
             }
@@ -473,7 +491,11 @@ fn loot_spawner(
     pickups: Query<(), With<Pickup>>,
 ) {
     if loot.spots.len() != arena.loot_spots.len() {
-        loot.spots = arena.loot_spots.iter().map(|_| SpotState::default()).collect();
+        loot.spots = arena
+            .loot_spots
+            .iter()
+            .map(|_| SpotState::default())
+            .collect();
     }
     let mut rng = rand::rng();
     for (state, spot) in loot.spots.iter_mut().zip(&arena.loot_spots) {
@@ -529,7 +551,12 @@ fn match_flow(
                 let mut rng = rand::rng();
                 for offset in [Vec2::new(-45.0, 0.0), Vec2::new(45.0, 0.0)] {
                     let item = roll_loot(4, &mut rng);
-                    spawn_pickup(&mut commands, item, VAULT_CENTER + offset, Some(DROP_TTL_TICKS * 2));
+                    spawn_pickup(
+                        &mut commands,
+                        item,
+                        VAULT_CENTER + offset,
+                        Some(DROP_TTL_TICKS * 2),
+                    );
                 }
                 outbox.announce("地堡开启：尖端科技已出土！");
                 outbox.fast.push(GameEvent::Boom {

@@ -1,5 +1,7 @@
 # EvoClash
 
+[![CI](https://github.com/lixiao189/EvoClash/actions/workflows/ci.yml/badge.svg)](https://github.com/lixiao189/EvoClash/actions/workflows/ci.yml)
+
 末日废土背景的快节奏联机对战（俯视角 2D）。每个人都拿着一根木棍出生，搜刮前文明的遗物一路升级到动力装甲和轨道炮；死亡后装备全部掉落，回到石器时代。
 
 技术栈：Rust · Bevy 0.20 · lightyear 0.31（UDP + netcode.io）· axum（匹配服务）
@@ -108,3 +110,20 @@ cargo test --workspace
 ```bash
 evoclash --server 127.0.0.1:7000 --headless --autopilot
 ```
+
+## CI / CD
+
+- **CI**（`.github/workflows/ci.yml`）：每次 push 到 `main` 和每个 PR 运行 rustfmt、clippy（`-D warnings`）、三平台 `cargo test`、cargo-deny（漏洞 / 许可证 / 来源）。分支保护只需要勾选 `CI success` 这一项。
+- **发布**（`.github/workflows/release.yml`）：先把 `Cargo.toml` 的 `workspace.package.version` 改成新版本并合入，然后推送同名 tag：
+
+  ```bash
+  git tag v0.2.0 && git push origin v0.2.0
+  ```
+
+  会构建 Linux x86_64/arm64、macOS arm64、Windows x86_64 的二进制，附 `SHA256SUMS` 和构建来源证明发布到 GitHub Releases，并把服务端镜像推到 `ghcr.io/lixiao189/evoclash-server`（amd64 + arm64）。带 `-` 的 tag（如 `v0.2.0-rc.1`）标记为预发布，不更新 `latest`。
+
+  ```bash
+  docker run --network host ghcr.io/lixiao189/evoclash-server --listen 0.0.0.0:8080 --public-host <公网 IP>
+  ```
+
+- **依赖更新**：Dependabot 每周提 Cargo 和 Actions 的升级 PR；Bevy / lightyear 单独提，需要手动迁移。

@@ -44,7 +44,13 @@ fn error(status: StatusCode, message: impl Into<String>) -> Response {
     (status, Json(json!({ "error": message.into() }))).into_response()
 }
 
-fn issue(state: &AppState, match_id: String, addr: SocketAddr, client_id: u64, name: &str) -> Response {
+fn issue(
+    state: &AppState,
+    match_id: String,
+    addr: SocketAddr,
+    client_id: u64,
+    name: &str,
+) -> Response {
     match tokens::connect_token(&state.key, addr, client_id, name) {
         Ok(connect_token) => Json(JoinResponse {
             reconnect_key: tokens::reconnect_key(&state.key, &match_id, client_id),
@@ -59,7 +65,12 @@ fn issue(state: &AppState, match_id: String, addr: SocketAddr, client_id: u64, n
 }
 
 async fn join(State(state): State<Shared>, Json(request): Json<JoinRequest>) -> Response {
-    let name: String = request.name.chars().filter(|c| !c.is_control()).take(16).collect();
+    let name: String = request
+        .name
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(16)
+        .collect();
     // Ids below the bot range, never zero.
     let client_id = rand::random_range(1..u64::MAX - (1 << 32));
 
@@ -71,7 +82,9 @@ async fn join(State(state): State<Shared>, Json(request): Json<JoinRequest>) -> 
                 Some(fleet) => fleet.launch(&registry.used_addrs()).map(|(id, addr)| {
                     println!("launched match {id} at {addr}");
                     let max = fleet.config.max_players;
-                    registry.matches.insert(id.clone(), MatchInfo::new(id.clone(), addr, max));
+                    registry
+                        .matches
+                        .insert(id.clone(), MatchInfo::new(id.clone(), addr, max));
                     registry.reserve_in(&id);
                     (id, addr)
                 }),
@@ -89,7 +102,12 @@ async fn join(State(state): State<Shared>, Json(request): Json<JoinRequest>) -> 
 }
 
 async fn rejoin(State(state): State<Shared>, Json(request): Json<RejoinRequest>) -> Response {
-    if !tokens::verify_reconnect_key(&state.key, &request.match_id, request.client_id, &request.reconnect_key) {
+    if !tokens::verify_reconnect_key(
+        &state.key,
+        &request.match_id,
+        request.client_id,
+        &request.reconnect_key,
+    ) {
         return error(StatusCode::FORBIDDEN, "bad reconnect key");
     }
     let addr = {
@@ -111,7 +129,11 @@ async fn rejoin(State(state): State<Shared>, Json(request): Json<RejoinRequest>)
 }
 
 async fn heartbeat(State(state): State<Shared>, Json(beat): Json<Heartbeat>) -> Response {
-    let drain = state.registry.lock().expect("registry lock").heartbeat(&beat);
+    let drain = state
+        .registry
+        .lock()
+        .expect("registry lock")
+        .heartbeat(&beat);
     Json(json!({ "drain": drain })).into_response()
 }
 
@@ -147,7 +169,12 @@ async fn janitor(state: Shared) {
         if let Some(fleet) = &state.fleet {
             for (id, code) in fleet.reap() {
                 println!("match {id} exited ({code:?})");
-                state.registry.lock().expect("registry lock").matches.remove(&id);
+                state
+                    .registry
+                    .lock()
+                    .expect("registry lock")
+                    .matches
+                    .remove(&id);
             }
         }
     }
@@ -179,10 +206,17 @@ fn parse_args() -> Args {
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
-        let mut value = |name: &str| it.next().unwrap_or_else(|| panic!("missing value for {name}"));
+        let mut value = |name: &str| {
+            it.next()
+                .unwrap_or_else(|| panic!("missing value for {name}"))
+        };
         match arg.as_str() {
             "--listen" => args.listen = value("--listen").parse().expect("invalid --listen"),
-            "--public-host" => args.public_host = value("--public-host").parse().expect("invalid --public-host"),
+            "--public-host" => {
+                args.public_host = value("--public-host")
+                    .parse()
+                    .expect("invalid --public-host")
+            }
             "--ports" => {
                 let v = value("--ports");
                 let (a, b) = v.split_once('-').expect("--ports like 7000-7099");
@@ -214,7 +248,10 @@ async fn main() {
     let args = parse_args();
     let (key, dev_key) = net::private_key_from_env();
     if dev_key {
-        eprintln!("warning: {} not set, using the insecure development key", net::KEY_ENV);
+        eprintln!(
+            "warning: {} not set, using the insecure development key",
+            net::KEY_ENV
+        );
     }
     let fleet = args.launch.then(|| {
         let server_bin = args.server_bin.clone().unwrap_or_else(|| {

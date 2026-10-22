@@ -131,7 +131,10 @@ fn fire_weapons(
                     emp: false,
                 });
             }
-            outbox.fast.push(GameEvent::Melee { pos: pos.0, dir: aim });
+            outbox.fast.push(GameEvent::Melee {
+                pos: pos.0,
+                dir: aim,
+            });
             continue;
         }
 
@@ -334,12 +337,11 @@ fn take(item: Item, vitals: &mut Vitals, loadout: &mut Loadout) -> Option<Item> 
                 loadout.ammo = (loadout.ammo + ammo).min(kind.stats().max_ammo);
                 return None;
             }
-            let old = (loadout.weapon != WeaponKind::Stick && loadout.ammo > 0).then_some(
-                Item::Weapon {
+            let old =
+                (loadout.weapon != WeaponKind::Stick && loadout.ammo > 0).then_some(Item::Weapon {
                     kind: loadout.weapon,
                     ammo: loadout.ammo,
-                },
-            );
+                });
             loadout.weapon = kind;
             loadout.ammo = ammo;
             old
@@ -368,7 +370,13 @@ fn take(item: Item, vitals: &mut Vitals, loadout: &mut Loadout) -> Option<Item> 
 
 fn pickups(
     mut commands: Commands,
-    mut players: Query<(&Pos, &CurrentInput, &mut Vitals, &mut Loadout, &mut Cooldowns)>,
+    mut players: Query<(
+        &Pos,
+        &CurrentInput,
+        &mut Vitals,
+        &mut Loadout,
+        &mut Cooldowns,
+    )>,
     items: Query<(Entity, &Pos, &Pickup)>,
 ) {
     let mut taken = HashSet::new();
@@ -394,7 +402,12 @@ fn pickups(
             taken.insert(entity);
             commands.entity(entity).despawn();
             if let Some(dropped) = take(item, &mut vitals, &mut loadout) {
-                spawn_pickup(&mut commands, dropped, pos.0 + Vec2::new(0.0, -18.0), Some(30 * 64));
+                spawn_pickup(
+                    &mut commands,
+                    dropped,
+                    pos.0 + Vec2::new(0.0, -18.0),
+                    Some(30 * 64),
+                );
             }
             if forced {
                 // One deliberate swap per press.

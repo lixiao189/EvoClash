@@ -17,17 +17,15 @@ pub const DASH_COOLDOWN: u16 = 70;
 pub const EMP_SLOW_MULT: f32 = 0.55;
 pub const BOUNTY_STREAK: u32 = 3;
 
-#[derive(Resource, Deref)]
+#[derive(Resource, Deref, Default)]
 pub struct Arena(pub ArenaMap);
 
-impl Default for Arena {
-    fn default() -> Self {
-        Self(ArenaMap::new())
-    }
-}
-
 pub fn speed_mult(vitals: &Vitals) -> f32 {
-    let emp = if vitals.emp_slow > 0 { EMP_SLOW_MULT } else { 1.0 };
+    let emp = if vitals.emp_slow > 0 {
+        EMP_SLOW_MULT
+    } else {
+        1.0
+    };
     vitals.armor.speed_mult() * emp
 }
 

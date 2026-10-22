@@ -84,8 +84,11 @@ mod tests {
 
     #[test]
     fn tokens_round_trip() {
-        let token = connect_token(&[1u8; 32], "127.0.0.1:7000".parse().unwrap(), 5, "Alice").unwrap();
-        let bytes = base64::engine::general_purpose::STANDARD.decode(token).unwrap();
+        let token =
+            connect_token(&[1u8; 32], "127.0.0.1:7000".parse().unwrap(), 5, "Alice").unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(token)
+            .unwrap();
         assert!(ConnectToken::try_from_bytes(&bytes).is_ok());
     }
 }

@@ -68,7 +68,10 @@ impl Session {
                 .body_mut()
                 .read_json()
                 .map_err(|e| format!("matchmaker reply: {e}"))?;
-            info!("matched into {} at {}", response.match_id, response.server_addr);
+            info!(
+                "matched into {} at {}",
+                response.match_id, response.server_addr
+            );
             return Self::from_response(matchmaker.clone(), response);
         }
         let server = args.server.as_deref().unwrap_or("127.0.0.1:7000");
@@ -167,7 +170,11 @@ impl Plugin for SessionPlugin {
     }
 }
 
-fn spawn_client(commands: &mut Commands, session: &Session, args: &ClientArgs) -> Result<Entity, String> {
+fn spawn_client(
+    commands: &mut Commands,
+    session: &Session,
+    args: &ClientArgs,
+) -> Result<Entity, String> {
     let conditioner = (args.fake_latency_ms > 0).then(|| {
         RecvLinkConditioner::new(LinkConditionerConfig {
             incoming_latency: Duration::from_millis(args.fake_latency_ms),
@@ -208,7 +215,10 @@ fn connect(
 ) {
     match spawn_client(&mut commands, &session, &args) {
         Ok(entity) => {
-            info!("connecting to {} as client {}", session.server_addr, session.client_id);
+            info!(
+                "connecting to {} as client {}",
+                session.server_addr, session.client_id
+            );
             link.entity = Some(entity);
         }
         Err(e) => error!("cannot connect: {e}"),
@@ -223,7 +233,15 @@ fn watch_connection(
     mut session: ResMut<Session>,
     args: Res<ClientArgs>,
     clients: Query<(Has<Connected>, Has<Disconnected>), With<Client>>,
-    replicated: Query<Entity, Or<(With<Player>, With<Pickup>, With<Projectile>, With<MatchState>)>>,
+    replicated: Query<
+        Entity,
+        Or<(
+            With<Player>,
+            With<Pickup>,
+            With<Projectile>,
+            With<MatchState>,
+        )>,
+    >,
     mut exit: MessageWriter<AppExit>,
 ) {
     // No live client entity (a previous retry failed half-way) counts as disconnected.

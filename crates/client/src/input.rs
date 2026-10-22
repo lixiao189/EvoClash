@@ -75,8 +75,12 @@ fn buffer_input(
         input.move_y = axis(&keys, [KeyS, ArrowDown], [KeyW, ArrowUp]);
         input.dash = keys.any_pressed([Space, ShiftLeft]);
         input.interact = keys.any_pressed([KeyE, KeyF]);
-        input.throw = keys.pressed(KeyQ) || mouse.as_ref().is_some_and(|m| m.pressed(MouseButton::Right));
-        input.fire = keys.pressed(KeyJ) || mouse.as_ref().is_some_and(|m| m.pressed(MouseButton::Left));
+        input.throw = keys.pressed(KeyQ)
+            || mouse
+                .as_ref()
+                .is_some_and(|m| m.pressed(MouseButton::Right));
+        input.fire =
+            keys.pressed(KeyJ) || mouse.as_ref().is_some_and(|m| m.pressed(MouseButton::Left));
         input.aim = cursor
             .0
             .map(|c| (c - pos.0).normalize_or(Vec2::X))

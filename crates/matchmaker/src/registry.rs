@@ -89,7 +89,10 @@ impl Registry {
         let best = self
             .matches
             .values_mut()
-            .filter_map(|m| m.joinable(now).then(|| (m.players + m.reservations.len() as u32, m)))
+            .filter_map(|m| {
+                m.joinable(now)
+                    .then(|| (m.players + m.reservations.len() as u32, m))
+            })
             .max_by_key(|(occupancy, _)| *occupancy)
             .map(|(_, m)| m)?;
         best.reservations.push(now);
@@ -105,11 +108,17 @@ impl Registry {
     /// Record a heartbeat. Returns whether the server should drain.
     pub fn heartbeat(&mut self, beat: &Heartbeat) -> bool {
         let now = Instant::now();
-        let entry = self.matches.entry(beat.match_id.clone()).or_insert_with(|| {
-            // A server we didn't launch (or launched before a restart): adopt it.
-            let addr = beat.public_addr.parse().unwrap_or(SocketAddr::from(([127, 0, 0, 1], 0)));
-            MatchInfo::new(beat.match_id.clone(), addr, beat.max_players)
-        });
+        let entry = self
+            .matches
+            .entry(beat.match_id.clone())
+            .or_insert_with(|| {
+                // A server we didn't launch (or launched before a restart): adopt it.
+                let addr = beat
+                    .public_addr
+                    .parse()
+                    .unwrap_or(SocketAddr::from(([127, 0, 0, 1], 0)));
+                MatchInfo::new(beat.match_id.clone(), addr, beat.max_players)
+            });
         // Players that show up in the heartbeat no longer need their reservation.
         let arrived = beat.players.saturating_sub(entry.players) as usize;
         let drop = arrived.min(entry.reservations.len());
@@ -207,6 +216,9 @@ mod tests {
         reg.heartbeat(&beat("a", 0));
         reg.matches.get_mut("a").unwrap().draining = true;
         assert!(reg.reserve_seat().is_none());
-        assert!(reg.heartbeat(&beat("a", 0)), "heartbeat reply asks to drain");
+        assert!(
+            reg.heartbeat(&beat("a", 0)),
+            "heartbeat reply asks to drain"
+        );
     }
 }

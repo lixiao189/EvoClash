@@ -110,10 +110,10 @@ impl Fleet {
 
     /// Kill a server we launched that stopped responding (hung, not crashed).
     pub fn kill(&self, id: &str) {
-        if let Ok(mut children) = self.children.lock() {
-            if let Some(mut child) = children.remove(id) {
-                let _ = child.start_kill();
-            }
+        if let Ok(mut children) = self.children.lock()
+            && let Some(mut child) = children.remove(id)
+        {
+            let _ = child.start_kill();
         }
     }
 }

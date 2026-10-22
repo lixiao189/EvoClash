@@ -28,13 +28,7 @@ enum HudText {
     Center,
 }
 
-fn text_node(
-    font: &UiFont,
-    size: f32,
-    kind: HudText,
-    node: Node,
-    justify: Justify,
-) -> impl Bundle {
+fn text_node(font: &UiFont, size: f32, kind: HudText, node: Node, justify: Justify) -> impl Bundle {
     (
         kind,
         Text::new(""),
@@ -55,9 +49,27 @@ fn spawn_hud(mut commands: Commands, font: Res<UiFont>) {
         right: right.map_or(Val::Auto, Val::Px),
         ..default()
     };
-    commands.spawn(text_node(&font, 18.0, HudText::Status, at(None, Some(16.0), Some(16.0), None), Justify::Left));
-    commands.spawn(text_node(&font, 16.0, HudText::Scoreboard, at(Some(16.0), None, None, Some(16.0)), Justify::Right));
-    commands.spawn(text_node(&font, 15.0, HudText::Feed, at(None, Some(16.0), None, Some(16.0)), Justify::Right));
+    commands.spawn(text_node(
+        &font,
+        18.0,
+        HudText::Status,
+        at(None, Some(16.0), Some(16.0), None),
+        Justify::Left,
+    ));
+    commands.spawn(text_node(
+        &font,
+        16.0,
+        HudText::Scoreboard,
+        at(Some(16.0), None, None, Some(16.0)),
+        Justify::Right,
+    ));
+    commands.spawn(text_node(
+        &font,
+        15.0,
+        HudText::Feed,
+        at(None, Some(16.0), None, Some(16.0)),
+        Justify::Right,
+    ));
     // Centered rows span the full width.
     let centered = |top: f32| Node {
         position_type: PositionType::Absolute,
@@ -66,16 +78,35 @@ fn spawn_hud(mut commands: Commands, font: Res<UiFont>) {
         justify_content: JustifyContent::Center,
         ..default()
     };
-    commands.spawn(centered(12.0)).with_child(text_node(&font, 20.0, HudText::Clock, Node::default(), Justify::Center));
-    commands.spawn(centered(52.0)).with_child(text_node(&font, 26.0, HudText::Banner, Node::default(), Justify::Center));
-    commands.spawn(Node {
-        position_type: PositionType::Absolute,
-        top: Val::Percent(40.0),
-        width: Val::Percent(100.0),
-        justify_content: JustifyContent::Center,
-        ..default()
-    })
-    .with_child(text_node(&font, 34.0, HudText::Center, Node::default(), Justify::Center));
+    commands.spawn(centered(12.0)).with_child(text_node(
+        &font,
+        20.0,
+        HudText::Clock,
+        Node::default(),
+        Justify::Center,
+    ));
+    commands.spawn(centered(52.0)).with_child(text_node(
+        &font,
+        26.0,
+        HudText::Banner,
+        Node::default(),
+        Justify::Center,
+    ));
+    commands
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            top: Val::Percent(40.0),
+            width: Val::Percent(100.0),
+            justify_content: JustifyContent::Center,
+            ..default()
+        })
+        .with_child(text_node(
+            &font,
+            34.0,
+            HudText::Center,
+            Node::default(),
+            Justify::Center,
+        ));
 }
 
 fn fmt_time(ticks: u32) -> String {
@@ -111,7 +142,10 @@ fn update_hud(
                     let dash = if dash.cooldown == 0 {
                         "就绪".to_string()
                     } else {
-                        format!("{:.0}%", 100.0 * (1.0 - dash.cooldown as f32 / DASH_COOLDOWN as f32))
+                        format!(
+                            "{:.0}%",
+                            100.0 * (1.0 - dash.cooldown as f32 / DASH_COOLDOWN as f32)
+                        )
                     };
                     format!(
                         "生命 {:.0}/{MAX_HP:.0}   {} {:.0}\n武器 [T{}] {}  弹药 {ammo}\n电磁脉冲 ×{}   冲刺 {dash}   连杀 {}\n\nWASD 移动  鼠标 瞄准/射击  空格 冲刺  E 拾取  Q/右键 电磁脉冲",
@@ -128,7 +162,9 @@ fn update_hud(
             },
             HudText::Clock => match state {
                 Some(s) => match s.phase {
-                    Phase::Warmup => format!("热身 {}  (至少 2 名玩家开局)", fmt_time(s.ticks_left)),
+                    Phase::Warmup => {
+                        format!("热身 {}  (至少 2 名玩家开局)", fmt_time(s.ticks_left))
+                    }
                     Phase::Playing => format!(
                         "剩余 {}    地堡开启 {}",
                         fmt_time(s.ticks_left),
@@ -173,7 +209,10 @@ fn update_hud(
                     format!("{} 获胜", s.winner.as_deref().unwrap_or("无人"))
                 } else if let Some((_, vitals, ..)) = me.filter(|(_, v, ..)| !v.alive) {
                     color.0 = Color::srgb(1.0, 0.4, 0.35);
-                    format!("你倒下了 — {:.1} 秒后带着木棍重生", vitals.respawn_in as f32 / 64.0)
+                    format!(
+                        "你倒下了 — {:.1} 秒后带着木棍重生",
+                        vitals.respawn_in as f32 / 64.0
+                    )
                 } else {
                     String::new()
                 }
