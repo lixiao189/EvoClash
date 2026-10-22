@@ -4,6 +4,10 @@ description = "Shared protocol, map and deterministic simulation for EvoClash"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
 
 [features]
 client = ["lightyear/client"]

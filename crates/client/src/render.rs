@@ -169,7 +169,16 @@ pub fn visual_pos(pos: &Pos, samples: Option<&TickSamples>, fixed: &Time<Fixed>)
 
 fn sync_players(
     fixed: Res<Time<Fixed>>,
-    mut players: Query<(&Pos, Option<&TickSamples>, &Vitals, &mut Transform, &mut Visibility), With<Player>>,
+    mut players: Query<
+        (
+            &Pos,
+            Option<&TickSamples>,
+            &Vitals,
+            &mut Transform,
+            &mut Visibility,
+        ),
+        With<Player>,
+    >,
 ) {
     for (pos, samples, vitals, mut transform, mut visibility) in &mut players {
         let p = visual_pos(pos, samples, &fixed);
@@ -272,7 +281,10 @@ fn draw_overlays(
         }
         let p = visual_pos(pos, samples, &fixed);
         let aim = if local {
-            cursor.0.map(|c| (c - p).normalize_or(aim.0)).unwrap_or(aim.0)
+            cursor
+                .0
+                .map(|c| (c - p).normalize_or(aim.0))
+                .unwrap_or(aim.0)
         } else {
             aim.0
         };
@@ -294,27 +306,43 @@ fn draw_overlays(
         }
         if stats.has_bounty() {
             let pulse = 0.6 + 0.4 * (t * 6.0).sin();
-            gizmos.circle_2d(p, PLAYER_RADIUS + 14.0, Color::srgb(1.0, 0.8, 0.1).with_alpha(pulse));
+            gizmos.circle_2d(
+                p,
+                PLAYER_RADIUS + 14.0,
+                Color::srgb(1.0, 0.8, 0.1).with_alpha(pulse),
+            );
         }
 
         // Health and armor bars.
         let bar_w = 44.0;
         let left = p + Vec2::new(-bar_w / 2.0, PLAYER_RADIUS + 10.0);
-        gizmos.line_2d(left, left + Vec2::X * bar_w, Color::srgba(0.0, 0.0, 0.0, 0.6));
+        gizmos.line_2d(
+            left,
+            left + Vec2::X * bar_w,
+            Color::srgba(0.0, 0.0, 0.0, 0.6),
+        );
         let hp = (vitals.hp / MAX_HP).clamp(0.0, 1.0);
         let hp_color = Color::srgb(1.0 - hp, 0.25 + 0.7 * hp, 0.25);
         gizmos.line_2d(left, left + Vec2::X * bar_w * hp, hp_color);
         if vitals.armor_points > 0.0 {
             let ap = (vitals.armor_points / vitals.armor.max_points().max(1.0)).clamp(0.0, 1.0);
             let left = left + Vec2::Y * 4.0;
-            gizmos.line_2d(left, left + Vec2::X * bar_w * ap, tier_color(vitals.armor.tier()));
+            gizmos.line_2d(
+                left,
+                left + Vec2::X * bar_w * ap,
+                tier_color(vitals.armor.tier()),
+            );
         }
 
         if local {
             // Show what's in reach.
             for pickup in &pickups {
                 if pickup.0.distance(p) < 46.0 {
-                    gizmos.circle_2d(pickup.0, 20.0, Color::WHITE.with_alpha(0.5 + 0.5 * (t * 8.0).sin()));
+                    gizmos.circle_2d(
+                        pickup.0,
+                        20.0,
+                        Color::WHITE.with_alpha(0.5 + 0.5 * (t * 8.0).sin()),
+                    );
                 }
             }
         }

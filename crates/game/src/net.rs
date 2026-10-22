@@ -31,7 +31,10 @@ pub const KEY_ENV: &str = "EVOCLASH_NETCODE_KEY";
 /// which is only acceptable for local development.
 pub fn private_key_from_env() -> ([u8; 32], bool) {
     match std::env::var(KEY_ENV) {
-        Ok(hex) => (parse_hex_key(&hex).expect("EVOCLASH_NETCODE_KEY must be 64 hex chars"), false),
+        Ok(hex) => (
+            parse_hex_key(&hex).expect("EVOCLASH_NETCODE_KEY must be 64 hex chars"),
+            false,
+        ),
         Err(_) => ([0x45; 32], true),
     }
 }

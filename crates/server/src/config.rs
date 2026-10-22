@@ -38,15 +38,19 @@ impl ServerConfig {
             match arg.as_str() {
                 "--port" => port = value("--port").parse().expect("invalid --port"),
                 "--public-addr" => {
-                    public_addr = Some(value("--public-addr").parse().expect("invalid --public-addr"))
+                    public_addr = Some(
+                        value("--public-addr")
+                            .parse()
+                            .expect("invalid --public-addr"),
+                    )
                 }
                 "--match-id" => match_id = value("--match-id"),
                 "--max-players" => {
-                    max_players = value("--max-players").parse().expect("invalid --max-players")
+                    max_players = value("--max-players")
+                        .parse()
+                        .expect("invalid --max-players")
                 }
-                "--bots" => {
-                    min_combatants = value("--bots").parse().expect("invalid --bots")
-                }
+                "--bots" => min_combatants = value("--bots").parse().expect("invalid --bots"),
                 "--matchmaker" => matchmaker = Some(value("--matchmaker")),
                 "--single-match" => single_match = true,
                 "-h" | "--help" => {
@@ -63,8 +67,7 @@ impl ServerConfig {
 
         Self {
             port,
-            public_addr: public_addr
-                .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], port))),
+            public_addr: public_addr.unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], port))),
             match_id,
             max_players,
             min_combatants,

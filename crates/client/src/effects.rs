@@ -68,8 +68,15 @@ struct Fx {
 }
 
 enum FxKind {
-    Swing { pos: Vec2, dir: Vec2 },
-    Ring { pos: Vec2, radius: f32, color: Color },
+    Swing {
+        pos: Vec2,
+        dir: Vec2,
+    },
+    Ring {
+        pos: Vec2,
+        radius: f32,
+        color: Color,
+    },
 }
 
 #[derive(Component)]
@@ -98,7 +105,10 @@ fn local_fire(
     let aim = input.aim.normalize_or(Vec2::X);
     if stats.melee {
         commands.spawn(Fx {
-            kind: FxKind::Swing { pos: pos.0, dir: aim },
+            kind: FxKind::Swing {
+                pos: pos.0,
+                dir: aim,
+            },
             age: 0.0,
             life: 0.15,
         });
@@ -144,7 +154,8 @@ fn step_tracers(
             && (arena.segment_hits_wall(from, to).is_some()
                 || others.iter().any(|(p, v)| {
                     v.alive
-                        && evoclash_game::map::segment_circle(from, to, p.0, PLAYER_RADIUS).is_some()
+                        && evoclash_game::map::segment_circle(from, to, p.0, PLAYER_RADIUS)
+                            .is_some()
                 }));
         if blocked || tracer.ttl <= 0.0 {
             commands.entity(entity).despawn();
@@ -249,10 +260,10 @@ fn shake_on_damage(
         return;
     };
     let total = vitals.hp + vitals.armor_points;
-    if let Some(prev) = *last {
-        if total < prev - 0.5 {
-            shake.0 = shake.0.max(((prev - total) / 25.0).clamp(0.3, 2.0));
-        }
+    if let Some(prev) = *last
+        && total < prev - 0.5
+    {
+        shake.0 = shake.0.max(((prev - total) / 25.0).clamp(0.3, 2.0));
     }
     *last = Some(total);
 }
@@ -301,7 +312,11 @@ fn draw_effects(
                 let base = dir.to_angle();
                 let sweep = -1.0 + 2.0 * t;
                 let a = Vec2::from_angle(base + sweep * 1.0);
-                gizmos.line_2d(pos + a * PLAYER_RADIUS, pos + a * reach, Color::srgba(1.0, 0.9, 0.7, 1.0 - t));
+                gizmos.line_2d(
+                    pos + a * PLAYER_RADIUS,
+                    pos + a * reach,
+                    Color::srgba(1.0, 0.9, 0.7, 1.0 - t),
+                );
             }
             FxKind::Ring { pos, radius, color } => {
                 gizmos.circle_2d(pos, radius * (0.3 + 0.7 * t), color.with_alpha(1.0 - t));

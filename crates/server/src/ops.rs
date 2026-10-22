@@ -112,7 +112,7 @@ fn spawn_heartbeat_thread(base_url: String, ops: OpsState) {
                         Err(e) => {
                             failures += 1;
                             // The match keeps running without the matchmaker; just log sparingly.
-                            if failures == 1 || failures % 30 == 0 {
+                            if failures == 1 || failures.is_multiple_of(30) {
                                 warn!("heartbeat to {url} failed ({failures}x): {e}");
                             }
                         }

@@ -44,7 +44,10 @@ impl Plugin for ConnectionsPlugin {
 fn start_server(mut commands: Commands, config: Res<ServerConfig>) {
     let (private_key, dev_key) = net::private_key_from_env();
     if dev_key {
-        warn!("{} not set: using the insecure development key", net::KEY_ENV);
+        warn!(
+            "{} not set: using the insecure development key",
+            net::KEY_ENV
+        );
     }
     let bind = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), config.port);
     let netcode = NetcodeConfig {
