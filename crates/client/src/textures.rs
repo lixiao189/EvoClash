@@ -62,6 +62,8 @@ pub struct Textures {
     pub blast: Handle<Image>,
     /// Aiming reticle with four ticks.
     pub reticle: Handle<Image>,
+    /// Rounded, lightly shaded bar for health gauges; tinted at draw time.
+    pub bar: Handle<Image>,
 }
 
 #[derive(Clone)]
@@ -230,6 +232,7 @@ pub fn build(images: &mut Assets<Image>) -> Textures {
         shock: add(paint_shock(), false),
         blast: add(paint_blast(), false),
         reticle: add(paint_reticle(), true),
+        bar: add(paint_bar(), true),
     }
 }
 
@@ -798,6 +801,19 @@ fn paint_blast() -> Canvas {
         // Darker, sootier toward the rim.
         let k = 1.0 - 0.4 * d - 0.12 * (fine + 0.5);
         [k, k, k, a]
+    })
+}
+
+fn paint_bar() -> Canvas {
+    let (w, h) = (16u32, 6u32);
+    Canvas::filled(w, h, |x, y| {
+        let corner = (x == 0 || x == w as i32 - 1) && (y == 0 || y == h as i32 - 1);
+        if corner {
+            return [0.0; 4];
+        }
+        // Lit from above, darker along the bottom edge.
+        let k = [0.8, 1.0, 1.0, 0.9, 0.78, 0.6][y as usize];
+        [k, k, k, 1.0]
     })
 }
 
@@ -2125,6 +2141,7 @@ mod tests {
             paint_pod(),
             paint_medkit(),
             paint_reticle(),
+            paint_bar(),
         ] {
             assert!(canvas.px.iter().any(|p| p[3] > 0.9));
         }
