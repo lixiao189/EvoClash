@@ -97,11 +97,23 @@ jobs:
           command: check
           arguments: --all-features
 
+  helm:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Helm is preinstalled on GitHub's Ubuntu runners.
+      - run: helm lint --strict deploy/helm/evoclash
+      - run: helm template evoclash deploy/helm/evoclash > /dev/null
+
   # Single required status for branch protection, so the matrix can change without editing settings.
   ci-success:
     name: CI success
     if: always()
-    needs: [fmt, clippy, test, deny]
+    needs: [fmt, clippy, test, deny, helm]
     runs-on: ubuntu-latest
     steps:
       - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')

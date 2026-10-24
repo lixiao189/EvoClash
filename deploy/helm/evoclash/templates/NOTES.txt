@@ -1,0 +1,17 @@
+EvoClash {{ .Chart.AppVersion }} is deploying to namespace {{ .Release.Namespace }}.
+
+Agones must be installed and allowed to manage GameServers here, e.g.
+  helm upgrade agones agones/agones -n agones-system --reuse-values \
+    --set "gameservers.namespaces={ {{- .Release.Namespace -}} }"
+
+Watch the match servers come up (Ready = warm spare, Allocated = match in progress):
+  kubectl -n {{ .Release.Namespace }} get fleet,gameservers
+
+{{- if eq .Values.matchmaker.service.type "LoadBalancer" }}
+
+Connect once the load balancer has an address:
+  MM=$(kubectl -n {{ .Release.Namespace }} get svc {{ include "evoclash.matchmaker" . }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+  evoclash --matchmaker http://$MM{{ if ne (int .Values.matchmaker.service.port) 80 }}:{{ .Values.matchmaker.service.port }}{{ end }}
+{{- end }}
+
+Match servers need the node UDP port range Agones allocates from (default 7000-8000) open to players.

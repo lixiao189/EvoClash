@@ -13,7 +13,7 @@ Never commit or push directly to `main`. For every change:
 3. Open a PR against `main`.
 4. Enable auto-fix and auto-merge on the PR.
 
-Branch protection requires the single `CI success` check (it aggregates fmt, clippy, the 3-OS test matrix and cargo-deny).
+Branch protection requires the single `CI success` check (it aggregates fmt, clippy, the 3-OS test matrix, cargo-deny and helm lint).
 
 ## Commands
 
@@ -24,6 +24,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings   # CI: warnings 
 cargo test --workspace --locked                      # CI: tests
 cargo test -p evoclash-game <test_name>              # one test in one crate (crates: evoclash-game, evoclash-server, evoclash, evoclash-matchmaker)
 cargo deny check --all-features                      # CI: advisories / licenses / sources
+helm lint --strict deploy/helm/evoclash               # CI: Helm chart
 ```
 
 Run locally (direct connect, dev netcode key):
@@ -53,7 +54,7 @@ Key cross-cutting points:
 - **Replication.** State replicates every 2 ticks (`REPLICATION_INTERVAL`). New replicated components must be registered in `ProtocolPlugin`. Bump `PROTOCOL_ID` in `net.rs` on any wire-format change so stale clients are rejected at handshake.
 - **Own shots are client-drawn.** The client draws its own projectiles immediately; the server does not echo them back and decides hits itself.
 - **Matchmaker ↔ server.** Servers heartbeat every 2 s (players, `tick_us`) to every matchmaker URL, expanding hostnames to all resolved addresses (headless Service → all replicas); a server missing heartbeats for ~6 s is dropped. Match processes outlive a matchmaker restart and are re-adopted via heartbeats. SIGTERM drains a server (finish the match, then exit).
-- **Kubernetes.** `deploy/k8s/` runs the matchmaker as a `--no-launch` Deployment and match servers as an Agones Fleet; `server/src/agones.rs` handles Ready/Health/self-Allocate/Shutdown over the SDK sidecar's REST API. Production needs `EVOCLASH_NETCODE_KEY` (64 hex chars) shared by matchmaker and servers; otherwise a dev key is used.
+- **Kubernetes.** The Helm chart `deploy/helm/evoclash` (check with `helm lint` / `helm template`) runs the matchmaker as a `--no-launch` Deployment and match servers as an Agones Fleet; `server/src/agones.rs` handles Ready/Health/self-Allocate/Shutdown over the SDK sidecar's REST API. Production needs `EVOCLASH_NETCODE_KEY` (64 hex chars) shared by matchmaker and servers; otherwise a dev key is used.
 - **Procedural art, no assets.** `client/src/textures.rs` paints every sprite at startup into a `Canvas` (drawn at 2x, nearest sampling, characters face +X). `#[ignore]` preview tests write BMP contact sheets for checking art without running the game, e.g. `EVOCLASH_SPRITE_PREVIEW=out.bmp cargo test -p evoclash -- --ignored preview_survivor` (see the tests module for others).
 - **Depth.** `render.rs` sorts by `depth(y)`; parts of one actor are layered with tiny `Z_STEP` offsets relative to the actor.
 
@@ -61,4 +62,4 @@ Workspace lints allow clippy `type_complexity` and `too_many_arguments` (normal 
 
 ## Releases
 
-Bump `workspace.package.version` in `Cargo.toml`, merge it, then push a matching tag `vX.Y.Z` (tags containing `-` are pre-releases). `release.yml` checks that the tag matches the version, builds the binaries for each platform, and pushes `ghcr.io/lixiao189/evoclash-server`.
+Bump `workspace.package.version` in `Cargo.toml` and `version`/`appVersion` in `deploy/helm/evoclash/Chart.yaml`, merge it, then push a matching tag `vX.Y.Z` (tags containing `-` are pre-releases). `release.yml` checks that the tag matches both versions, builds the binaries for each platform, and pushes `ghcr.io/lixiao189/evoclash-server`.
