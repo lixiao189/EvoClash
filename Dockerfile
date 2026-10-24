@@ -1,10 +1,12 @@
 # Runtime image for the match server and matchmaker. It packages prebuilt Linux binaries
 # rather than compiling, so the image ships exactly what the release attests.
 # Expected layout (the release workflow stages this): dist/<amd64|arm64>/evoclash-{server,matchmaker}
+# plus dist/<arch>/web, the browser client the matchmaker serves at /play/.
 FROM gcr.io/distroless/cc-debian12:nonroot
 
 ARG TARGETARCH
 COPY dist/${TARGETARCH}/evoclash-server dist/${TARGETARCH}/evoclash-matchmaker /app/
+COPY dist/${TARGETARCH}/web /app/web
 
 WORKDIR /app
 # The matchmaker spawns evoclash-server from its own directory. For real deployments pass

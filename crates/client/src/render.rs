@@ -165,28 +165,12 @@ impl Plugin for RenderPlugin {
     }
 }
 
-/// Text includes Chinese, which the built-in font lacks: load a CJK-capable system font.
+/// Text includes Chinese, which the built-in font lacks, and browsers can't hand us system
+/// fonts: Noto Sans SC is compiled in, subset to GB2312 plus the sources' characters
+/// (see assets/README.md).
 fn load_font(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
-    const CANDIDATES: [&str; 7] = [
-        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-        "/System/Library/Fonts/STHeiti Medium.ttc",
-        "/System/Library/Fonts/Hiragino Sans GB.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-        "C:\\Windows\\Fonts\\msyh.ttc",
-        "C:\\Windows\\Fonts\\simhei.ttf",
-    ];
-    let handle = CANDIDATES
-        .iter()
-        .find_map(|path| std::fs::read(path).ok().map(|bytes| (path, bytes)))
-        .map(|(path, bytes)| {
-            info!("using font {path}");
-            fonts.add(Font::from_bytes(bytes))
-        })
-        .unwrap_or_else(|| {
-            warn!("no CJK system font found; Chinese text will not render");
-            Handle::default()
-        });
+    const NOTO_SANS_SC: &[u8] = include_bytes!("../assets/NotoSansSC-Subset.ttf");
+    let handle = fonts.add(Font::from_bytes(NOTO_SANS_SC.to_vec()));
     commands.insert_resource(UiFont(handle));
 }
 

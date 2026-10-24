@@ -5,7 +5,7 @@ use evoclash_game::net::DEFAULT_GAME_PORT;
 
 #[derive(Resource, Clone, Debug)]
 pub struct ServerConfig {
-    /// UDP port to bind on all interfaces.
+    /// UDP port (WebTransport over QUIC) to bind on all interfaces.
     pub port: u16,
     /// Address clients use to reach this server (what connect tokens point at).
     pub public_addr: SocketAddr,

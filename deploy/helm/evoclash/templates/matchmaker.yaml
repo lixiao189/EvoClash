@@ -186,9 +186,9 @@ spec:
     {{- range $mm.ingress.hosts }}
     - host: {{ .host | quote }}
       http:
-        # Only what clients call; heartbeats and drain stay reachable inside the cluster only.
+        # Only what browsers load and call; heartbeats and drain stay inside the cluster.
         paths:
-          {{- range list "/v1/join" "/v1/rejoin" "/healthz" }}
+          {{- range list "/" "/v1/join" "/v1/rejoin" "/healthz" }}
           - path: {{ . }}
             pathType: Exact
             backend:
@@ -196,5 +196,11 @@ spec:
                 name: {{ include "evoclash.matchmaker" $ }}
                 port: { name: http }
           {{- end }}
+          - path: /play
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "evoclash.matchmaker" $ }}
+                port: { name: http }
     {{- end }}
 {{- end }}

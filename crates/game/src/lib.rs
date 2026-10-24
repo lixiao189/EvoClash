@@ -34,6 +34,8 @@ pub mod api {
     pub struct JoinResponse {
         pub match_id: String,
         pub server_addr: String,
+        /// Hex SHA-256 of the server's self-signed WebTransport certificate.
+        pub cert_digest: String,
         pub client_id: u64,
         /// Base64-encoded netcode connect token.
         pub connect_token: String,
@@ -54,6 +56,8 @@ pub mod api {
         pub match_id: String,
         /// Lets a restarted matchmaker re-adopt servers it didn't launch.
         pub public_addr: String,
+        /// Hex SHA-256 of the WebTransport certificate, handed to clients so browsers trust it.
+        pub cert_digest: String,
         pub players: u32,
         pub max_players: u32,
         /// Whether the server is accepting players (false once it is draining).

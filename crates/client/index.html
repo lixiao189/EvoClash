@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EvoClash</title>
+  <link data-trunk rel="rust" data-bin="evoclash" data-cargo-profile="web" data-wasm-opt="0">
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #1b1712; color: #e8dcc4;
+      font: 16px system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; }
+    #game { display: block; width: 100%; height: 100%; outline: none; }
+    #join { position: fixed; inset: 0; display: none; place-content: center; justify-items: center; gap: 12px; text-align: center; }
+    #join h1 { margin: 0 0 8px; font-size: 40px; letter-spacing: 4px; color: #e0a45a; }
+    #join input, #join button { font: inherit; padding: 10px 14px; border-radius: 6px; border: 1px solid #6b5a43; }
+    #join input, #join button { box-sizing: border-box; width: 260px; }
+    #join input { background: #2a241c; color: inherit; }
+    #join button { background: #e0a45a; color: #1b1712; border-color: #e0a45a; cursor: pointer; }
+    #join p { margin: 8px 0 0; opacity: .7; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <canvas id="game" tabindex="0"></canvas>
+  <form id="join">
+    <h1>EVOCLASH</h1>
+    <input name="name" maxlength="16" placeholder="你的名字" required autofocus>
+    <button>进入废土</button>
+    <p>WASD 移动 · 鼠标瞄准射击 · 空格冲刺 · E 拾取 · Q / 右键投掷</p>
+  </form>
+  <script>
+    // The wasm client starts only once the URL names the player (src/main.rs).
+    const params = new URLSearchParams(location.search);
+    const form = document.getElementById("join");
+    const canvas = document.getElementById("game");
+    // Right click throws; keep the browser menu out of the way.
+    canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+    if (!params.get("name")?.trim()) {
+      form.style.display = "grid";
+      form.name.value = localStorage.getItem("evoclash-name") ?? "";
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const name = form.name.value.trim();
+        try { localStorage.setItem("evoclash-name", name); } catch {}
+        params.set("name", name);
+        location.search = params.toString();
+      });
+    } else {
+      canvas.focus();
+    }
+  </script>
+</body>
+</html>

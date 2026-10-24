@@ -9,9 +9,12 @@ use bevy::prelude::*;
 use evoclash_game::api::Heartbeat;
 
 use crate::config::ServerConfig;
-use crate::connections::Human;
+use crate::connections::{Human, TlsIdentity};
 
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(2);
+/// The self-signed certificate is valid for 14 days; stop taking new players well before that
+/// so no match is still running when browsers start rejecting it.
+const RETIRE_AFTER: Duration = Duration::from_secs(12 * 24 * 3600);
 
 #[derive(Resource, Clone)]
 pub struct OpsState {
@@ -42,11 +45,13 @@ pub struct OpsPlugin;
 impl Plugin for OpsPlugin {
     fn build(&self, app: &mut App) {
         let config = app.world().resource::<ServerConfig>().clone();
+        let cert_digest = app.world().resource::<TlsIdentity>().digest.clone();
         let ops = OpsState {
             draining: Arc::default(),
             snapshot: Arc::new(Mutex::new(Heartbeat {
                 match_id: config.match_id.clone(),
                 public_addr: config.public_addr.to_string(),
+                cert_digest,
                 players: 0,
                 max_players: config.max_players as u32,
                 accepting: true,
@@ -63,7 +68,14 @@ impl Plugin for OpsPlugin {
             timer.started = Some(Instant::now());
         });
         app.add_systems(FixedLast, finish_tick_timer);
-        app.add_systems(Update, (update_snapshot, exit_when_drained_and_empty));
+        app.add_systems(
+            Update,
+            (
+                update_snapshot,
+                retire_old_certificate,
+                exit_when_drained_and_empty,
+            ),
+        );
     }
 }
 
@@ -92,6 +104,12 @@ fn exit_when_drained_and_empty(
     if ops.is_draining() && humans.is_empty() {
         info!("drained with no players left, shutting down");
         exit.write(AppExit::Success);
+    }
+}
+
+fn retire_old_certificate(ops: Res<OpsState>, tls: Res<TlsIdentity>) {
+    if tls.created.elapsed() > RETIRE_AFTER {
+        ops.start_draining("TLS certificate is about to expire");
     }
 }
 

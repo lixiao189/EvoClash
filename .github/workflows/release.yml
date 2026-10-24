@@ -1,7 +1,7 @@
 name: Release
 
-# Push a tag like `v0.2.0` (matching the workspace and chart versions) to publish binaries, the
-# server image and the Helm chart.
+# Push a tag like `v0.2.0` (matching the workspace and chart versions) to publish the browser
+# client (the only thing players get), the server image and the Helm chart.
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
@@ -16,8 +16,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  LINUX_DEPS: pkg-config libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
-  BINS: evoclash evoclash-server evoclash-matchmaker
+  BINS: evoclash-server evoclash-matchmaker
 
 jobs:
   check-version:
@@ -42,60 +41,63 @@ jobs:
             fi
           done
 
-  build:
-    name: Build (${{ matrix.target }})
+  # The wasm client: attached to the GitHub release and baked into the server image.
+  web:
+    name: Build browser client
+    needs: check-version
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: trunk
+      - run: trunk build --release --locked
+        working-directory: crates/client
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: web
+          path: target/web
+          if-no-files-found: error
+
+  # Server and matchmaker binaries only exist inside the image (players never run them), built
+  # natively per architecture so the image needs no recompilation or QEMU.
+  server:
+    name: Server binaries (${{ matrix.arch }})
     needs: check-version
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Older Ubuntu keeps the glibc requirement low so binaries run on more distros.
-          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
-          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
-          - { target: aarch64-apple-darwin, os: macos-latest }
-          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+          - { arch: amd64, os: ubuntu-22.04 }
+          - { arch: arm64, os: ubuntu-22.04-arm }
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          # shellcheck disable=SC2086 # LINUX_DEPS is a space-separated list
-          sudo apt-get install -y --no-install-recommends $LINUX_DEPS
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: stable
-          targets: ${{ matrix.target }}
-      - run: cargo build --release --locked --workspace --target ${{ matrix.target }}
-      - name: Package
-        shell: bash
-        run: |
-          name="evoclash-${GITHUB_REF_NAME}-${{ matrix.target }}"
-          mkdir -p "dist/$name"
-          ext=""; [ "$RUNNER_OS" = "Windows" ] && ext=".exe"
-          for bin in $BINS; do
-            cp "target/${{ matrix.target }}/release/${bin}${ext}" "dist/$name/"
-          done
-          cp README.md "dist/$name/"
-          cd dist
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            7z a "$name.zip" "$name" >/dev/null
-          else
-            tar -czf "$name.tar.gz" "$name"
-          fi
-          rm -rf "$name"
+      - run: cargo build --release --locked -p evoclash-server -p evoclash-matchmaker
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: dist-${{ matrix.target }}
-          path: dist/*
+          name: server-${{ matrix.arch }}
+          path: |
+            target/release/evoclash-server
+            target/release/evoclash-matchmaker
           if-no-files-found: error
 
   release:
     name: GitHub release
-    needs: build
+    needs: web
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -105,10 +107,13 @@ jobs:
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: dist-*
-          path: dist
-          merge-multiple: true
-      - run: cd dist && sha256sum -- * > SHA256SUMS
+          name: web
+          path: web
+      - name: Package the browser client
+        run: |
+          mkdir dist
+          tar -czf "dist/evoclash-web-${GITHUB_REF_NAME}.tar.gz" web
+          cd dist && sha256sum -- * > SHA256SUMS
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/*
@@ -121,11 +126,11 @@ jobs:
           gh release create "$GITHUB_REF_NAME" dist/* \
             --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes $prerelease
 
-  # CD for the backend: a multi-arch image with the match server and matchmaker, built from
-  # the exact release binaries above (no recompilation, no QEMU).
+  # CD for the backend: a multi-arch image with the match server, the matchmaker and the
+  # browser client it serves.
   image:
     name: Server image
-    needs: build
+    needs: [server, web]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -139,16 +144,20 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: dist-*-linux-gnu
-          path: archives
-          merge-multiple: true
-      - name: Stage binaries per Docker platform
+          pattern: server-*
+          path: artifacts
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: web
+          path: artifacts/web
+      - name: Stage binaries and the browser client per Docker platform
         run: |
-          for pair in amd64:x86_64 arm64:aarch64; do
-            arch=${pair%%:*}; triple=${pair##*:}-unknown-linux-gnu
+          for arch in amd64 arm64; do
             mkdir -p "dist/$arch"
-            tar -xzf archives/*-"$triple".tar.gz -C "dist/$arch" --strip-components=1 \
-              --wildcards '*/evoclash-server' '*/evoclash-matchmaker'
+            cp "artifacts/server-$arch/evoclash-server" "artifacts/server-$arch/evoclash-matchmaker" "dist/$arch/"
+            # Artifacts drop the executable bit.
+            chmod +x "dist/$arch"/evoclash-*
+            cp -r artifacts/web "dist/$arch/web"
           done
       - name: Image name
         # GHCR requires lowercase repository names.

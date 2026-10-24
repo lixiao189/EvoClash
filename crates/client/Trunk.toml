@@ -1,0 +1,5 @@
+# `make web` builds the browser client into target/web, which the matchmaker serves at /play/.
+[build]
+target = "index.html"
+dist = "../../target/web"
+public_url = "/play/"

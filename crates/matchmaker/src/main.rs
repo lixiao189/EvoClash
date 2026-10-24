@@ -7,6 +7,7 @@
 //! - `POST /v1/matches/{id}/drain` → stop sending players to a match (deploys, maintenance)
 //! - `GET  /healthz`               → liveness for the load balancer (clients also time it to pick a region)
 //! - `GET  /metrics`               → Prometheus text format, for dashboards and autoscaling
+//! - `GET  /play/`                 → the browser client (`--web-dir`), so it calls this API same-origin
 //!
 //! It holds no state that can't be rebuilt: the fleet view comes from heartbeats and
 //! reconnect keys are HMACs, so a restart (or a replacement replica) loses nothing.
@@ -25,12 +26,13 @@ use std::time::Duration;
 
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use evoclash_game::api::{Heartbeat, JoinRequest, JoinResponse, RejoinRequest};
 use evoclash_game::net;
 use serde_json::json;
+use tower_http::services::ServeDir;
 
 use crate::fleet::{Fleet, FleetConfig};
 use crate::registry::{MatchInfo, Registry};
@@ -53,18 +55,44 @@ fn error(status: StatusCode, message: impl Into<String>) -> Response {
     (status, Json(json!({ "error": message.into() }))).into_response()
 }
 
-fn issue(
+/// A freshly launched server has no certificate hash until its first heartbeat (well under a
+/// second after start); browsers can't connect without it, so hold the reply until it arrives.
+async fn cert_digest(state: &AppState, match_id: &str) -> Option<String> {
+    for _ in 0..50 {
+        let digest = state
+            .registry
+            .lock()
+            .expect("registry lock")
+            .matches
+            .get(match_id)
+            .and_then(|m| m.cert_digest.clone());
+        if digest.is_some() {
+            return digest;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    None
+}
+
+async fn issue(
     state: &AppState,
     match_id: String,
     addr: SocketAddr,
     client_id: u64,
     name: &str,
 ) -> Response {
+    let Some(cert_digest) = cert_digest(state, &match_id).await else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "match server did not start",
+        );
+    };
     match tokens::connect_token(&state.key, addr, client_id, name) {
         Ok(connect_token) => Json(JoinResponse {
             reconnect_key: tokens::reconnect_key(&state.key, &match_id, client_id),
             match_id,
             server_addr: addr.to_string(),
+            cert_digest,
             client_id,
             connect_token,
         })
@@ -111,7 +139,7 @@ async fn join(State(state): State<Shared>, Json(request): Json<JoinRequest>) -> 
         Ok((match_id, addr)) => {
             println!("{name} ({client_id}) → {match_id}");
             state.joins.fetch_add(1, Ordering::Relaxed);
-            issue(&state, match_id, addr, client_id, &name)
+            issue(&state, match_id, addr, client_id, &name).await
         }
         Err(e) => {
             state.join_failures.fetch_add(1, Ordering::Relaxed);
@@ -143,7 +171,7 @@ async fn rejoin(State(state): State<Shared>, Json(request): Json<RejoinRequest>)
     state.rejoins.fetch_add(1, Ordering::Relaxed);
     match addr {
         // The server knows the name from the original token; the body is kept on its side.
-        Some(addr) => issue(&state, request.match_id, addr, request.client_id, ""),
+        Some(addr) => issue(&state, request.match_id, addr, request.client_id, "").await,
         None => error(StatusCode::GONE, "match not found"),
     }
 }
@@ -325,6 +353,7 @@ struct Args {
     launch: bool,
     warm_matches: usize,
     peers: Vec<String>,
+    web_dir: Option<PathBuf>,
 }
 
 fn parse_args() -> Args {
@@ -340,6 +369,7 @@ fn parse_args() -> Args {
         launch: true,
         warm_matches: 1,
         peers: Vec::new(),
+        web_dir: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -374,15 +404,17 @@ fn parse_args() -> Args {
                     .map(|url| url.trim().trim_end_matches('/').to_owned())
                     .filter(|url| !url.is_empty()),
             ),
+            "--web-dir" => args.web_dir = Some(value("--web-dir").into()),
             "-h" | "--help" => {
                 println!(
                     "evoclash-matchmaker [--listen 127.0.0.1:8080] [--public-host 127.0.0.1] [--ports 7000-7099]\n\
                      \x20                   [--max-matches 16] [--max-players 6] [--bots 4]\n\
                      \x20                   [--server-bin PATH] [--log-dir logs] [--no-launch]\n\
-                     \x20                   [--warm-matches 1] [--peer URL[,URL...]]\n\n\
+                     \x20                   [--warm-matches 1] [--peer URL[,URL...]] [--web-dir DIR]\n\n\
                      --no-launch     only adopt servers that heartbeat in (external orchestrator)\n\
                      --warm-matches  empty matches kept running so joins never wait on a launch\n\
-                     --peer          other matchmaker replicas; launched servers heartbeat to all"
+                     --peer          other matchmaker replicas; launched servers heartbeat to all\n\
+                     --web-dir       browser client to serve at /play/ (default: `web` next to this binary)"
                 );
                 std::process::exit(0);
             }
@@ -431,7 +463,11 @@ async fn main() {
     });
     tokio::spawn(janitor(state.clone()));
 
-    let app = Router::new()
+    let web_dir = args.web_dir.clone().or_else(|| {
+        let bundled = std::env::current_exe().ok()?.with_file_name("web");
+        bundled.is_dir().then_some(bundled)
+    });
+    let mut app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/v1/join", post(join))
         .route("/v1/rejoin", post(rejoin))
@@ -440,6 +476,15 @@ async fn main() {
         .route("/v1/matches", get(list_matches))
         .route("/v1/matches/{id}/drain", post(drain))
         .with_state(state);
+    match &web_dir {
+        Some(dir) => {
+            println!("serving the browser client from {}", dir.display());
+            app = app
+                .route("/", get(|| async { Redirect::to("/play/") }))
+                .nest_service("/play", ServeDir::new(dir));
+        }
+        None => println!("no --web-dir: API only, the browser client is not served"),
+    }
 
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
