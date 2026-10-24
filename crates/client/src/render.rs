@@ -195,7 +195,6 @@ impl Plugin for RenderPlugin {
                 follow_camera,
                 update_cursor,
                 draw_overlays,
-                draw_projectiles,
             )
                 .chain(),
         );
@@ -1110,7 +1109,7 @@ fn fade_splats(
     }
 }
 
-/// Spores get a glowing sprite; bullets stay as crisp gizmo tracers.
+/// Every projectile is a sprite: spores and EMP bolts glow, bullets are tinted streaks.
 fn dress_projectile(
     trigger: On<Add<Projectile>>,
     projectiles: Query<&Projectile>,
@@ -1120,27 +1119,50 @@ fn dress_projectile(
     let Ok(projectile) = projectiles.get(trigger.entity) else {
         return;
     };
-    if projectile.kind == ProjectileKind::Spore {
-        commands.entity(trigger.entity).insert((
+    let (sprite, anchor) = match projectile.kind {
+        ProjectileKind::Spore => (
             Sprite {
                 image: textures.spore.clone(),
                 custom_size: Some(Vec2::splat(22.0)),
                 ..default()
             },
-            Transform::from_xyz(0.0, 0.0, Z_PROJECTILE),
-            Visibility::Hidden,
-        ));
-    }
+            Anchor::CENTER,
+        ),
+        ProjectileKind::Emp => (
+            Sprite {
+                image: textures.glow.clone(),
+                color: Color::srgb(0.4, 0.8, 1.0),
+                custom_size: Some(Vec2::splat(30.0)),
+                ..default()
+            },
+            Anchor::CENTER,
+        ),
+        ProjectileKind::Shot(weapon) => (
+            Sprite {
+                image: textures.bolt.clone(),
+                color: weapon.stats().color,
+                custom_size: Some(tracer_size(weapon)),
+                ..default()
+            },
+            Anchor::CENTER_RIGHT,
+        ),
+    };
+    commands.entity(trigger.entity).insert((
+        sprite,
+        anchor,
+        Transform::from_xyz(0.0, 0.0, Z_PROJECTILE),
+        Visibility::Hidden,
+    ));
 }
 
 fn sync_projectiles(
-    mut projectiles: Query<
-        (&Pos, &mut Transform, &mut Visibility),
-        (With<Projectile>, With<Sprite>),
-    >,
+    mut projectiles: Query<(&Pos, &Projectile, &mut Transform, &mut Visibility), With<Sprite>>,
 ) {
-    for (pos, mut transform, mut visibility) in &mut projectiles {
+    for (pos, projectile, mut transform, mut visibility) in &mut projectiles {
         transform.translation = (pos.0 + Vec2::Y * GUN_HEIGHT).extend(Z_PROJECTILE);
+        if matches!(projectile.kind, ProjectileKind::Shot(_)) {
+            transform.rotation = Quat::from_rotation_z(projectile.vel.to_angle());
+        }
         visibility.set_if_neq(Visibility::Visible);
     }
 }
@@ -1352,24 +1374,6 @@ fn draw_overlays(
     }
 }
 
-/// Shots fly at chest height: drawn lifted, resolved on the ground below.
-fn draw_projectiles(mut gizmos: Gizmos, projectiles: Query<(&Pos, &Projectile)>) {
-    for (pos, projectile) in &projectiles {
-        let at = pos.0 + Vec2::Y * GUN_HEIGHT;
-        match projectile.kind {
-            ProjectileKind::Shot(weapon) => {
-                let tail = at - projectile.vel.normalize_or_zero() * tracer_length(weapon);
-                gizmos.line_2d(tail, at, weapon.stats().color);
-            }
-            ProjectileKind::Emp => {
-                gizmos.circle_2d(at, 8.0, Color::srgb(0.4, 0.8, 1.0));
-                ring(&mut gizmos, pos.0, 6.0, Color::BLACK.with_alpha(0.4));
-            }
-            ProjectileKind::Spore => {}
-        }
-    }
-}
-
 /// A ring around someone's feet, flattened so it lies on the ground.
 fn ring(gizmos: &mut Gizmos, at: Vec2, r: f32, color: Color) {
     gizmos.ellipse_2d(
@@ -1379,14 +1383,16 @@ fn ring(gizmos: &mut Gizmos, at: Vec2, r: f32, color: Color) {
     );
 }
 
-pub fn tracer_length(weapon: WeaponKind) -> f32 {
-    match weapon {
-        WeaponKind::Railgun => 140.0,
-        WeaponKind::Laser => 60.0,
-        WeaponKind::Rifle => 26.0,
-        WeaponKind::Bow => 22.0,
-        _ => 12.0,
-    }
+/// Streak sprite size: the bright head sits at the right end, on the bullet.
+pub fn tracer_size(weapon: WeaponKind) -> Vec2 {
+    let (length, thickness) = match weapon {
+        WeaponKind::Railgun => (170.0, 12.0),
+        WeaponKind::Laser => (80.0, 8.0),
+        WeaponKind::Rifle => (38.0, 7.0),
+        WeaponKind::Bow => (32.0, 6.0),
+        _ => (22.0, 6.0),
+    };
+    Vec2::new(length, thickness)
 }
 
 #[cfg(test)]
