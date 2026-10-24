@@ -11,9 +11,11 @@ mod combat;
 mod config;
 mod connections;
 mod environment;
+mod evolution;
 mod gameplay;
 mod monsters;
 mod ops;
+mod skills;
 
 use std::time::Duration;
 
@@ -67,6 +69,8 @@ fn main() {
         bots::BotsPlugin,
         monsters::MonstersPlugin,
         ops::OpsPlugin,
+        evolution::EvolutionPlugin,
+        skills::SkillsPlugin,
     ));
     if let Some(sdk) = &agones {
         app.add_plugins(agones::AgonesPlugin(sdk.clone()));

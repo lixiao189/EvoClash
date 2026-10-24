@@ -11,6 +11,7 @@ use rand::Rng;
 
 use crate::combat::{Flight, projectile_replication};
 use crate::config::ServerConfig;
+use crate::evolution::{Dealt, Hit, XpAward, XpQueue};
 use crate::gameplay::{
     Damage, DamageQueue, Outbox, PosHistory, SimSet, TICKS_PER_SEC, resolve_damage, spawn_pickup,
 };
@@ -252,6 +253,8 @@ fn attack(
 /// Monsters take damage here; everything aimed at a combatant is left for `resolve_damage`.
 fn resolve_monster_damage(
     mut commands: Commands,
+    mut xp: ResMut<XpQueue>,
+    mut dealt: ResMut<Dealt>,
     mut queue: ResMut<DamageQueue>,
     mut outbox: ResMut<Outbox>,
     mut monsters: Query<(&Monster, &Pos, &mut Vitals)>,
@@ -276,7 +279,23 @@ fn resolve_monster_damage(
                 .and_then(|a| players.get(a).ok())
                 .map_or(0, |p| p.client_id),
         });
+        if let Some(by) = dmg.attacker {
+            let melee = dmg.cause.is_none() && dmg.weapon.is_some_and(|w| w.stats().melee);
+            dealt.0.push(Hit {
+                attacker: by,
+                amount,
+                melee,
+            });
+        }
         if vitals.hp <= 0.0 {
+            if let Some(by) = dmg.attacker {
+                xp.0.push(XpAward {
+                    to: by,
+                    base: evoclash_game::evolution::monster_xp(monster.kind),
+                    pos: pos.0,
+                    loot: false,
+                });
+            }
             vitals.alive = false;
             commands.entity(dmg.target).despawn();
             let loot = match monster.kind {

@@ -3,10 +3,11 @@
 use std::collections::VecDeque;
 
 use bevy::prelude::*;
+use evoclash_game::evolution::{Evolution, Skill, SkillState, player_kill_xp};
 use evoclash_game::items::{ArmorKind, Item, WeaponKind, roll_loot};
 use evoclash_game::map::{ArenaMap, VAULT_CENTER};
 use evoclash_game::protocol::*;
-use evoclash_game::sim::{self, Arena, MAX_HP, Obstacles, gear_tier, underdog_mult};
+use evoclash_game::sim::{self, Arena, Obstacles, gear_tier, underdog_mult};
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
@@ -15,7 +16,9 @@ use rand::Rng;
 use crate::config::ServerConfig;
 use crate::connections::Human;
 use crate::environment::{Blasts, PropSlots};
+use crate::evolution::{Dealt, Evolving, Recovery, XpAward, XpQueue};
 use crate::ops::OpsState;
+use crate::skills::HiddenFrom;
 
 pub const TICKS_PER_SEC: u32 = 64;
 const WARMUP_TICKS: u32 = 4 * TICKS_PER_SEC;
@@ -100,6 +103,8 @@ pub struct SimTick(pub u32);
 pub struct Outbox {
     pub reliable: Vec<GameEvent>,
     pub fast: Vec<GameEvent>,
+    /// Fast events for one combatant only (dropped for bots).
+    pub direct: Vec<(Entity, GameEvent)>,
 }
 
 impl Outbox {
@@ -193,11 +198,15 @@ pub fn spawn_combatant(commands: &mut Commands, player: Player, peer: Option<Pee
         },
         Loadout::default(),
         Stats::default(),
+        (Evolution::default(), SkillState::default()),
         (
             CurrentInput::default(),
             Cooldowns::default(),
             PosHistory::default(),
             Rewind::default(),
+            Evolving::default(),
+            Recovery::default(),
+            HiddenFrom::default(),
         ),
         Replicate::to_clients(NetworkTarget::All),
         InterpolationTarget::to_clients(interpolate),
@@ -241,7 +250,7 @@ fn advance_tick(mut tick: ResMut<SimTick>) {
     tick.0 = tick.0.wrapping_add(1);
 }
 
-fn read_human_inputs(
+pub fn read_human_inputs(
     mut humans: Query<
         (
             &mut CurrentInput,
@@ -282,10 +291,27 @@ fn drop_shield_on_attack(mut players: Query<(&CurrentInput, &mut Vitals)>) {
 fn movement(
     arena: Res<Arena>,
     obstacles: Res<Obstacles>,
-    mut players: Query<(&mut Pos, &mut Dash, &mut Aim, &CurrentInput, &Vitals)>,
+    mut players: Query<(
+        &mut Pos,
+        &mut Dash,
+        &mut Aim,
+        &CurrentInput,
+        &Vitals,
+        &Evolution,
+        &SkillState,
+    )>,
 ) {
-    for (pos, dash, mut aim, input, vitals) in &mut players {
-        sim::step_movement(pos, dash, &input.0, vitals, &arena, &obstacles.0);
+    for (pos, dash, mut aim, input, vitals, evo, skills) in &mut players {
+        sim::step_movement(
+            pos,
+            dash,
+            &input.0,
+            vitals,
+            evo,
+            skills,
+            &arena,
+            &obstacles.0,
+        );
         let dir = input.0.aim.normalize_or_zero();
         if vitals.alive && dir != Vec2::ZERO && dir.distance_squared(aim.0) > 1e-4 {
             aim.0 = dir;
@@ -313,6 +339,12 @@ fn tick_cooldowns(mut players: Query<(&mut Cooldowns, &mut Vitals)>) {
         if vitals.shield > 0 {
             vitals.shield -= 1;
         }
+        if vitals.stealth > 0 {
+            vitals.stealth -= 1;
+        }
+        if vitals.revealed > 0 {
+            vitals.revealed -= 1;
+        }
     }
 }
 
@@ -332,11 +364,23 @@ fn absorb(vitals: &mut Vitals, amount: f32, armor_mult: f32) -> (f32, f32) {
     (hp_hit, armor_hit)
 }
 
+#[allow(clippy::type_complexity)]
 pub fn resolve_damage(
     mut commands: Commands,
     mut queue: ResMut<DamageQueue>,
     mut outbox: ResMut<Outbox>,
-    mut players: Query<(&Player, &Pos, &mut Vitals, &mut Loadout, &mut Stats)>,
+    mut xp: ResMut<XpQueue>,
+    mut dealt: ResMut<Dealt>,
+    mut players: Query<(
+        &Player,
+        &Pos,
+        &mut Vitals,
+        &mut Loadout,
+        &mut Stats,
+        &Evolution,
+        &mut SkillState,
+        &mut Recovery,
+    )>,
     monsters: Query<&Monster>,
     state: Single<&MatchState>,
 ) {
@@ -344,13 +388,15 @@ pub fn resolve_damage(
         queue.0.clear();
         return;
     }
-    // (victim, killer, how, victim's gear tier at the moment of death)
-    let mut deaths: Vec<(Entity, Option<Entity>, &'static str, u8)> = Vec::new();
+    // (victim, killer, how, victim's gear tier and level at the moment of death)
+    let mut deaths: Vec<(Entity, Option<Entity>, &'static str, u8, u8)> = Vec::new();
     for dmg in queue.0.drain(..) {
         let attacker = dmg.attacker.and_then(|a| players.get(a).ok());
         let attacker_id = attacker.map_or(0, |(p, ..)| p.client_id);
-        let attacker_tier = attacker.map(|(.., loadout, _)| loadout.weapon.stats().tier);
-        let Ok((_, pos, mut vitals, mut loadout, _)) = players.get_mut(dmg.target) else {
+        let attacker_tier = attacker.map(|(_, _, _, loadout, ..)| loadout.weapon.stats().tier);
+        let Ok((_, pos, mut vitals, mut loadout, _, evo, mut skills, mut recovery)) =
+            players.get_mut(dmg.target)
+        else {
             continue;
         };
         if !vitals.alive || vitals.shield > 0 {
@@ -358,7 +404,7 @@ pub fn resolve_damage(
         }
         let target_tier = gear_tier(&vitals, &loadout);
         // Catch-up: weaker weapons hit better-geared targets harder (monsters and EMPs excluded).
-        let amount = match attacker_tier {
+        let mut amount = match attacker_tier {
             Some(tier) if !dmg.emp => dmg.amount * underdog_mult(tier, target_tier),
             _ => dmg.amount,
         };
@@ -377,27 +423,62 @@ pub fn resolve_damage(
                 loadout.ammo /= 2;
             }
         }
-        let (hp_hit, armor_hit) = absorb(&mut vitals, amount, dmg.armor_mult);
+        // 能量护盾 soaks damage before armor does.
+        let mut soaked = 0.0;
+        if skills.shielded() {
+            soaked = amount.min(skills.shield_hp);
+            skills.shield_hp -= soaked;
+            amount -= soaked;
+            if skills.shield_hp <= 0.0 {
+                skills.shield_hp = 0.0;
+                skills.active_a = 0;
+            }
+        }
+        let hp_before = vitals.hp;
+        let (hp_hit, armor_hit) =
+            absorb(&mut vitals, amount, dmg.armor_mult * evo.armor_wear_mult());
+        recovery.since_hurt = 0;
+        if vitals.stealth > 0 {
+            vitals.stealth = 0;
+            if skills.skill_a == Some(Skill::Stealth) {
+                skills.active_a = 0;
+            }
+        }
+        if let Some(by) = dmg.attacker.filter(|a| *a != dmg.target) {
+            let melee =
+                !dmg.emp && dmg.cause.is_none() && dmg.weapon.is_some_and(|w| w.stats().melee);
+            dealt.0.push(crate::evolution::Hit {
+                attacker: by,
+                amount: soaked + (amount - hp_hit) + hp_hit.min(hp_before),
+                melee,
+            });
+        }
         outbox.fast.push(GameEvent::Hit {
             pos: pos.0,
-            amount: hp_hit + armor_hit,
-            armor: armor_hit > hp_hit,
+            amount: hp_hit + armor_hit + soaked,
+            armor: armor_hit + soaked > hp_hit,
             attacker: attacker_id,
         });
         if vitals.hp <= 0.0 {
             vitals.hp = 0.0;
             vitals.alive = false;
             vitals.respawn_in = RESPAWN_TICKS;
+            vitals.stealth = 0;
+            // Active skills end with you; cooldowns and perks carry over.
+            skills.active_a = 0;
+            skills.active_b = 0;
+            skills.shield_hp = 0.0;
             let how = dmg
                 .cause
                 .or(dmg.weapon.map(|w| w.stats().name))
                 .unwrap_or("撕咬");
-            deaths.push((dmg.target, dmg.attacker, how, target_tier));
+            deaths.push((dmg.target, dmg.attacker, how, target_tier, evo.level));
         }
     }
 
-    for (victim, attacker, how, victim_tier) in deaths {
-        let Ok((player, pos, mut vitals, mut loadout, mut stats)) = players.get_mut(victim) else {
+    for (victim, attacker, how, victim_tier, victim_level) in deaths {
+        let Ok((player, pos, mut vitals, mut loadout, mut stats, ..)) = players.get_mut(victim)
+        else {
             continue;
         };
         let victim_name = player.name.clone();
@@ -445,12 +526,26 @@ pub fn resolve_damage(
 
         let killer = attacker.filter(|a| *a != victim);
         let killer_name = match killer.and_then(|k| players.get_mut(k).ok()) {
-            Some((killer_player, _, _, killer_loadout, mut killer_stats)) => {
+            Some((killer_player, _, _, mut killer_loadout, mut killer_stats, killer_evo, ..)) => {
                 killer_stats.kills += 1;
                 killer_stats.streak += 1;
                 killer_stats.score += if had_bounty { 3 } else { 1 };
                 let killer_tier = killer_loadout.weapon.stats().tier;
-                if victim_tier >= killer_tier + GIANT_SLAYER_GAP {
+                let giant_slayer = victim_tier >= killer_tier + GIANT_SLAYER_GAP;
+                xp.0.push(XpAward {
+                    to: killer.expect("killer"),
+                    base: player_kill_xp(victim_level, had_bounty, giant_slayer),
+                    pos: drop_at,
+                    loot: false,
+                });
+                // 弹药回收: every kill tops the magazine up a little.
+                let refill = killer_evo.ammo_per_kill();
+                let weapon = killer_loadout.weapon;
+                if refill > 0 && weapon != WeaponKind::Stick {
+                    killer_loadout.ammo =
+                        (killer_loadout.ammo + refill).min(killer_evo.max_ammo(weapon));
+                }
+                if giant_slayer {
                     killer_stats.score += 1;
                     outbox.announce(format!(
                         "{} 以弱胜强击败了 {victim_name}，额外 +1 分！",
@@ -508,6 +603,7 @@ fn respawn(
         &mut PosHistory,
         &mut Loadout,
         &Stats,
+        &Evolution,
     )>,
 ) {
     let mut alive: Vec<(Entity, Vec2)> = players
@@ -515,9 +611,11 @@ fn respawn(
         .filter(|(_, _, v, ..)| v.alive)
         .map(|(e, p, ..)| (e, p.0))
         .collect();
-    let leader = players.iter().map(|(.., s)| s.score).max().unwrap_or(0);
+    let leader = players.iter().map(|(.., s, _)| s.score).max().unwrap_or(0);
     let mut rng = rand::rng();
-    for (entity, mut pos, mut vitals, mut dash, mut history, mut loadout, stats) in &mut players {
+    for (entity, mut pos, mut vitals, mut dash, mut history, mut loadout, stats, evo) in
+        &mut players
+    {
         if vitals.alive {
             continue;
         }
@@ -546,7 +644,8 @@ fn respawn(
         history.0.clear();
         *dash = Dash::default();
         *vitals = Vitals {
-            hp: MAX_HP,
+            hp: evo.max_hp(),
+            max_hp: evo.max_hp(),
             shield: SPAWN_SHIELD_TICKS,
             ..default()
         };
@@ -554,7 +653,7 @@ fn respawn(
         if let Some(kind) = weapon {
             *loadout = Loadout {
                 weapon: kind,
-                ammo: kind.stats().max_ammo,
+                ammo: evo.max_ammo(kind),
                 ..*loadout
             };
         }
@@ -696,8 +795,28 @@ fn match_flow(
 fn reset_match(
     mut commands: Commands,
     mut reset: ResMut<ResetRequested>,
-    mut players: Query<(&mut Vitals, &mut Loadout, &mut Stats), With<Player>>,
-    clutter: Query<Entity, Or<(With<Pickup>, With<Projectile>, With<Monster>, With<Prop>)>>,
+    mut players: Query<
+        (
+            &mut Vitals,
+            &mut Loadout,
+            &mut Stats,
+            &mut Evolution,
+            &mut SkillState,
+            &mut Evolving,
+        ),
+        With<Player>,
+    >,
+    clutter: Query<
+        Entity,
+        Or<(
+            With<Pickup>,
+            With<Projectile>,
+            With<Monster>,
+            With<Prop>,
+            With<Turret>,
+            With<Trap>,
+        )>,
+    >,
     mut loot: ResMut<LootState>,
     mut props: ResMut<PropSlots>,
     mut blasts: ResMut<Blasts>,
@@ -705,7 +824,7 @@ fn reset_match(
     if !std::mem::take(&mut reset.0) {
         return;
     }
-    for (mut vitals, mut loadout, mut stats) in &mut players {
+    for (mut vitals, mut loadout, mut stats, mut evo, mut skills, mut evolving) in &mut players {
         *vitals = Vitals {
             alive: false,
             respawn_in: 1,
@@ -713,6 +832,10 @@ fn reset_match(
         };
         *loadout = Loadout::default();
         *stats = Stats::default();
+        // Evolution only lasts one match.
+        *evo = Evolution::default();
+        *skills = SkillState::default();
+        evolving.last_pick = 0;
     }
     for entity in &clutter {
         commands.entity(entity).despawn();
@@ -726,8 +849,17 @@ fn flush_outbox(
     mut outbox: ResMut<Outbox>,
     mut sender: ServerMultiMessageSender,
     server: Single<&Endpoint, With<Server>>,
+    humans: Query<&Human>,
 ) {
     let server = server.into_inner();
+    for (entity, event) in outbox.direct.drain(..) {
+        if let Ok(human) = humans.get(entity)
+            && human.connected()
+        {
+            let _ =
+                sender.send::<_, FastChannel>(&event, server, &NetworkTarget::Single(human.peer));
+        }
+    }
     for event in outbox.reliable.drain(..) {
         if let Err(e) = sender.send::<_, ReliableChannel>(&event, server, &NetworkTarget::All) {
             warn!("failed to send event: {e:?}");
@@ -740,7 +872,50 @@ fn flush_outbox(
 
 #[cfg(test)]
 mod tests {
+    use evoclash_game::evolution::Perk;
+
     use super::*;
+
+    #[test]
+    fn evolution_resets_when_a_match_starts() {
+        let mut app = App::new();
+        app.init_resource::<LootState>()
+            .init_resource::<PropSlots>()
+            .init_resource::<Blasts>()
+            .insert_resource(ResetRequested(true));
+        app.add_systems(Update, reset_match);
+        let mut evo = Evolution::default();
+        evo.add_xp(500);
+        evo.ranks[Perk::Claws.index()] = 2;
+        let p = app
+            .world_mut()
+            .spawn((
+                Player {
+                    client_id: 1,
+                    name: "p".into(),
+                    color: [1.0; 3],
+                    bot: false,
+                },
+                Vitals::default(),
+                Loadout::default(),
+                Stats {
+                    level: evo.level,
+                    ..default()
+                },
+                evo,
+                SkillState {
+                    cd_a: 50,
+                    ..default()
+                },
+                Evolving::default(),
+            ))
+            .id();
+        app.update();
+        let world = app.world();
+        assert_eq!(world.get::<Evolution>(p).unwrap(), &Evolution::default());
+        assert_eq!(world.get::<SkillState>(p).unwrap(), &SkillState::default());
+        assert_eq!(world.get::<Stats>(p).unwrap().level, 1);
+    }
 
     #[test]
     fn catch_up_kit_grows_with_the_gap() {

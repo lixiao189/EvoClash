@@ -70,6 +70,13 @@ fn buffer_input(
                 .is_some_and(|m| m.pressed(MouseButton::Right));
         input.fire =
             keys.pressed(KeyJ) || mouse.as_ref().is_some_and(|m| m.pressed(MouseButton::Left));
+        // Perk pick while 1/2/3 is held; the server acts on the change, so holding picks once.
+        input.pick = [Digit1, Digit2, Digit3]
+            .iter()
+            .position(|k| keys.pressed(*k))
+            .map_or(0, |i| i as u8 + 1);
+        input.skill_a = keys.pressed(KeyR);
+        input.skill_b = keys.pressed(KeyT);
         input.aim = cursor
             .0
             .map(|c| (c - (pos.0 + Vec2::Y * GUN_HEIGHT)).normalize_or(Vec2::X))

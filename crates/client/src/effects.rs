@@ -6,6 +6,7 @@
 
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
+use evoclash_game::evolution::{Evolution, Skill};
 use evoclash_game::items::WeaponKind;
 use evoclash_game::protocol::*;
 use evoclash_game::sim::{Arena, PLAYER_RADIUS};
@@ -13,6 +14,7 @@ use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::*;
 use rand::Rng;
 
+use crate::hud::path_color;
 use crate::input::{GUN_HEIGHT, LocalPlayer};
 use crate::render::{CameraShake, UiFont, tracer_size};
 use crate::textures::Textures;
@@ -192,9 +194,97 @@ fn spawn_boom(commands: &mut Commands, textures: &Textures, pos: Vec2, radius: f
     }
 }
 
+/// Damage numbers and "+N XP": drift up and fade out over `life` seconds.
 #[derive(Component)]
-struct DamageNumber {
+struct FloatText {
     age: f32,
+    life: f32,
+}
+
+fn spawn_float_text(
+    commands: &mut Commands,
+    font: &UiFont,
+    text: String,
+    size: f32,
+    color: Color,
+    at: Vec2,
+    life: f32,
+) {
+    commands.spawn((
+        FloatText { age: 0.0, life },
+        Text2d::new(text),
+        font.sized(size),
+        TextColor(color),
+        Transform::from_translation(at.extend(8.0)),
+    ));
+}
+
+/// Golden column of light and sparks when anyone levels up.
+fn spawn_level_burst(commands: &mut Commands, textures: &Textures, pos: Vec2) {
+    let gold = Color::srgb(1.0, 0.85, 0.35);
+    spawn_fx(
+        commands,
+        textures,
+        FxKind::Ring { radius: 70.0 },
+        pos,
+        gold,
+        0.7,
+    );
+    let chest = pos + Vec2::Y * GUN_HEIGHT;
+    spawn_fx(
+        commands,
+        textures,
+        FxKind::Flash { radius: 46.0 },
+        chest,
+        Color::srgb(1.0, 0.95, 0.7),
+        0.45,
+    );
+    let mut rng = rand::rng();
+    for _ in 0..14 {
+        let vel = Vec2::new(rng.random_range(-60.0..60.0), rng.random_range(80.0..220.0));
+        spawn_fx(
+            commands,
+            textures,
+            FxKind::Spark { vel },
+            pos + Vec2::new(rng.random_range(-16.0..16.0), rng.random_range(0.0..40.0)),
+            gold,
+            rng.random_range(0.5..0.9),
+        );
+    }
+}
+
+/// Snap of a sprung trap: a red flash with iron sparks.
+fn spawn_trap_snap(commands: &mut Commands, textures: &Textures, pos: Vec2) {
+    let red = Color::srgb(1.0, 0.3, 0.2);
+    spawn_fx(
+        commands,
+        textures,
+        FxKind::Ring { radius: 55.0 },
+        pos,
+        red,
+        0.4,
+    );
+    spawn_fx(
+        commands,
+        textures,
+        FxKind::Flash { radius: 36.0 },
+        pos,
+        Color::srgb(1.0, 0.75, 0.6),
+        0.2,
+    );
+    let mut rng = rand::rng();
+    for _ in 0..10 {
+        let vel = Vec2::from_angle(rng.random_range(0.0..std::f32::consts::TAU))
+            * rng.random_range(80.0..200.0);
+        spawn_fx(
+            commands,
+            textures,
+            FxKind::Spark { vel },
+            pos,
+            Color::srgb(0.85, 0.8, 0.7),
+            rng.random_range(0.25..0.45),
+        );
+    }
 }
 
 fn local_fire(
@@ -203,10 +293,19 @@ fn local_fire(
     time: Res<Time>,
     mut gun: ResMut<LocalGun>,
     state: Query<&MatchState>,
-    me: Query<(&Pos, &Vitals, &Loadout, &ActionState<PlayerInput>), With<LocalPlayer>>,
+    me: Query<
+        (
+            &Pos,
+            &Vitals,
+            &Loadout,
+            &ActionState<PlayerInput>,
+            Option<&Evolution>,
+        ),
+        With<LocalPlayer>,
+    >,
 ) {
     gun.cooldown -= time.delta_secs();
-    let Ok((pos, vitals, loadout, action)) = me.single() else {
+    let Ok((pos, vitals, loadout, action, evo)) = me.single() else {
         return;
     };
     let input = &action.0;
@@ -215,7 +314,9 @@ fn local_fire(
         return;
     }
     let stats = loadout.weapon.stats();
-    gun.cooldown = stats.cooldown as f32 / 64.0;
+    // 超频扳机 shortens the interval on the server; match it so tracers don't lag behind.
+    let cooldown = evo.map_or(stats.cooldown, |e| e.fire_cooldown(stats.cooldown));
+    gun.cooldown = cooldown as f32 / 64.0;
     let aim = input.aim.normalize_or(Vec2::X);
     if stats.melee {
         spawn_swing(&mut commands, &textures, pos.0, aim);
@@ -261,15 +362,17 @@ fn step_tracers(
     time: Res<Time>,
     arena: Res<Arena>,
     mut tracers: Query<(Entity, &mut Tracer, &mut Transform)>,
+    me: Query<&Player, With<LocalPlayer>>,
     others: Query<
-        (&Pos, &Vitals),
+        (&Pos, &Vitals, Option<&Turret>),
         (
-            Or<(With<Player>, With<Monster>, With<Prop>)>,
+            Or<(With<Player>, With<Monster>, With<Prop>, With<Turret>)>,
             Without<LocalPlayer>,
         ),
     >,
 ) {
     let dt = time.delta_secs();
+    let my_id = me.single().ok().map(|p| p.client_id);
     for (entity, mut tracer, mut transform) in &mut tracers {
         let from = tracer.pos;
         let to = from + tracer.vel * dt;
@@ -277,8 +380,10 @@ fn step_tracers(
         let piercing = tracer.weapon.stats().piercing;
         let blocked = !piercing
             && (arena.segment_hits_wall(from, to).is_some()
-                || others.iter().any(|(p, v)| {
+                || others.iter().any(|(p, v, turret)| {
+                    // Our own turret never takes our fire.
                     v.alive
+                        && turret.is_none_or(|t| Some(t.owner) != my_id)
                         && evoclash_game::map::segment_circle(from, to, p.0, PLAYER_RADIUS)
                             .is_some()
                 }));
@@ -299,6 +404,7 @@ fn receive_events(
     font: Res<UiFont>,
     mut receivers: Query<&mut MessageReceiver<GameEvent>, With<Client>>,
     me: Query<(&Player, &Pos), With<LocalPlayer>>,
+    players: Query<(&Player, &Pos)>,
     mut feed: ResMut<KillFeed>,
     mut banner: ResMut<Banner>,
     mut marker: ResMut<HitMarker>,
@@ -338,13 +444,15 @@ fn receive_events(
                         Color::srgb(1.0, 0.85, 0.3)
                     };
                     let jitter = Vec2::new(rand::rng().random_range(-14.0..14.0), 0.0);
-                    commands.spawn((
-                        DamageNumber { age: 0.0 },
-                        Text2d::new(format!("{amount:.0}")),
-                        font.sized(16.0),
-                        TextColor(color),
-                        Transform::from_translation((pos + jitter + Vec2::Y * 64.0).extend(8.0)),
-                    ));
+                    spawn_float_text(
+                        &mut commands,
+                        &font,
+                        format!("{amount:.0}"),
+                        16.0,
+                        color,
+                        pos + jitter + Vec2::Y * 64.0,
+                        0.8,
+                    );
                 }
                 GameEvent::Melee { pos, dir } => {
                     // Our own swing was already drawn locally.
@@ -359,9 +467,91 @@ fn receive_events(
                     }
                     spawn_boom(&mut commands, &textures, pos, radius, fire);
                 }
+                // Only ever sent to whoever earned it.
+                GameEvent::XpGain { amount, pos } => spawn_float_text(
+                    &mut commands,
+                    &font,
+                    format!("+{amount} XP"),
+                    15.0,
+                    Color::srgb(0.55, 1.0, 0.65),
+                    pos + Vec2::Y * 84.0,
+                    1.3,
+                ),
+                GameEvent::LevelUp { client, level } => {
+                    let Some((_, pos)) = players.iter().find(|(p, _)| p.client_id == client) else {
+                        continue;
+                    };
+                    spawn_level_burst(&mut commands, &textures, pos.0);
+                    spawn_float_text(
+                        &mut commands,
+                        &font,
+                        format!("升级 Lv{level}"),
+                        18.0,
+                        Color::srgb(1.0, 0.85, 0.35),
+                        pos.0 + Vec2::Y * 100.0,
+                        1.6,
+                    );
+                    if me.is_some_and(|(p, _)| p.client_id == client) {
+                        banner.0 = Some((format!("升到 {level} 级 — 按 1/2/3 选择进化"), now));
+                    }
+                }
+                GameEvent::SkillUsed {
+                    client,
+                    skill,
+                    pos,
+                    dir,
+                } => {
+                    let mine = me.is_some_and(|(p, _)| p.client_id == client);
+                    // Never give away where someone else laid a trap.
+                    if skill == Skill::Trap && !mine {
+                        continue;
+                    }
+                    let color = skill_color(skill);
+                    let at = match skill {
+                        Skill::AcidBreath => pos + dir * 30.0 + Vec2::Y * GUN_HEIGHT,
+                        Skill::Berserk | Skill::EnergyShield | Skill::Stealth => {
+                            pos + Vec2::Y * GUN_HEIGHT
+                        }
+                        Skill::AutoTurret | Skill::Trap => pos,
+                    };
+                    spawn_fx(
+                        &mut commands,
+                        &textures,
+                        FxKind::Ring { radius: 48.0 },
+                        pos,
+                        color,
+                        0.4,
+                    );
+                    spawn_fx(
+                        &mut commands,
+                        &textures,
+                        FxKind::Flash { radius: 30.0 },
+                        at,
+                        color,
+                        0.25,
+                    );
+                }
+                GameEvent::TrapSprung { pos } => {
+                    if me.is_some_and(|(_, p)| p.0.distance(pos) < 80.0) {
+                        shake.0 = shake.0.max(1.0);
+                    }
+                    spawn_trap_snap(&mut commands, &textures, pos);
+                }
             }
         }
     }
+}
+
+/// The skill's path color.
+fn skill_color(skill: Skill) -> Color {
+    let path = evoclash_game::evolution::EvoPath::ALL
+        .into_iter()
+        .find(|p| {
+            let (a, b) = p.skills();
+            a == skill || b == skill
+        })
+        .unwrap_or(evoclash_game::evolution::EvoPath::Mutant);
+    path_color(path)
 }
 
 fn shake_on_damage(
@@ -385,7 +575,7 @@ fn age_effects(
     mut commands: Commands,
     time: Res<Time>,
     mut fx: Query<(Entity, &mut Fx, &mut Sprite, &mut Transform)>,
-    mut numbers: Query<(Entity, &mut DamageNumber, &mut Transform, &mut TextColor), Without<Fx>>,
+    mut numbers: Query<(Entity, &mut FloatText, &mut Transform, &mut TextColor), Without<Fx>>,
     mut marker: ResMut<HitMarker>,
 ) {
     let dt = time.delta_secs();
@@ -437,8 +627,10 @@ fn age_effects(
     for (entity, mut number, mut transform, mut color) in &mut numbers {
         number.age += dt;
         transform.translation.y += 50.0 * dt;
-        color.0 = color.0.with_alpha((1.0 - number.age / 0.8).max(0.0));
-        if number.age > 0.8 {
+        color.0 = color
+            .0
+            .with_alpha((1.0 - number.age / number.life).max(0.0));
+        if number.age > number.life {
             commands.entity(entity).despawn();
         }
     }
