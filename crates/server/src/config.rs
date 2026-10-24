@@ -32,8 +32,8 @@ impl ServerConfig {
         let mut port = DEFAULT_GAME_PORT;
         let mut public_addr: Option<SocketAddr> = None;
         let mut match_id = "local".to_string();
-        let mut max_players = 6;
-        let mut min_combatants = 4;
+        let mut max_players = 8;
+        let mut min_combatants = 6;
         let mut matchmakers = Vec::new();
         let mut single_match = false;
         let mut monsters = true;
@@ -81,7 +81,7 @@ impl ServerConfig {
                 "-h" | "--help" => {
                     println!(
                         "evoclash-server [--port 7000] [--public-addr 127.0.0.1:7000] [--match-id ID]\n\
-                         \x20               [--max-players 6] [--bots 4] [--matchmaker URL[,URL...]] [--single-match]\n\
+                         \x20               [--max-players 8] [--bots 6] [--matchmaker URL[,URL...]] [--single-match]\n\
                          \x20               [--no-monsters] [--threads 1] [--agones]\n\n\
                          --bots N          keep at least N combatants in the arena by adding bots (0 disables)\n\
                          --matchmaker      heartbeat to every listed matchmaker, and to every address\n\

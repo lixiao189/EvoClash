@@ -236,9 +236,11 @@ pub fn tier_color(tier: u8) -> Color {
     }
 }
 
-/// Weighted loot table for each map zone tier.
+/// Weighted loot table for each map zone tier (0 is a medical cache).
 pub fn roll_loot(zone_tier: u8, rng: &mut impl rand::Rng) -> Item {
     let table: &[(Item, u32)] = match zone_tier {
+        // Medical cache.
+        0 => &[(Item::Medkit, 70), (Item::Emp, 30)],
         1 => &[
             (Item::weapon(WeaponKind::Bow), 30),
             (Item::weapon(WeaponKind::PipeShotgun), 30),

@@ -2,7 +2,7 @@
 # The matchmaker serves the wasm client and launches match servers on demand.
 
 LISTEN ?= 127.0.0.1:8080
-BOTS   ?= 4
+BOTS   ?= 6
 
 CARGO_BINS := -p evoclash-server -p evoclash-matchmaker
 WASM_TARGET := wasm32-unknown-unknown

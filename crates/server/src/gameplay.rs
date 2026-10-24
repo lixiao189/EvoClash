@@ -4,9 +4,9 @@ use std::collections::VecDeque;
 
 use bevy::prelude::*;
 use evoclash_game::items::{ArmorKind, Item, WeaponKind, roll_loot};
-use evoclash_game::map::VAULT_CENTER;
+use evoclash_game::map::{ArenaMap, VAULT_CENTER};
 use evoclash_game::protocol::*;
-use evoclash_game::sim::{self, Arena, MAX_HP, gear_tier, underdog_mult};
+use evoclash_game::sim::{self, Arena, MAX_HP, Obstacles, gear_tier, underdog_mult};
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
@@ -14,15 +14,16 @@ use rand::Rng;
 
 use crate::config::ServerConfig;
 use crate::connections::Human;
+use crate::environment::{Blasts, PropSlots};
 use crate::ops::OpsState;
 
 pub const TICKS_PER_SEC: u32 = 64;
 const WARMUP_TICKS: u32 = 4 * TICKS_PER_SEC;
-const MATCH_TICKS: u32 = 4 * 60 * TICKS_PER_SEC;
+const MATCH_TICKS: u32 = 8 * 60 * TICKS_PER_SEC;
 const INTERMISSION_TICKS: u32 = 8 * TICKS_PER_SEC;
-const FIRST_VAULT_TICKS: u32 = 40 * TICKS_PER_SEC;
-const VAULT_INTERVAL_TICKS: u32 = 60 * TICKS_PER_SEC;
-pub const SCORE_TO_WIN: u32 = 15;
+const FIRST_VAULT_TICKS: u32 = 60 * TICKS_PER_SEC;
+const VAULT_INTERVAL_TICKS: u32 = 90 * TICKS_PER_SEC;
+pub const SCORE_TO_WIN: u32 = 25;
 const RESPAWN_TICKS: u16 = (2.5 * TICKS_PER_SEC as f32) as u16;
 const DROP_TTL_TICKS: u32 = 30 * TICKS_PER_SEC;
 /// Fresh spawns can't be hurt for this long (or until they shoot), so nobody gets spawn-camped.
@@ -46,6 +47,8 @@ pub struct GameplayPlugin;
 
 impl Plugin for GameplayPlugin {
     fn build(&self, app: &mut App) {
+        // Every match is played on a freshly generated layout.
+        app.insert_resource(Arena(ArenaMap::generate(rand::random())));
         app.init_resource::<SimTick>()
             .init_resource::<Outbox>()
             .init_resource::<DamageQueue>()
@@ -110,10 +113,12 @@ pub struct Damage {
     pub attacker: Option<Entity>,
     pub amount: f32,
     pub armor_mult: f32,
-    /// `None` for monster bites and spores.
+    /// `None` for monster bites, spores and the environment.
     pub weapon: Option<WeaponKind>,
     /// EMP blast: strips armor and slows instead of (mostly) hurting.
     pub emp: bool,
+    /// What the kill feed calls it when it isn't a weapon, e.g. "油桶爆炸".
+    pub cause: Option<&'static str>,
 }
 
 #[derive(Resource, Default)]
@@ -216,7 +221,7 @@ pub fn spawn_pickup(commands: &mut Commands, item: Item, pos: Vec2, ttl: Option<
     entity.id()
 }
 
-fn spawn_match_state(mut commands: Commands) {
+fn spawn_match_state(mut commands: Commands, arena: Res<Arena>) {
     commands.spawn((
         Name::new("Match"),
         MatchState {
@@ -224,6 +229,7 @@ fn spawn_match_state(mut commands: Commands) {
             ticks_left: WARMUP_TICKS,
             vault_in: FIRST_VAULT_TICKS,
             winner: None,
+            map_seed: arena.seed,
         },
         Replicate::to_clients(NetworkTarget::All),
     ));
@@ -275,10 +281,11 @@ fn drop_shield_on_attack(mut players: Query<(&CurrentInput, &mut Vitals)>) {
 
 fn movement(
     arena: Res<Arena>,
+    obstacles: Res<Obstacles>,
     mut players: Query<(&mut Pos, &mut Dash, &mut Aim, &CurrentInput, &Vitals)>,
 ) {
     for (pos, dash, mut aim, input, vitals) in &mut players {
-        sim::step_movement(pos, dash, &input.0, vitals, &arena);
+        sim::step_movement(pos, dash, &input.0, vitals, &arena, &obstacles.0);
         let dir = input.0.aim.normalize_or_zero();
         if vitals.alive && dir != Vec2::ZERO && dir.distance_squared(aim.0) > 1e-4 {
             aim.0 = dir;
@@ -337,8 +344,8 @@ pub fn resolve_damage(
         queue.0.clear();
         return;
     }
-    // (victim, killer, weapon, victim's gear tier at the moment of death)
-    let mut deaths: Vec<(Entity, Option<Entity>, Option<WeaponKind>, u8)> = Vec::new();
+    // (victim, killer, how, victim's gear tier at the moment of death)
+    let mut deaths: Vec<(Entity, Option<Entity>, &'static str, u8)> = Vec::new();
     for dmg in queue.0.drain(..) {
         let attacker = dmg.attacker.and_then(|a| players.get(a).ok());
         let attacker_id = attacker.map_or(0, |(p, ..)| p.client_id);
@@ -381,11 +388,15 @@ pub fn resolve_damage(
             vitals.hp = 0.0;
             vitals.alive = false;
             vitals.respawn_in = RESPAWN_TICKS;
-            deaths.push((dmg.target, dmg.attacker, dmg.weapon, target_tier));
+            let how = dmg
+                .cause
+                .or(dmg.weapon.map(|w| w.stats().name))
+                .unwrap_or("撕咬");
+            deaths.push((dmg.target, dmg.attacker, how, target_tier));
         }
     }
 
-    for (victim, attacker, weapon, victim_tier) in deaths {
+    for (victim, attacker, how, victim_tier) in deaths {
         let Ok((player, pos, mut vitals, mut loadout, mut stats)) = players.get_mut(victim) else {
             continue;
         };
@@ -459,11 +470,11 @@ pub fn resolve_damage(
                 .map_or("废土", |m| m.kind.name())
                 .to_string(),
         };
-        info!("{killer_name} killed {victim_name} with {weapon:?}");
+        info!("{killer_name} killed {victim_name} ({how})");
         outbox.reliable.push(GameEvent::Kill {
             killer: killer_name,
             victim: victim_name,
-            weapon,
+            how: how.to_string(),
             bounty: had_bounty,
         });
     }
@@ -473,9 +484,9 @@ pub fn resolve_damage(
 /// player comes back able to fight instead of with a stick against a railgun.
 fn catch_up_kit(deficit: u32, rng: &mut impl Rng) -> (Option<WeaponKind>, Option<ArmorKind>) {
     match deficit {
-        8.. => (Some(WeaponKind::Rifle), Some(ArmorKind::Kevlar)),
-        5.. => (Some(WeaponKind::Rifle), Some(ArmorKind::Scrap)),
-        2.. => {
+        12.. => (Some(WeaponKind::Rifle), Some(ArmorKind::Kevlar)),
+        7.. => (Some(WeaponKind::Rifle), Some(ArmorKind::Scrap)),
+        3.. => {
             let weapon = if rng.random_bool(0.5) {
                 WeaponKind::Bow
             } else {
@@ -600,6 +611,7 @@ fn loot_spawner(
 fn match_flow(
     mut commands: Commands,
     mut state: Single<&mut MatchState>,
+    mut arena: ResMut<Arena>,
     players: Query<(&Player, &Stats)>,
     mut outbox: ResMut<Outbox>,
     mut reset: ResMut<ResetRequested>,
@@ -643,6 +655,7 @@ fn match_flow(
                 outbox.fast.push(GameEvent::Boom {
                     pos: VAULT_CENTER,
                     radius: 220.0,
+                    fire: false,
                 });
             }
             let leader = players.iter().max_by_key(|(_, s)| s.score);
@@ -669,6 +682,11 @@ fn match_flow(
                 state.phase = Phase::Warmup;
                 state.ticks_left = WARMUP_TICKS;
                 state.winner = None;
+                // A new city for the next match; everyone respawns into it.
+                state.map_seed = rand::random();
+                arena.0 = ArenaMap::generate(state.map_seed);
+                reset.0 = true;
+                info!("new arena layout {:#x}", state.map_seed);
             }
         }
     }
@@ -678,9 +696,11 @@ fn match_flow(
 fn reset_match(
     mut commands: Commands,
     mut reset: ResMut<ResetRequested>,
-    mut players: Query<(&mut Vitals, &mut Loadout, &mut Stats)>,
-    clutter: Query<Entity, Or<(With<Pickup>, With<Projectile>, With<Monster>)>>,
+    mut players: Query<(&mut Vitals, &mut Loadout, &mut Stats), With<Player>>,
+    clutter: Query<Entity, Or<(With<Pickup>, With<Projectile>, With<Monster>, With<Prop>)>>,
     mut loot: ResMut<LootState>,
+    mut props: ResMut<PropSlots>,
+    mut blasts: ResMut<Blasts>,
 ) {
     if !std::mem::take(&mut reset.0) {
         return;
@@ -698,6 +718,8 @@ fn reset_match(
         commands.entity(entity).despawn();
     }
     loot.spots.clear();
+    props.clear();
+    blasts.clear();
 }
 
 fn flush_outbox(
@@ -724,12 +746,13 @@ mod tests {
     fn catch_up_kit_grows_with_the_gap() {
         let mut rng = rand::rng();
         assert_eq!(catch_up_kit(0, &mut rng), (None, None));
+        assert_eq!(catch_up_kit(2, &mut rng), (None, None));
         assert!(matches!(
-            catch_up_kit(3, &mut rng),
+            catch_up_kit(4, &mut rng),
             (Some(WeaponKind::Bow | WeaponKind::PipeShotgun), None)
         ));
         assert_eq!(
-            catch_up_kit(6, &mut rng),
+            catch_up_kit(8, &mut rng),
             (Some(WeaponKind::Rifle), Some(ArmorKind::Scrap))
         );
         assert_eq!(

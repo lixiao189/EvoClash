@@ -8,14 +8,16 @@ use bevy::prelude::*;
 use bevy::sprite::{Anchor, SpriteImageMode};
 use bevy::window::PrimaryWindow;
 use evoclash_game::items::{WeaponKind, tier_color};
-use evoclash_game::map::{ARENA_HALF, VAULT_CENTER};
+use evoclash_game::map::{
+    ARENA_HALF, ArenaMap, BLOCK, Biome, MARGIN, PropKind, VAULT_CENTER, WallStyle,
+};
 use evoclash_game::protocol::*;
 use evoclash_game::sim::{Arena, MAX_HP, PLAYER_RADIUS};
 use rand::Rng;
 
 use crate::input::{CursorWorld, GUN_HEIGHT, LocalPlayer};
 use crate::predict::TickSamples;
-use crate::textures::{self, Facing, PIXEL, SURVIVOR, Textures};
+use crate::textures::{self, Facing, PIXEL, SURVIVOR, Textures, WallSprites};
 
 const Z_FLOOR: f32 = -10.0;
 const Z_DECAL: f32 = -8.0;
@@ -25,8 +27,12 @@ const Z_PROJECTILE: f32 = 4.0;
 /// Relative to the actor it labels, which sits around z = 2.
 const Z_LABEL: f32 = 3.0;
 const SPLAT_SECS: f32 = 8.0;
-/// How tall walls stand, in world pixels.
+/// How tall brick walls stand, in world pixels. Roofs sit on top of them.
 const WALL_HEIGHT: f32 = 40.0;
+/// Road width between city blocks.
+const STREET: f32 = 2.0 * MARGIN;
+/// Roof opacity while you're inside the building.
+const ROOF_SEE_THROUGH: f32 = 0.12;
 /// Within one actor, parts are layered by tiny z steps so they never cross another actor.
 const Z_STEP: f32 = 0.00001;
 /// Feet of the survivor sprite sit this far above its texture's bottom edge (world pixels).
@@ -97,6 +103,31 @@ struct Splat {
     age: f32,
 }
 
+/// Everything drawn for the current layout; torn down when a new match brings a new one.
+#[derive(Component)]
+struct Scenery;
+
+/// Roof (or eave) of a building in `Arena::buildings`, and its opacity when you're outside.
+#[derive(Component)]
+struct RoofOf {
+    building: usize,
+    alpha: f32,
+}
+
+#[derive(Component)]
+struct PropBody(Entity);
+
+/// The building the local player is standing in, if any. Anyone inside a different building
+/// is hidden under its roof.
+#[derive(Resource, Default)]
+pub struct Indoors(pub Option<usize>);
+
+impl Indoors {
+    pub fn conceals(&self, arena: &ArenaMap, p: Vec2) -> bool {
+        arena.building_at(p).is_some_and(|b| Some(b) != self.0)
+    }
+}
+
 /// Parts are authored at half resolution.
 fn pixel_sprite(image: Handle<Image>) -> (Sprite, Transform) {
     (
@@ -136,19 +167,25 @@ pub struct RenderPlugin;
 impl Plugin for RenderPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(ClearColor(Color::srgb(0.1, 0.06, 0.08)));
-        app.init_resource::<CameraShake>();
+        app.init_resource::<CameraShake>()
+            .init_resource::<Indoors>();
         app.add_systems(PreStartup, (load_font, load_textures));
-        app.add_systems(Startup, (spawn_camera, spawn_arena));
+        app.add_systems(Startup, spawn_camera);
         app.add_observer(dress_player);
         app.add_observer(dress_pickup);
         app.add_observer(dress_monster);
+        app.add_observer(dress_prop);
         app.add_observer(dress_projectile);
         app.add_observer(splat_monster);
         app.add_systems(
             Update,
             (
+                adopt_layout,
+                build_scenery,
+                update_roofs,
                 sync_players,
                 pose_players,
+                sync_props,
                 sync_pickups,
                 bob_pickups,
                 sync_monsters,
@@ -190,12 +227,137 @@ fn spawn_camera(mut commands: Commands) {
     ));
 }
 
-fn spawn_arena(mut commands: Commands, arena: Res<Arena>, textures: Res<Textures>) {
+/// The server picks a new layout every match; regenerate ours from the replicated seed.
+fn adopt_layout(state: Query<&MatchState>, mut arena: ResMut<Arena>) {
+    let Some(seed) = state.iter().next().map(|s| s.map_seed) else {
+        return;
+    };
+    if arena.seed != seed {
+        arena.0 = ArenaMap::generate(seed);
+    }
+}
+
+/// Ground cover, roads, buildings, walls and clutter for the current layout.
+fn build_scenery(
+    mut commands: Commands,
+    arena: Res<Arena>,
+    state: Query<(), With<MatchState>>,
+    textures: Res<Textures>,
+    old: Query<Entity, With<Scenery>>,
+    mut built: Local<Option<u64>>,
+) {
+    // Wait for the server's layout rather than drawing the placeholder one first.
+    if state.is_empty() || *built == Some(arena.seed) {
+        return;
+    }
+    *built = Some(arena.seed);
+    for entity in &old {
+        commands.entity(entity).despawn();
+    }
+    let arena = &arena.0;
+    let mut floor = |image: Handle<Image>, rect: Rect, z: f32| {
+        commands.spawn((
+            Scenery,
+            tiled(image, rect.size()),
+            Transform::from_translation(rect.center().extend(z)),
+        ));
+    };
+
+    // Dirt everywhere, running a little past the boundary walls.
+    floor(
+        textures.ground.clone(),
+        Rect::from_center_size(Vec2::ZERO, ARENA_HALF * 2.0 + 240.0),
+        Z_FLOOR,
+    );
+    for block in &arena.blocks {
+        let cover = match block.biome {
+            Biome::Urban | Biome::Vault => Some(textures.pavement.clone()),
+            Biome::Industrial => Some(textures.oily_concrete.clone()),
+            Biome::Wasteland | Biome::Radiation => None,
+        };
+        if let Some(image) = cover {
+            floor(image, block.rect.inflate(-MARGIN + 12.0), Z_FLOOR + 0.2);
+        }
+    }
+    // Roads between the blocks, with faded center dashes.
+    let mut streets_x = Vec::new();
+    let mut x = -ARENA_HALF.x + BLOCK.x;
+    while x < ARENA_HALF.x - 1.0 {
+        streets_x.push(x);
+        x += BLOCK.x;
+    }
+    let mut streets_y = Vec::new();
+    let mut y = -ARENA_HALF.y + BLOCK.y;
+    while y < ARENA_HALF.y - 1.0 {
+        streets_y.push(y);
+        y += BLOCK.y;
+    }
+    for x in &streets_x {
+        let rect =
+            Rect::from_center_size(Vec2::new(*x, 0.0), Vec2::new(STREET, ARENA_HALF.y * 2.0));
+        floor(textures.asphalt.clone(), rect, Z_FLOOR + 0.3);
+    }
+    for y in &streets_y {
+        let rect =
+            Rect::from_center_size(Vec2::new(0.0, *y), Vec2::new(ARENA_HALF.x * 2.0, STREET));
+        floor(textures.asphalt.clone(), rect, Z_FLOOR + 0.3);
+    }
+    let dash = Color::srgba(0.85, 0.75, 0.35, 0.5);
+    let near = |v: f32, lines: &[f32]| lines.iter().any(|l| (v - l).abs() < STREET);
+    let mut t = -ARENA_HALF.y + 40.0;
+    while t < ARENA_HALF.y - 40.0 {
+        for x in streets_x.iter().filter(|_| !near(t, &streets_y)) {
+            commands.spawn((
+                Scenery,
+                Sprite::from_color(dash, Vec2::new(4.0, 28.0)),
+                Transform::from_xyz(*x, t, Z_FLOOR + 0.35),
+            ));
+        }
+        t += 70.0;
+    }
+    let mut t = -ARENA_HALF.x + 40.0;
+    while t < ARENA_HALF.x - 40.0 {
+        for y in streets_y.iter().filter(|_| !near(t, &streets_x)) {
+            commands.spawn((
+                Scenery,
+                Sprite::from_color(dash, Vec2::new(28.0, 4.0)),
+                Transform::from_xyz(t, *y, Z_FLOOR + 0.35),
+            ));
+        }
+        t += 70.0;
+    }
+    for hazard in &arena.hazards {
+        commands.spawn((
+            Scenery,
+            tiled(textures.rad_ground.clone(), hazard.size()),
+            Transform::from_translation(hazard.center().extend(Z_FLOOR + 0.4)),
+        ));
+    }
+    // The vault: steel plates and a faded radiation sign.
     commands.spawn((
-        tiled(textures.ground.clone(), ARENA_HALF * 2.0),
-        Transform::from_xyz(0.0, 0.0, Z_FLOOR),
+        Scenery,
+        tiled(textures.vault_floor.clone(), Vec2::splat(400.0)),
+        Transform::from_translation(VAULT_CENTER.extend(Z_FLOOR + 0.5)),
     ));
-    // Scorch marks and oil stains. Purely cosmetic, so a fresh layout each launch is fine.
+    commands.spawn((
+        Scenery,
+        Sprite {
+            image: textures.trefoil.clone(),
+            custom_size: Some(Vec2::splat(220.0)),
+            color: Color::WHITE.with_alpha(0.28),
+            ..default()
+        },
+        Transform::from_translation(VAULT_CENTER.extend(Z_FLOOR + 0.55)),
+    ));
+    for building in &arena.buildings {
+        commands.spawn((
+            Scenery,
+            tiled(textures.floor(building.floor), building.rect.size()),
+            Transform::from_translation(building.rect.center().extend(Z_FLOOR + 0.6)),
+        ));
+    }
+
+    // Scorch marks and oil stains. Purely cosmetic, so a fresh scatter each time is fine.
     let mut rng = rand::rng();
     let random_spot = |rng: &mut rand::rngs::ThreadRng| {
         Vec2::new(
@@ -203,11 +365,12 @@ fn spawn_arena(mut commands: Commands, arena: Res<Arena>, textures: Res<Textures
             rng.random_range(-ARENA_HALF.y..ARENA_HALF.y),
         )
     };
-    for _ in 0..60 {
+    for _ in 0..180 {
         let at = random_spot(&mut rng);
         let image = textures.decals[rng.random_range(0..textures.decals.len())].clone();
         let (sprite, transform) = pixel_sprite(image);
         commands.spawn((
+            Scenery,
             sprite,
             transform
                 .with_translation(at.extend(Z_DECAL))
@@ -216,11 +379,28 @@ fn spawn_arena(mut commands: Commands, arena: Res<Arena>, textures: Res<Textures
                 )),
         ));
     }
-    // Upright clutter, kept out of walls and the vault so it never looks like cover.
+    // Upright clutter, kept out of walls, buildings and the vault so it never looks like cover.
+    // Paved blocks get much less of it than the wilds.
     let mut placed = 0;
-    while placed < 140 {
+    let mut tries = 0;
+    while placed < 360 && tries < 5000 {
+        tries += 1;
         let at = random_spot(&mut rng);
-        if at.distance(VAULT_CENTER) < 260.0 || arena.resolve_circle(at, 30.0) != at {
+        let paved = arena
+            .block_at(at)
+            .is_some_and(|b| matches!(b.biome, Biome::Urban | Biome::Vault | Biome::Industrial));
+        if (paved && rng.random_bool(0.75))
+            || at.distance(VAULT_CENTER) < 260.0
+            || arena.resolve_circle(at, 30.0) != at
+            || arena
+                .buildings
+                .iter()
+                .any(|b| b.rect.inflate(30.0).contains(at))
+            || arena
+                .props
+                .iter()
+                .any(|p| p.pos.distance(at) < p.kind.radius() + 26.0)
+        {
             continue;
         }
         placed += 1;
@@ -237,26 +417,110 @@ fn spawn_arena(mut commands: Commands, arena: Res<Arena>, textures: Res<Textures
         let (mut sprite, transform) = pixel_sprite(image);
         sprite.flip_x = rng.random_bool(0.5);
         commands.spawn((
+            Scenery,
             sprite,
             Anchor::BOTTOM_CENTER,
             transform.with_translation(at.extend(depth(at.y))),
         ));
     }
-    // The vault: steel plates and a faded radiation sign.
-    commands.spawn((
-        tiled(textures.vault_floor.clone(), Vec2::splat(340.0)),
-        Transform::from_translation(VAULT_CENTER.extend(Z_FLOOR + 1.0)),
-    ));
-    commands.spawn((
-        Sprite {
-            image: textures.trefoil.clone(),
-            custom_size: Some(Vec2::splat(200.0)),
-            color: Color::WHITE.with_alpha(0.28),
-            ..default()
-        },
-        Transform::from_translation(VAULT_CENTER.extend(Z_FLOOR + 1.5)),
-    ));
-    spawn_walls(&mut commands, &textures, &arena.walls);
+
+    for style in [
+        WallStyle::Brick,
+        WallStyle::Metal,
+        WallStyle::Rock,
+        WallStyle::Sandbag,
+    ] {
+        let rects: Vec<Rect> = arena
+            .walls
+            .iter()
+            .zip(&arena.wall_styles)
+            .filter(|(_, s)| **s == style)
+            .map(|(w, _)| *w)
+            .collect();
+        spawn_walls(&mut commands, textures.wall(style), &rects, style);
+    }
+
+    // Roofs sit on the walls, so they're lifted by the wall height and sorted with the front wall:
+    // whoever stands in front of the building is drawn over its roof, whoever is inside under it.
+    for (i, building) in arena.buildings.iter().enumerate() {
+        let r = building.rect;
+        let z = depth(r.min.y) + 6.0 * Z_STEP;
+        let size = Vec2::new(r.width() + 12.0, r.height() + 6.0);
+        commands.spawn((
+            Scenery,
+            RoofOf {
+                building: i,
+                alpha: 1.0,
+            },
+            tiled(textures.roof(building.roof), size),
+            Transform::from_translation(Vec3::new(
+                r.center().x,
+                r.center().y + WALL_HEIGHT - 1.0,
+                z,
+            )),
+        ));
+        // Doorways show as dark notches in the roof's edge, since the roof hides the walls.
+        for gap in arena.entrances.iter().filter(|e| r.contains(e.center())) {
+            let notch = gap.inflate(3.0);
+            commands.spawn((
+                Scenery,
+                RoofOf {
+                    building: i,
+                    alpha: 0.85,
+                },
+                Sprite::from_color(Color::srgba(0.06, 0.04, 0.03, 0.85), notch.size()),
+                Transform::from_translation(
+                    (notch.center() + Vec2::Y * WALL_HEIGHT).extend(z + 2.0 * Z_STEP),
+                ),
+            ));
+        }
+        // Dark eave along the front edge so the roof reads as overhanging the wall.
+        commands.spawn((
+            Scenery,
+            RoofOf {
+                building: i,
+                alpha: 0.7,
+            },
+            Sprite::from_color(Color::srgba(0.05, 0.04, 0.04, 0.7), Vec2::new(size.x, 4.0)),
+            Transform::from_translation(Vec3::new(
+                r.center().x,
+                r.min.y + WALL_HEIGHT - 2.0,
+                z + Z_STEP,
+            )),
+        ));
+    }
+}
+
+/// Fade the roof over your head; note which building you're in so others inside stay hidden.
+fn update_roofs(
+    time: Res<Time>,
+    fixed: Res<Time<Fixed>>,
+    arena: Res<Arena>,
+    me: Query<(&Pos, Option<&TickSamples>, &Vitals), With<LocalPlayer>>,
+    mut indoors: ResMut<Indoors>,
+    mut roofs: Query<(&RoofOf, &mut Sprite)>,
+) {
+    let inside = me
+        .single()
+        .ok()
+        .filter(|(.., v)| v.alive)
+        .and_then(|(pos, samples, _)| arena.building_at(visual_pos(pos, samples, &fixed)));
+    if indoors.0 != inside {
+        indoors.0 = inside;
+    }
+    let k = 1.0 - (-10.0 * time.delta_secs()).exp();
+    for (roof, mut sprite) in &mut roofs {
+        let now = sprite.color.alpha();
+        let goal = if Some(roof.building) == inside {
+            roof.alpha * ROOF_SEE_THROUGH
+        } else {
+            roof.alpha
+        };
+        let alpha = now + (goal - now) * k;
+        if (alpha - now).abs() > 1e-3 {
+            sprite.color.set_alpha(alpha);
+        }
+    }
 }
 
 /// A vertical slice of solid wall: footprint `x0..x1` by `y0..y1`, no overlaps with other runs.
@@ -308,9 +572,24 @@ fn wall_runs(walls: &[Rect]) -> Vec<WallRun> {
     runs
 }
 
-fn spawn_walls(commands: &mut Commands, textures: &Textures, walls: &[Rect]) {
+/// Paint for steel: containers and wrecks come in a few faded colors.
+const METAL_TINTS: [Color; 5] = [
+    Color::srgb(0.78, 0.42, 0.32),
+    Color::srgb(0.45, 0.6, 0.8),
+    Color::srgb(0.5, 0.68, 0.45),
+    Color::srgb(0.85, 0.85, 0.82),
+    Color::srgb(0.9, 0.74, 0.35),
+];
+
+fn spawn_walls(commands: &mut Commands, sprites: &WallSprites, walls: &[Rect], style: WallStyle) {
     let runs = wall_runs(walls);
     let dark = Color::srgb(0.08, 0.06, 0.07);
+    let wall_height = match style {
+        WallStyle::Brick => WALL_HEIGHT,
+        WallStyle::Metal => 46.0,
+        WallStyle::Rock => 30.0,
+        WallStyle::Sandbag => 22.0,
+    };
     // Whether another run covers the strip just outside `x` somewhere within `y0..y1`.
     let neighbour = |x: f32, y0: f32, y1: f32| {
         runs.iter()
@@ -324,7 +603,19 @@ fn spawn_walls(commands: &mut Commands, textures: &Textures, walls: &[Rect]) {
         let depth_len = run.y1 - run.y0;
         let z = depth(run.y0);
         let at = |y: f32, dz: f32| Vec3::new(cx, y, z + dz);
+        let tint = match style {
+            WallStyle::Metal => {
+                METAL_TINTS[((run.x0 * 7.0 + run.y0 * 13.0).abs() as usize) % METAL_TINTS.len()]
+            }
+            _ => Color::WHITE,
+        };
+        let face = |image: &Handle<Image>, size: Vec2| {
+            let mut sprite = tiled(image.clone(), size);
+            sprite.color = tint;
+            sprite
+        };
         commands.spawn((
+            Scenery,
             Sprite::from_color(Color::srgba(0.0, 0.0, 0.0, 0.3), Vec2::new(w, depth_len)),
             Transform::from_translation(Vec3::new(
                 cx + 10.0,
@@ -333,12 +624,14 @@ fn spawn_walls(commands: &mut Commands, textures: &Textures, walls: &[Rect]) {
             )),
         ));
         commands.spawn((
-            tiled(textures.wall_front.clone(), Vec2::new(w, WALL_HEIGHT)),
-            Transform::from_translation(at(run.y0 + WALL_HEIGHT / 2.0, 0.0)),
+            Scenery,
+            face(&sprites.front, Vec2::new(w, wall_height)),
+            Transform::from_translation(at(run.y0 + wall_height / 2.0, 0.0)),
         ));
         commands.spawn((
-            tiled(textures.wall_top.clone(), Vec2::new(w, depth_len)),
-            Transform::from_translation(at(run.y0 + WALL_HEIGHT + depth_len / 2.0, Z_STEP)),
+            Scenery,
+            face(&sprites.top, Vec2::new(w, depth_len)),
+            Transform::from_translation(at(run.y0 + wall_height + depth_len / 2.0, Z_STEP)),
         ));
         // Sunlit lip where the cap meets the face, grime where the face meets the ground,
         // and a dark rim along the cap's far edge.
@@ -347,13 +640,14 @@ fn spawn_walls(commands: &mut Commands, textures: &Textures, walls: &[Rect]) {
             (
                 Color::srgba(1.0, 0.95, 0.85, 0.35),
                 strip(2.0),
-                run.y0 + WALL_HEIGHT + 1.0,
+                run.y0 + wall_height + 1.0,
             ),
             (Color::srgba(0.0, 0.0, 0.0, 0.35), strip(4.0), run.y0 + 2.0),
-            (dark, strip(2.0), run.y1 + WALL_HEIGHT + 1.0),
+            (dark, strip(2.0), run.y1 + wall_height + 1.0),
             (dark, strip(2.0), run.y0 - 1.0),
         ] {
             commands.spawn((
+                Scenery,
                 Sprite::from_color(color, size),
                 Transform::from_translation(at(y, 2.0 * Z_STEP)),
             ));
@@ -366,8 +660,9 @@ fn spawn_walls(commands: &mut Commands, textures: &Textures, walls: &[Rect]) {
             if neighbour(outside, run.y0, run.y1) {
                 continue;
             }
-            let h = depth_len + WALL_HEIGHT + 4.0;
+            let h = depth_len + wall_height + 4.0;
             commands.spawn((
+                Scenery,
                 Sprite::from_color(dark, Vec2::new(2.0, h)),
                 Transform::from_translation(Vec3::new(x, run.y0 - 2.0 + h / 2.0, z + 2.0 * Z_STEP)),
             ));
@@ -485,6 +780,8 @@ pub fn visual_pos(pos: &Pos, samples: Option<&TickSamples>, fixed: &Time<Fixed>)
 
 fn sync_players(
     fixed: Res<Time<Fixed>>,
+    arena: Res<Arena>,
+    indoors: Res<Indoors>,
     mut players: Query<
         (
             &Pos,
@@ -499,7 +796,7 @@ fn sync_players(
     for (pos, samples, vitals, mut transform, mut visibility) in &mut players {
         let p = visual_pos(pos, samples, &fixed);
         transform.translation = p.extend(depth(p.y));
-        *visibility = if vitals.alive {
+        *visibility = if vitals.alive && !indoors.conceals(&arena, p) {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -660,6 +957,8 @@ fn dress_monster(
 fn sync_monsters(
     time: Res<Time>,
     textures: Res<Textures>,
+    arena: Res<Arena>,
+    indoors: Res<Indoors>,
     mut monsters: Query<(
         &Monster,
         &Pos,
@@ -672,7 +971,11 @@ fn sync_monsters(
     let t = time.elapsed_secs();
     for (monster, pos, mut parts, mut transform, mut visibility) in &mut monsters {
         transform.translation = pos.0.extend(depth(pos.0.y));
-        visibility.set_if_neq(Visibility::Visible);
+        visibility.set_if_neq(if indoors.conceals(&arena, pos.0) {
+            Visibility::Hidden
+        } else {
+            Visibility::Visible
+        });
         let Ok((mut sprite, mut body)) = bodies.get_mut(parts.body) else {
             continue;
         };
@@ -698,6 +1001,62 @@ fn sync_monsters(
                 body.scale = Vec3::new(PIXEL * (1.0 + pulse), PIXEL * (1.0 - pulse), 1.0);
             }
         }
+    }
+}
+
+fn prop_image(prop: &Prop, textures: &Textures) -> Handle<Image> {
+    match prop.kind {
+        PropKind::Crate => textures.crate_box.clone(),
+        PropKind::Barrel => textures.barrel.clone(),
+        PropKind::Safe if prop.open => textures.safe_open.clone(),
+        PropKind::Safe => textures.safe.clone(),
+    }
+}
+
+fn dress_prop(
+    trigger: On<Add<Prop>>,
+    props: Query<(&Prop, &Pos)>,
+    mut commands: Commands,
+    textures: Res<Textures>,
+) {
+    let Ok((prop, pos)) = props.get(trigger.entity) else {
+        return;
+    };
+    let (sprite, transform) = pixel_sprite(prop_image(prop, &textures));
+    let body = commands
+        .spawn((
+            sprite,
+            Anchor::BOTTOM_CENTER,
+            transform.with_translation(Vec3::Y * -FOOT_INSET),
+        ))
+        .id();
+    let r = prop.kind.radius();
+    let shadow = commands
+        .spawn(shadow(&textures, Vec2::new(r * 2.4, r * 1.1)))
+        .id();
+    commands
+        .entity(trigger.entity)
+        .insert((
+            Transform::from_translation(pos.0.extend(depth(pos.0.y))),
+            Visibility::Visible,
+            PropBody(body),
+        ))
+        .add_children(&[shadow, body]);
+}
+
+/// Safes swing open; crates and barrels darken as they take a beating.
+fn sync_props(
+    textures: Res<Textures>,
+    props: Query<(&Prop, &Vitals, &PropBody), Or<(Changed<Prop>, Changed<Vitals>)>>,
+    mut bodies: Query<&mut Sprite>,
+) {
+    for (prop, vitals, body) in &props {
+        let Ok(mut sprite) = bodies.get_mut(body.0) else {
+            continue;
+        };
+        sprite.image = prop_image(prop, &textures);
+        let worn = 1.0 - (vitals.hp / prop.kind.max_hp()).clamp(0.0, 1.0);
+        sprite.color = Color::WHITE.mix(&Color::srgb(0.45, 0.35, 0.3), worn * 0.7);
     }
 }
 
@@ -844,19 +1203,28 @@ fn draw_overlays(
         Has<LocalPlayer>,
     )>,
     monsters: Query<(&Pos, &Vitals, &Monster)>,
+    props: Query<(&Pos, &Vitals, &Prop)>,
     pickups: Query<&Pos, With<Pickup>>,
     textures: Res<Textures>,
     images: Res<Assets<Image>>,
+    arena: Res<Arena>,
+    indoors: Res<Indoors>,
 ) {
     let t = time.elapsed_secs();
-    // Zone hints: the closer to the vault, the better the loot.
-    gizmos.circle_2d(VAULT_CENTER, 620.0, tier_color(2).with_alpha(0.06));
-    gizmos.circle_2d(VAULT_CENTER, 340.0, tier_color(3).with_alpha(0.08));
+    // Radiation zones shimmer at the edges.
+    for hazard in &arena.hazards {
+        let glow = 0.25 + 0.12 * (t * 2.0).sin();
+        gizmos.rect_2d(
+            Isometry2d::from_translation(hazard.center()),
+            hazard.size(),
+            Color::srgb(0.6, 1.0, 0.3).with_alpha(glow),
+        );
+    }
 
     // Monsters only show a health bar once they've been hurt.
     for (pos, vitals, monster) in &monsters {
         let max = monster.kind.max_hp();
-        if vitals.hp >= max {
+        if vitals.hp >= max || indoors.conceals(&arena, pos.0) {
             continue;
         }
         let w = monster.kind.radius() * 2.0;
@@ -867,11 +1235,34 @@ fn draw_overlays(
         gizmos.line_2d(left, left + Vec2::X * w * frac, Color::srgb(0.6, 0.95, 0.3));
     }
 
+    // Crates show their damage; safes show how far along the cracking is.
+    for (pos, vitals, prop) in &props {
+        if indoors.conceals(&arena, pos.0) {
+            continue;
+        }
+        let w = prop.kind.radius() * 2.0;
+        let left = pos.0 + Vec2::new(-w / 2.0, prop.kind.radius() * 2.4 + 6.0);
+        let (frac, color) = match prop.kind {
+            PropKind::Safe if prop.progress > 0 => {
+                (prop.progress as f32 / 100.0, Color::srgb(1.0, 0.85, 0.3))
+            }
+            PropKind::Crate | PropKind::Barrel if vitals.hp < prop.kind.max_hp() => {
+                (vitals.hp / prop.kind.max_hp(), Color::srgb(0.95, 0.6, 0.3))
+            }
+            _ => continue,
+        };
+        gizmos.line_2d(left, left + Vec2::X * w, Color::srgba(0.0, 0.0, 0.0, 0.6));
+        gizmos.line_2d(left, left + Vec2::X * w * frac.clamp(0.0, 1.0), color);
+    }
+
     for (pos, samples, vitals, stats, local) in &players {
         if !vitals.alive {
             continue;
         }
         let p = visual_pos(pos, samples, &fixed);
+        if !local && indoors.conceals(&arena, p) {
+            continue;
+        }
 
         // Armor shell: thicker and brighter the better the tech.
         if vitals.armor_points > 0.0 {
@@ -935,6 +1326,18 @@ fn draw_overlays(
         }
 
         if local {
+            // A safe within reach pulses so you know you can crack it.
+            for (prop_pos, _, prop) in &props {
+                let reach = prop.kind.radius() + PLAYER_RADIUS + 40.0;
+                if prop.kind == PropKind::Safe && !prop.open && prop_pos.0.distance(p) < reach {
+                    ring(
+                        &mut gizmos,
+                        prop_pos.0,
+                        prop.kind.radius() + 8.0,
+                        Color::srgb(1.0, 0.85, 0.3).with_alpha(0.5 + 0.4 * (t * 6.0).sin()),
+                    );
+                }
+            }
             // Show what's in reach.
             for pickup in &pickups {
                 if pickup.0.distance(p) < 46.0 {

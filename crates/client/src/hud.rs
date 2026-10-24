@@ -1,9 +1,10 @@
 //! Screen-space UI: status, match clock, scoreboard, kill feed and banners.
 
 use bevy::prelude::*;
-use evoclash_game::items::tier_color;
+use evoclash_game::items::{ArmorKind, tier_color};
+use evoclash_game::map::PropKind;
 use evoclash_game::protocol::*;
-use evoclash_game::sim::{DASH_COOLDOWN, MAX_HP};
+use evoclash_game::sim::{Arena, DASH_COOLDOWN, MAX_HP, PLAYER_RADIUS};
 
 use crate::effects::{Banner, KillFeed};
 use crate::input::LocalPlayer;
@@ -26,6 +27,10 @@ enum HudText {
     Feed,
     Banner,
     Center,
+    /// Where you are, under the minimap.
+    Location,
+    /// What you can do right here (crack a safe).
+    Hint,
 }
 
 fn text_node(font: &UiFont, size: f32, kind: HudText, node: Node, justify: Justify) -> impl Bundle {
@@ -56,6 +61,28 @@ fn spawn_hud(mut commands: Commands, font: Res<UiFont>) {
         at(None, Some(16.0), Some(16.0), None),
         Justify::Left,
     ));
+    commands.spawn(text_node(
+        &font,
+        15.0,
+        HudText::Location,
+        at(Some(178.0), None, Some(16.0), None),
+        Justify::Left,
+    ));
+    commands
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(150.0),
+            width: Val::Percent(100.0),
+            justify_content: JustifyContent::Center,
+            ..default()
+        })
+        .with_child(text_node(
+            &font,
+            18.0,
+            HudText::Hint,
+            Node::default(),
+            Justify::Center,
+        ));
     commands.spawn(text_node(
         &font,
         16.0,
@@ -117,7 +144,9 @@ fn fmt_time(ticks: u32) -> String {
 #[allow(clippy::type_complexity)]
 fn update_hud(
     time: Res<Time>,
-    me: Query<(&Player, &Vitals, &Loadout, &Stats, &Dash), With<LocalPlayer>>,
+    arena: Res<Arena>,
+    me: Query<(&Player, &Vitals, &Loadout, &Stats, &Dash, &Pos), With<LocalPlayer>>,
+    props: Query<(&Pos, &Prop)>,
     players: Query<(&Player, &Stats)>,
     state: Query<&MatchState>,
     feed: Res<KillFeed>,
@@ -131,7 +160,7 @@ fn update_hud(
     for (kind, mut text, mut color) in &mut texts {
         let value = match kind {
             HudText::Status => match me {
-                Some((_, vitals, loadout, stats, dash)) => {
+                Some((_, vitals, loadout, stats, dash, _)) => {
                     let weapon = loadout.weapon.stats();
                     color.0 = tier_color(weapon.tier).mix(&Color::WHITE, 0.4);
                     let ammo = if weapon.melee {
@@ -148,7 +177,7 @@ fn update_hud(
                         )
                     };
                     format!(
-                        "生命 {:.0}/{MAX_HP:.0}   {} {:.0}\n武器 [T{}] {}  弹药 {ammo}\n电磁脉冲 ×{}   冲刺 {dash}   连杀 {}\n\nWASD 移动  鼠标 瞄准/射击  空格 冲刺  E 拾取  Q/右键 电磁脉冲",
+                        "生命 {:.0}/{MAX_HP:.0}   {} {:.0}\n武器 [T{}] {}  弹药 {ammo}\n电磁脉冲 ×{}   冲刺 {dash}   连杀 {}\n\nWASD 移动  鼠标 瞄准/射击  空格 冲刺  E 拾取（按住撬保险柜）  Q/右键 电磁脉冲",
                         vitals.hp,
                         vitals.armor.name(),
                         vitals.armor_points,
@@ -204,6 +233,50 @@ fn update_hud(
                 }
                 _ => String::new(),
             },
+            HudText::Location => match me.filter(|(_, v, ..)| v.alive) {
+                Some((_, vitals, .., pos)) => {
+                    let place = arena.block_at(pos.0).map_or("街道", |b| b.name);
+                    if arena.in_hazard(pos.0) {
+                        let sealed =
+                            vitals.armor == ArmorKind::PowerArmor && vitals.armor_points > 0.0;
+                        if sealed {
+                            color.0 = Color::srgb(0.6, 1.0, 0.4);
+                            format!("{place}\n辐射区：动力装甲隔绝了辐射")
+                        } else {
+                            let blink = 0.6 + 0.4 * (now * 6.0).sin();
+                            color.0 = Color::srgb(1.0, 0.45, 0.3).with_alpha(blink);
+                            format!("{place}\n辐射区！持续掉血，动力装甲可免疫")
+                        }
+                    } else {
+                        color.0 = Color::srgba(1.0, 1.0, 1.0, 0.85);
+                        place.to_string()
+                    }
+                }
+                None => String::new(),
+            },
+            HudText::Hint => {
+                let near_safe = me.filter(|(_, v, ..)| v.alive).and_then(|(.., pos)| {
+                    props.iter().find(|(p, prop)| {
+                        prop.kind == PropKind::Safe
+                            && p.0.distance(pos.0) < prop.kind.radius() + PLAYER_RADIUS + 40.0
+                    })
+                });
+                match near_safe {
+                    Some((_, prop)) if prop.open => {
+                        color.0 = Color::srgba(0.8, 0.8, 0.8, 0.8);
+                        "保险柜已被撬空".to_string()
+                    }
+                    Some((_, prop)) if prop.progress > 0 => {
+                        color.0 = Color::srgb(1.0, 0.85, 0.3);
+                        format!("撬保险柜中… {}%", prop.progress)
+                    }
+                    Some(_) => {
+                        color.0 = Color::srgb(1.0, 0.85, 0.3);
+                        "按住 E 撬开保险柜（站着别动）".to_string()
+                    }
+                    None => String::new(),
+                }
+            }
             HudText::Center => {
                 if let Some(s) = state.filter(|s| s.phase == Phase::Intermission) {
                     format!("{} 获胜", s.winner.as_deref().unwrap_or("无人"))

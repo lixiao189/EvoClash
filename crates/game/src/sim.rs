@@ -37,8 +37,13 @@ pub fn underdog_mult(attacker_weapon_tier: u8, target_gear_tier: u8) -> f32 {
     (1.0 + UNDERDOG_BONUS_PER_TIER * gap).min(UNDERDOG_BONUS_MAX)
 }
 
+/// The current match's layout. Replaced whenever `MatchState::map_seed` changes.
 #[derive(Resource, Deref, Default)]
 pub struct Arena(pub ArenaMap);
+
+/// Standing props as `(center, radius)`, rebuilt every tick for movement.
+#[derive(Resource, Default)]
+pub struct Obstacles(pub Vec<(Vec2, f32)>);
 
 pub fn speed_mult(vitals: &Vitals) -> f32 {
     let emp = if vitals.emp_slow > 0 {
@@ -50,13 +55,15 @@ pub fn speed_mult(vitals: &Vitals) -> f32 {
 }
 
 /// Advance one player by one tick. Writes through `Mut` only when values change, so
-/// prediction history and replication don't see spurious updates.
+/// prediction history and replication don't see spurious updates. `obstacles` are the props
+/// currently standing, as `(center, radius)`.
 pub fn step_movement(
     mut pos: Mut<crate::protocol::Pos>,
     mut dash: Mut<Dash>,
     input: &PlayerInput,
     vitals: &Vitals,
     map: &ArenaMap,
+    obstacles: &[(Vec2, f32)],
 ) {
     if !vitals.alive {
         return;
@@ -89,7 +96,7 @@ pub fn step_movement(
         *dash = d;
     }
     if velocity != Vec2::ZERO {
-        let next = map.resolve_circle(pos.0 + velocity * DT, PLAYER_RADIUS);
+        let next = map.resolve_with(pos.0 + velocity * DT, PLAYER_RADIUS, obstacles);
         if next != pos.0 {
             pos.0 = next;
         }

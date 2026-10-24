@@ -142,7 +142,13 @@ fn step_tracers(
     time: Res<Time>,
     arena: Res<Arena>,
     mut tracers: Query<(Entity, &mut Tracer)>,
-    others: Query<(&Pos, &Vitals), (Or<(With<Player>, With<Monster>)>, Without<LocalPlayer>)>,
+    others: Query<
+        (&Pos, &Vitals),
+        (
+            Or<(With<Player>, With<Monster>, With<Prop>)>,
+            Without<LocalPlayer>,
+        ),
+    >,
 ) {
     let dt = time.delta_secs();
     for (entity, mut tracer) in &mut tracers {
@@ -185,11 +191,10 @@ fn receive_events(
                 GameEvent::Kill {
                     killer,
                     victim,
-                    weapon,
+                    how,
                     bounty,
                 } => {
                     let tag = if bounty { " ★悬赏" } else { "" };
-                    let how = weapon.map_or("变异", |w| w.stats().name);
                     feed.0
                         .push((format!("{killer} [{how}] {victim}{tag}"), now));
                     if feed.0.len() > 6 {
@@ -231,19 +236,32 @@ fn receive_events(
                         life: 0.15,
                     });
                 }
-                GameEvent::Boom { pos, radius } => {
+                GameEvent::Boom { pos, radius, fire } => {
                     if me.is_some_and(|(_, p)| p.0.distance(pos) < radius * 1.5) {
-                        shake.0 = shake.0.max(1.2);
+                        shake.0 = shake.0.max(if fire { 2.0 } else { 1.2 });
                     }
+                    let color = if fire {
+                        Color::srgb(1.0, 0.55, 0.15)
+                    } else {
+                        Color::srgb(0.4, 0.8, 1.0)
+                    };
                     commands.spawn(Fx {
-                        kind: FxKind::Ring {
-                            pos,
-                            radius,
-                            color: Color::srgb(0.4, 0.8, 1.0),
-                        },
+                        kind: FxKind::Ring { pos, radius, color },
                         age: 0.0,
                         life: 0.45,
                     });
+                    if fire {
+                        // A hot core inside the shock ring.
+                        commands.spawn(Fx {
+                            kind: FxKind::Ring {
+                                pos,
+                                radius: radius * 0.5,
+                                color: Color::srgb(1.0, 0.9, 0.4),
+                            },
+                            age: 0.0,
+                            life: 0.3,
+                        });
+                    }
                 }
             }
         }

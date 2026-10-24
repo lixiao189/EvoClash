@@ -9,6 +9,7 @@
 mod effects;
 mod hud;
 mod input;
+mod minimap;
 mod predict;
 mod render;
 mod session;
@@ -73,6 +74,7 @@ fn main() {
         render::RenderPlugin,
         effects::EffectsPlugin,
         hud::HudPlugin,
+        minimap::MinimapPlugin,
     ));
     app.run();
 }

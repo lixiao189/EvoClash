@@ -3,9 +3,9 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-use bevy::math::{Rect, Vec2};
+use bevy::math::Vec2;
 
-use crate::map::{ARENA_HALF, ArenaMap};
+use crate::map::{ARENA_HALF, ArenaMap, segment_circle};
 
 const CELL: f32 = 32.0;
 
@@ -20,13 +20,27 @@ impl NavGrid {
     pub fn new(map: &ArenaMap, clearance: f32) -> Self {
         let width = (2.0 * ARENA_HALF.x / CELL).ceil() as usize;
         let height = (2.0 * ARENA_HALF.y / CELL).ceil() as usize;
-        let inflated: Vec<Rect> = map.walls.iter().map(|w| w.inflate(clearance)).collect();
         let mut blocked = vec![false; width * height];
-        for y in 0..height {
-            for x in 0..width {
-                let c = Self::center_of(x, y);
-                blocked[y * width + x] = inflated.iter().any(|r| r.contains(c));
+        let mut mark = |min: Vec2, max: Vec2, hit: &dyn Fn(Vec2) -> bool| {
+            let lo = ((min + ARENA_HALF) / CELL).floor().max(Vec2::ZERO);
+            let hi = ((max + ARENA_HALF) / CELL).ceil();
+            for y in lo.y as usize..(hi.y as usize).min(height) {
+                for x in lo.x as usize..(hi.x as usize).min(width) {
+                    if hit(Self::center_of(x, y)) {
+                        blocked[y * width + x] = true;
+                    }
+                }
             }
+        };
+        for wall in &map.walls {
+            let r = wall.inflate(clearance);
+            mark(r.min, r.max, &|c| r.contains(c));
+        }
+        // Props come and go, but treating their spots as always solid keeps paths simple.
+        for prop in &map.props {
+            let reach = prop.kind.radius() + clearance;
+            let at = prop.pos;
+            mark(at - reach, at + reach, &|c| c.distance(at) < reach);
         }
         Self {
             width,
@@ -154,10 +168,16 @@ impl NavGrid {
     }
 }
 
-/// Can a circle of `radius` slide straight from `a` to `b` without touching a wall?
+/// Can a circle of `radius` slide straight from `a` to `b` without touching a wall or a prop?
 pub fn clear_sweep(map: &ArenaMap, a: Vec2, b: Vec2, radius: f32) -> bool {
     let n = (b - a).normalize_or_zero().perp() * radius;
-    map.line_of_sight(a, b) && map.line_of_sight(a + n, b + n) && map.line_of_sight(a - n, b - n)
+    map.line_of_sight(a, b)
+        && map.line_of_sight(a + n, b + n)
+        && map.line_of_sight(a - n, b - n)
+        && map
+            .props
+            .iter()
+            .all(|p| segment_circle(a, b, p.pos, p.kind.radius() + radius).is_none())
 }
 
 /// Point to walk toward this tick to eventually reach `to`.
@@ -183,14 +203,44 @@ mod tests {
 
     #[test]
     fn finds_route_into_the_vault() {
-        let map = ArenaMap::new();
-        let grid = NavGrid::new(&map, 26.0);
+        let map = ArenaMap::generate(3);
+        let grid = NavGrid::new(&map, 28.0);
         let from = map.spawn_points[0];
         let path = grid.path(from, Vec2::ZERO).expect("vault reachable");
         assert!(path.len() > 2);
         // Every hop on the path is walkable.
         for pair in path.windows(2) {
             assert!(map.line_of_sight(pair[0], pair[1]));
+        }
+    }
+
+    /// Every spawn, loot spot and prop of every layout can be walked to: no room is sealed
+    /// off and no doorway is blocked by clutter. Uses the bots' clearance, which is stricter
+    /// than what a player needs.
+    #[test]
+    fn every_layout_is_connected() {
+        for seed in 0..120 {
+            let map = ArenaMap::generate(seed);
+            let grid = NavGrid::new(&map, 28.0);
+            let from = map.spawn_points[0];
+            let reach = |to: Vec2| {
+                let path = grid.path(from, to)?;
+                let end = *path.get(path.len().saturating_sub(2))?;
+                (end.distance(to) < 120.0 && map.line_of_sight(end, to)).then_some(())
+            };
+            for to in map
+                .spawn_points
+                .iter()
+                .chain(map.loot_spots.iter().map(|l| &l.pos))
+            {
+                assert!(reach(*to).is_some(), "seed {seed}: {to} unreachable");
+            }
+            for prop in &map.props {
+                assert!(
+                    reach(prop.pos).is_some(),
+                    "seed {seed}: {prop:?} unreachable"
+                );
+            }
         }
     }
 }

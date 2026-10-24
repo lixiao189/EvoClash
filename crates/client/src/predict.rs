@@ -1,8 +1,8 @@
 //! Client-side prediction of the local player, plus smoothing between fixed ticks for rendering.
 
 use bevy::prelude::*;
-use evoclash_game::protocol::{Dash, PlayerInput, Pos, Vitals};
-use evoclash_game::sim::{self, Arena};
+use evoclash_game::protocol::{Dash, PlayerInput, Pos, Prop, Vitals};
+use evoclash_game::sim::{self, Arena, Obstacles};
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::*;
 
@@ -24,17 +24,32 @@ pub struct PredictPlugin;
 impl Plugin for PredictPlugin {
     fn build(&self, app: &mut App) {
         // Runs again for every re-simulated tick during a rollback, using the same rules as the server.
-        app.add_systems(FixedUpdate, predicted_movement);
+        app.add_systems(FixedUpdate, (track_obstacles, predicted_movement).chain());
         app.add_systems(FixedLast, sample_ticks);
     }
 }
 
+/// Crates and barrels block movement while they stand, same as on the server.
+fn track_obstacles(
+    mut obstacles: ResMut<Obstacles>,
+    props: Query<(&Pos, &Prop, &Vitals), Without<Predicted>>,
+) {
+    obstacles.0.clear();
+    obstacles.0.extend(
+        props
+            .iter()
+            .filter(|(.., v)| v.alive)
+            .map(|(p, prop, _)| (p.0, prop.kind.radius())),
+    );
+}
+
 fn predicted_movement(
     arena: Res<Arena>,
+    obstacles: Res<Obstacles>,
     mut players: Query<(&mut Pos, &mut Dash, &ActionState<PlayerInput>, &Vitals), With<Predicted>>,
 ) {
     for (pos, dash, action, vitals) in &mut players {
-        sim::step_movement(pos, dash, &action.0, vitals, &arena);
+        sim::step_movement(pos, dash, &action.0, vitals, &arena, &obstacles.0);
     }
 }
 

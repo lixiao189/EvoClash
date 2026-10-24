@@ -15,6 +15,7 @@ impl Plugin for SharedPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(protocol::ProtocolPlugin);
         app.init_resource::<sim::Arena>();
+        app.init_resource::<sim::Obstacles>();
     }
 }
 
