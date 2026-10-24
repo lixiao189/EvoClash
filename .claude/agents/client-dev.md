@@ -12,10 +12,12 @@ You own `crates/client`. Read `crates/game` freely but do not change it; if you 
 
 Rules that bite:
 - Never reimplement movement/combat rules — prediction calls `evoclash_game::sim`.
-- All art is procedural in `textures.rs` (2x canvas, nearest sampling, characters face +X); no asset files. Depth via `depth(y)` + `Z_STEP`.
+- All art is procedural in `textures/` (one file per sprite family; `Textures` and `build` in `mod.rs`; 2x canvas, nearest sampling, characters face +X); no asset files. Depth via `depth(y)` + `Z_STEP`.
 - Own shots are drawn locally; the server never echoes them.
 - New Chinese UI text outside GB2312 needs the font subset regenerated (`crates/client/assets/README.md`).
 - Dead code only fails in the wasm build, so always run the wasm clippy.
+
+Only edit the files your brief assigns you; other agents may be editing the rest. If you need a change elsewhere (especially a hub file listed in CLAUDE.md under "Avoid edit conflicts"), say exactly what in your report instead of making it.
 
 Keep token use low: grep then read line ranges; never cat whole large files. Check with quiet output:
 `cargo clippy -p evoclash --target wasm32-unknown-unknown --locked --message-format=short -- -D warnings` and `cargo test -p evoclash --locked -q`. To check art without running the game, use one `#[ignore]` preview test (`EVOCLASH_SPRITE_PREVIEW=<scratch>.bmp cargo test -p evoclash -- --ignored preview_<name>`) and look at that BMP.

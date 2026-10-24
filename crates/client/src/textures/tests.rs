@@ -1,0 +1,425 @@
+use super::*;
+
+#[test]
+fn hash_is_in_unit_range_and_stable() {
+    for i in 0..1000 {
+        let h = hash(i, -i, 7);
+        assert!((0.0..1.0).contains(&h));
+        assert_eq!(h, hash(i, -i, 7));
+    }
+}
+
+#[test]
+fn noise_tiles_seamlessly() {
+    for y in 0..8 {
+        let a = noise(0.0, y as f32 * 0.5, 4, 1);
+        let b = noise(4.0, y as f32 * 0.5, 4, 1);
+        assert!((a - b).abs() < 1e-6);
+    }
+}
+
+/// 24-bit BMP, bottom-up rows, each sheet pixel blown up `zoom` times.
+fn write_bmp(sheet: &Canvas, zoom: i32, path: &str) {
+    let (w, h) = (sheet.w as i32, sheet.h as i32);
+    let (zw, zh) = (w * zoom, h * zoom);
+    let stride = (zw * 3 + 3) & !3;
+    let mut out = Vec::new();
+    let size = 54 + stride * zh;
+    out.extend(b"BM");
+    out.extend((size as u32).to_le_bytes());
+    out.extend([0u8; 4]);
+    out.extend(54u32.to_le_bytes());
+    out.extend(40u32.to_le_bytes());
+    out.extend(zw.to_le_bytes());
+    out.extend(zh.to_le_bytes());
+    out.extend(1u16.to_le_bytes());
+    out.extend(24u16.to_le_bytes());
+    out.extend([0u8; 24]);
+    for y in (0..zh).rev() {
+        let mut line = Vec::new();
+        for x in 0..zw {
+            let p = sheet.get(x / zoom, y / zoom);
+            line.extend([2, 1, 0].map(|i| (p[i].clamp(0.0, 1.0) * 255.0) as u8));
+        }
+        line.resize(stride as usize, 0);
+        out.extend(line);
+    }
+    std::fs::write(path, out).unwrap();
+}
+
+/// Dev aid: `EVOCLASH_SPRITE_PREVIEW=out.bmp cargo test -p evoclash -- --ignored preview`
+/// writes every survivor walk frame (rows: down, up, side) plus the monsters, blown up 8x.
+#[test]
+#[ignore]
+fn preview_survivor() {
+    let Ok(path) = std::env::var("EVOCLASH_SPRITE_PREVIEW") else {
+        return;
+    };
+    let tint = [0.35, 0.6, 0.95];
+    let zoom = 8;
+    let (cw, ch) = (SURVIVOR.x as i32 + 8, 40);
+    let (w, h) = (cw * WALK_FRAMES as i32 + 44, ch * 3);
+    let mut sheet = Canvas::filled(w as u32, h as u32, |_, _| rgb(0.36, 0.22, 0.16));
+    let blit = |sheet: &mut Canvas, src: &Canvas, dx: i32, dy: i32, tint: [f32; 3]| {
+        for y in 0..src.h as i32 {
+            for x in 0..src.w as i32 {
+                let p = src.get(x, y);
+                sheet.put(
+                    dx + x,
+                    dy + y,
+                    [p[0] * tint[0], p[1] * tint[1], p[2] * tint[2], p[3]],
+                );
+            }
+        }
+    };
+    for (row, facing) in Facing::ALL.iter().enumerate() {
+        for frame in 0..WALK_FRAMES {
+            let (jacket, gear) = paint_survivor(*facing, frame);
+            let (ox, oy) = (frame as i32 * cw + 4, row as i32 * ch + 4);
+            blit(&mut sheet, &jacket, ox, oy, tint);
+            blit(&mut sheet, &gear, ox, oy, [1.0; 3]);
+        }
+    }
+    let x = cw * WALK_FRAMES as i32 + 4;
+    blit(&mut sheet, &paint_roach(0), x, 6, [1.0; 3]);
+    blit(&mut sheet, &paint_roach(1), x, 24, [1.0; 3]);
+    blit(&mut sheet, &paint_pod(), x, 44, [1.0; 3]);
+    for v in 0..5 {
+        blit(
+            &mut sheet,
+            &paint_decor(v),
+            x + 2 + (v % 2) * 18,
+            84 + (v / 2) * 12,
+            [1.0; 3],
+        );
+    }
+    write_bmp(&sheet, zoom, &path);
+}
+
+/// Dev aid: `EVOCLASH_ARMED_PREVIEW=out.bmp cargo test -p evoclash -- --ignored preview_armed`
+/// poses a survivor holding every weapon at several aim angles, the way the renderer does.
+#[test]
+#[ignore]
+fn preview_armed() {
+    let Ok(path) = std::env::var("EVOCLASH_ARMED_PREVIEW") else {
+        return;
+    };
+    // Mirrors render/: one sheet pixel is one world pixel.
+    const GUN_HEIGHT: f32 = 26.0;
+    const FOOT_INSET: f32 = 2.0;
+    let tint = [0.35, 0.6, 0.95];
+    let angles = [0.0f32, 35.0, 80.0, 145.0, 180.0, -45.0, -90.0, -140.0];
+    let kinds = [
+        WeaponKind::Stick,
+        WeaponKind::Bow,
+        WeaponKind::PipeShotgun,
+        WeaponKind::Rifle,
+        WeaponKind::Laser,
+        WeaponKind::Railgun,
+    ];
+    let (cw, ch) = (96, 96);
+    let mut sheet = Canvas::filled(cw * angles.len() as u32, ch * kinds.len() as u32, |x, y| {
+        if (x / 8 + y / 8) % 2 == 0 {
+            rgb(0.78, 0.62, 0.36)
+        } else {
+            rgb(0.74, 0.58, 0.33)
+        }
+    });
+    let arm = paint_arm();
+    // Draw `src` scaled by PIXEL, centered at world `at` (y up), rotated by `angle`.
+    let draw = |sheet: &mut Canvas,
+                src: &Canvas,
+                at: Vec2,
+                angle: f32,
+                flip: (bool, bool),
+                tint: [f32; 3]| {
+        let (sin, cos) = angle.sin_cos();
+        let half = Vec2::new(src.w as f32, src.h as f32) * PIXEL / 2.0;
+        let r = half.length().ceil() as i32 + 1;
+        for dy in -r..=r {
+            for dx in -r..=r {
+                let d = Vec2::new(dx as f32 + 0.5, dy as f32 + 0.5);
+                // World offset is (d.x, -d.y); undo rotation.
+                let w = Vec2::new(d.x, -d.y);
+                let l = Vec2::new(w.x * cos + w.y * sin, -w.x * sin + w.y * cos);
+                let mut u = (l.x + half.x) / PIXEL;
+                let mut v = (half.y - l.y) / PIXEL;
+                if flip.0 {
+                    u = src.w as f32 - u;
+                }
+                if flip.1 {
+                    v = src.h as f32 - v;
+                }
+                if u < 0.0 || v < 0.0 {
+                    continue;
+                }
+                let p = src.get(u as i32, v as i32);
+                if p[3] > 0.0 {
+                    sheet.put(
+                        (at.x + dx as f32) as i32,
+                        (-at.y + dy as f32) as i32,
+                        [p[0] * tint[0], p[1] * tint[1], p[2] * tint[2], p[3]],
+                    );
+                }
+            }
+        }
+    };
+    for (row, kind) in kinds.iter().enumerate() {
+        let (_, weapon, grip) = paint_weapon(*kind);
+        let size = Vec2::new(weapon.w as f32, weapon.h as f32);
+        for (col, deg) in angles.iter().enumerate() {
+            let aim = Vec2::from_angle(deg.to_radians());
+            let feet = Vec2::new(
+                col as f32 * cw as f32 + 48.0,
+                -(row as f32 * ch as f32 + 84.0),
+            );
+            let (facing, flip) = Facing::from_aim(aim);
+            let (jacket, gear) = paint_survivor(facing, 0);
+            let body = feet + Vec2::Y * (SURVIVOR.y as f32 * PIXEL / 2.0 - FOOT_INSET);
+            let pivot = feet
+                + Vec2::new(
+                    if facing == Facing::Side {
+                        if flip { -4.0 } else { 4.0 }
+                    } else {
+                        0.0
+                    },
+                    GUN_HEIGHT,
+                );
+            let (center, arm_at) = held_layout(pivot, aim, size, grip);
+            let behind = facing == Facing::Up;
+            let gun = |sheet: &mut Canvas| {
+                draw(
+                    sheet,
+                    &arm,
+                    arm_at,
+                    aim.to_angle(),
+                    (false, aim.x < 0.0),
+                    tint,
+                );
+                draw(
+                    sheet,
+                    &weapon,
+                    center,
+                    aim.to_angle(),
+                    (false, aim.x < 0.0),
+                    [1.0; 3],
+                );
+            };
+            if behind {
+                gun(&mut sheet);
+            }
+            draw(&mut sheet, &jacket, body, 0.0, (flip, false), tint);
+            draw(&mut sheet, &gear, body, 0.0, (flip, false), [1.0; 3]);
+            if !behind {
+                gun(&mut sheet);
+            }
+        }
+    }
+    write_bmp(&sheet, 4, &path);
+}
+
+/// Dev aid: `EVOCLASH_CITY_PREVIEW=out.bmp cargo test -p evoclash -- --ignored preview_city`
+/// lays out the city tiles (2x2 repeats, to check seams) and the props.
+#[test]
+#[ignore]
+fn preview_city() {
+    let Ok(path) = std::env::var("EVOCLASH_CITY_PREVIEW") else {
+        return;
+    };
+    let tiles = [
+        paint_pavement(),
+        paint_asphalt(),
+        paint_oily_concrete(),
+        paint_rad_ground(),
+        paint_planks(),
+        paint_tiles(),
+        paint_floor_concrete(),
+        paint_roof(Roof::Tin),
+        paint_roof(Roof::Tar),
+        paint_roof(Roof::Concrete),
+        paint_metal(),
+        paint_metal_top(),
+        paint_rock(false),
+        paint_rock(true),
+        paint_sandbags(false),
+        paint_sandbags(true),
+    ];
+    let props = [
+        paint_crate(),
+        paint_barrel(),
+        paint_safe(false),
+        paint_safe(true),
+    ];
+    let cell = 132;
+    let mut sheet = Canvas::filled(cell * 4, cell * 4 + 30, |_, _| rgb(0.36, 0.22, 0.16));
+    for (i, tile) in tiles.iter().enumerate() {
+        let (ox, oy) = ((i % 4) as i32 * cell as i32, (i / 4) as i32 * cell as i32);
+        for y in 0..128 {
+            for x in 0..128 {
+                let p = tile.get(x % tile.w as i32, y % tile.h as i32);
+                sheet.put(ox + x, oy + y, p);
+            }
+        }
+    }
+    for (i, prop) in props.iter().enumerate() {
+        let (ox, oy) = (i as i32 * 30 + 4, cell as i32 * 4 + 4);
+        for y in 0..prop.h as i32 {
+            for x in 0..prop.w as i32 {
+                sheet.put(ox + x, oy + y, prop.get(x, y));
+            }
+        }
+    }
+    write_bmp(&sheet, 3, &path);
+}
+
+/// Dev aid: bolt, slash, shock ring and fireball (tinted) over ground color, blown up 3x.
+#[test]
+#[ignore]
+fn preview_effects() {
+    let Ok(path) = std::env::var("EVOCLASH_SPRITE_PREVIEW") else {
+        return;
+    };
+    let mut sheet = Canvas::filled(400, 120, |_, _| rgb(0.36, 0.22, 0.16));
+    let tints = [
+        (paint_bolt(), rgb(1.0, 0.9, 0.4), 0),
+        (paint_slash(), rgb(1.0, 0.92, 0.75), 60),
+        (paint_shock(), rgb(1.0, 0.6, 0.2), 160),
+        (paint_blast(), rgb(1.0, 0.5, 0.12), 290),
+    ];
+    for (c, tint, ox) in tints {
+        for y in 0..c.h as i32 {
+            for x in 0..c.w as i32 {
+                let p = c.get(x, y);
+                let (px, py) = (ox + x, 10 + y);
+                if px >= 400 || py >= 120 {
+                    continue;
+                }
+                let under = sheet.get(px, py);
+                let src = [p[0] * tint[0], p[1] * tint[1], p[2] * tint[2], 1.0];
+                sheet.put(px, py, mix(under, src, p[3]));
+            }
+        }
+    }
+    write_bmp(&sheet, 3, &path);
+}
+
+/// Dev aid: `EVOCLASH_SPRITE_PREVIEW=out.bmp cargo test -p evoclash -- --ignored preview_monsters`
+/// shows every monster next to a survivor for scale (2x world size), blown up 3x.
+#[test]
+#[ignore]
+fn preview_monsters() {
+    let Ok(path) = std::env::var("EVOCLASH_SPRITE_PREVIEW") else {
+        return;
+    };
+    let mut sheet = Canvas::filled(560, 300, |x, y| {
+        if (x / 8 + y / 8) % 2 == 0 {
+            rgb(0.36, 0.22, 0.16)
+        } else {
+            rgb(0.33, 0.2, 0.15)
+        }
+    });
+    // Everything here is drawn at world scale: PIXEL (2) sheet pixels per texture pixel.
+    let draw = |sheet: &mut Canvas, src: &Canvas, x: i32, feet: i32, tint: [f32; 3]| {
+        for y in 0..src.h as i32 * 2 {
+            for xx in 0..src.w as i32 * 2 {
+                let p = src.get(xx / 2, y / 2);
+                if p[3] > 0.0 {
+                    sheet.put(
+                        x + xx,
+                        feet - src.h as i32 * 2 + y,
+                        [p[0] * tint[0], p[1] * tint[1], p[2] * tint[2], p[3]],
+                    );
+                }
+            }
+        }
+    };
+    let (jacket, gear) = paint_survivor(Facing::Side, 0);
+    draw(&mut sheet, &jacket, 4, 80, [0.35, 0.6, 0.95]);
+    draw(&mut sheet, &gear, 4, 80, [1.0; 3]);
+    let gold = [1.35, 1.1, 0.5];
+    let row1 = [
+        paint_roach(0),
+        paint_pod(),
+        paint_dog(0),
+        paint_dog(1),
+        paint_ghoul(0),
+        paint_spitter(),
+        paint_crawler(),
+    ];
+    let mut x = 50;
+    for (i, c) in row1.iter().enumerate() {
+        draw(&mut sheet, c, x, 80, if i == 3 { gold } else { [1.0; 3] });
+        x += c.w as i32 * 2 + 4;
+    }
+    let row2 = [
+        paint_raider(0),
+        paint_raider(1),
+        paint_drone(0),
+        paint_drone(1),
+        paint_acid(),
+    ];
+    let mut x = 4;
+    for c in &row2 {
+        draw(&mut sheet, c, x, 150, [1.0; 3]);
+        x += c.w as i32 * 2 + 4;
+    }
+    draw(&mut sheet, &paint_behemoth(0), 4, 290, [1.0; 3]);
+    draw(&mut sheet, &paint_behemoth(1), 160, 290, [1.0, 0.5, 0.42]);
+    write_bmp(&sheet, 3, &path);
+}
+
+/// Dev aid: 自动炮塔 (base with the head in four directions) and 陷阱 over ground color, 6x.
+#[test]
+#[ignore]
+fn preview_skills() {
+    let Ok(path) = std::env::var("EVOCLASH_SPRITE_PREVIEW") else {
+        return;
+    };
+    let mut sheet = Canvas::filled(150, 40, |_, _| rgb(0.36, 0.22, 0.16));
+    let mut blit = |c: &Canvas, ox: i32, oy: i32, flip: bool| {
+        for y in 0..c.h as i32 {
+            for x in 0..c.w as i32 {
+                let sx = if flip { c.w as i32 - 1 - x } else { x };
+                sheet.put(ox + x, oy + y, c.get(sx, y));
+            }
+        }
+    };
+    let (base, head) = (paint_turret_base(), paint_turret_head());
+    for (i, flip) in [false, true].into_iter().enumerate() {
+        let ox = 4 + 34 * i as i32;
+        blit(&base, ox + 3, 16, false);
+        blit(&head, ox, 8, flip);
+    }
+    blit(&paint_trap(), 80, 14, false);
+    blit(&paint_trap(), 110, 14, false);
+    write_bmp(&sheet, 6, &path);
+}
+
+#[test]
+fn sprites_have_opaque_pixels() {
+    for canvas in [
+        paint_turret_base(),
+        paint_turret_head(),
+        paint_trap(),
+        paint_survivor(Facing::Side, 1).0,
+        paint_roach(0),
+        paint_pod(),
+        paint_dog(1),
+        paint_ghoul(0),
+        paint_spitter(),
+        paint_crawler(),
+        paint_raider(2),
+        paint_drone(1),
+        paint_behemoth(1),
+        paint_acid(),
+        paint_medkit(),
+        paint_reticle(),
+        paint_bar(),
+    ] {
+        assert!(canvas.px.iter().any(|p| p[3] > 0.9));
+    }
+    // Soft effects never reach full opacity but must not be blank.
+    for canvas in [paint_bolt(), paint_slash(), paint_shock(), paint_blast()] {
+        assert!(canvas.px.iter().any(|p| p[3] > 0.5));
+    }
+}

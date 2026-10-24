@@ -1,6 +1,6 @@
 # Client assets
 
-Sprites are painted in code (`src/textures.rs`); the only file here is the UI font.
+Sprites are painted in code (`src/textures/`); the only file here is the UI font.
 
 `NotoSansSC-Subset.ttf` is [Noto Sans SC](https://fonts.google.com/noto/specimen/Noto+Sans+SC)
 (SIL Open Font License 1.1, see `NotoSansSC-OFL.txt`), instanced at weight 500 and subset to
