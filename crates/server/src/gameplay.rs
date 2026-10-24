@@ -19,7 +19,7 @@ use crate::ops::OpsState;
 
 pub const TICKS_PER_SEC: u32 = 64;
 const WARMUP_TICKS: u32 = 4 * TICKS_PER_SEC;
-const MATCH_TICKS: u32 = 8 * 60 * TICKS_PER_SEC;
+pub const MATCH_TICKS: u32 = 8 * 60 * TICKS_PER_SEC;
 const INTERMISSION_TICKS: u32 = 8 * TICKS_PER_SEC;
 const FIRST_VAULT_TICKS: u32 = 60 * TICKS_PER_SEC;
 const VAULT_INTERVAL_TICKS: u32 = 90 * TICKS_PER_SEC;
@@ -167,7 +167,7 @@ struct SpotState {
 }
 
 #[derive(Resource, Default)]
-struct LootState {
+pub struct LootState {
     spots: Vec<SpotState>,
 }
 
@@ -230,6 +230,7 @@ fn spawn_match_state(mut commands: Commands, arena: Res<Arena>) {
             vault_in: FIRST_VAULT_TICKS,
             winner: None,
             map_seed: arena.seed,
+            boss_eta: 0,
         },
         Replicate::to_clients(NetworkTarget::All),
     ));
@@ -467,8 +468,7 @@ pub fn resolve_damage(
             }
             None => attacker
                 .and_then(|a| monsters.get(a).ok())
-                .map_or("废土", |m| m.kind.name())
-                .to_string(),
+                .map_or_else(|| "废土".to_string(), |m| m.display_name()),
         };
         info!("{killer_name} killed {victim_name} ({how})");
         outbox.reliable.push(GameEvent::Kill {
@@ -608,7 +608,7 @@ fn loot_spawner(
     }
 }
 
-fn match_flow(
+pub fn match_flow(
     mut commands: Commands,
     mut state: Single<&mut MatchState>,
     mut arena: ResMut<Arena>,
@@ -693,11 +693,20 @@ fn match_flow(
 }
 
 /// Start every combatant over from a stick and clear the arena.
-fn reset_match(
+pub fn reset_match(
     mut commands: Commands,
     mut reset: ResMut<ResetRequested>,
     mut players: Query<(&mut Vitals, &mut Loadout, &mut Stats), With<Player>>,
-    clutter: Query<Entity, Or<(With<Pickup>, With<Projectile>, With<Monster>, With<Prop>)>>,
+    clutter: Query<
+        Entity,
+        Or<(
+            With<Pickup>,
+            With<Projectile>,
+            With<Monster>,
+            With<Prop>,
+            With<Puddle>,
+        )>,
+    >,
     mut loot: ResMut<LootState>,
     mut props: ResMut<PropSlots>,
     mut blasts: ResMut<Blasts>,

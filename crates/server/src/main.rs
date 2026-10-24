@@ -6,6 +6,7 @@
 //! that process, and the matchmaker routes new players around it.
 
 mod agones;
+mod boss;
 mod bots;
 mod combat;
 mod config;
@@ -66,6 +67,7 @@ fn main() {
         environment::EnvironmentPlugin,
         bots::BotsPlugin,
         monsters::MonstersPlugin,
+        boss::BossPlugin,
         ops::OpsPlugin,
     ));
     if let Some(sdk) = &agones {

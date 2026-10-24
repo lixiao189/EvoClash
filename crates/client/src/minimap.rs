@@ -34,6 +34,8 @@ enum Marker {
     Me,
     /// A combatant with a price on their head; `usize` picks which of the pool.
     Bounty(usize),
+    /// The behemoth, while it is out.
+    Boss,
 }
 
 const BOUNTY_MARKERS: usize = 4;
@@ -82,6 +84,7 @@ fn spawn_minimap(mut commands: Commands) {
             for i in 0..BOUNTY_MARKERS {
                 map.spawn((Marker::Bounty(i), dot(7.0, Color::srgb(1.0, 0.82, 0.1))));
             }
+            map.spawn((Marker::Boss, dot(11.0, Color::srgb(1.0, 0.25, 0.12))));
             map.spawn((Marker::Me, dot(7.0, Color::WHITE)));
         });
 }
@@ -162,6 +165,7 @@ fn repaint(
 fn place_markers(
     me: Query<(&Pos, &Vitals), With<LocalPlayer>>,
     players: Query<(&Pos, &Vitals, &Stats), (With<Player>, Without<LocalPlayer>)>,
+    bosses: Query<(&Pos, &Monster, &Vitals)>,
     mut markers: Query<(&Marker, &mut Node, &mut Visibility)>,
 ) {
     let at = |p: Vec2| {
@@ -176,8 +180,13 @@ fn place_markers(
         .map(|(p, ..)| p.0)
         .take(BOUNTY_MARKERS)
         .collect();
+    let boss = bosses
+        .iter()
+        .find(|(_, m, v)| m.kind == MonsterKind::Behemoth && v.alive)
+        .map(|(p, ..)| p.0);
     for (marker, mut node, mut visibility) in &mut markers {
         let pos = match marker {
+            Marker::Boss => boss,
             Marker::Me => me.single().ok().filter(|(_, v)| v.alive).map(|(p, _)| p.0),
             Marker::Bounty(i) => bounties.get(*i).copied(),
         };
@@ -185,7 +194,12 @@ fn place_markers(
             visibility.set_if_neq(Visibility::Hidden);
             continue;
         };
-        let (left, top) = at(pos);
+        let (mut left, mut top) = at(pos);
+        if *marker == Marker::Boss {
+            // Bigger dot: keep it centered on the same spot.
+            left -= 2.0;
+            top -= 2.0;
+        }
         node.left = Val::Px(left);
         node.top = Val::Px(top);
         visibility.set_if_neq(Visibility::Inherited);
