@@ -118,7 +118,8 @@ Helm chart `deploy/helm/evoclash` 基于 [Agones](https://agones.dev)，用 Kube
 helm install agones agones/agones -n agones-system --create-namespace \
   --set "gameservers.namespaces={evoclash}"
 # 2. 部署（netcode 密钥首次安装时随机生成，升级时沿用；也可用 netcodeKey.existingSecret 指定）
-helm install evoclash deploy/helm/evoclash -n evoclash --create-namespace
+helm install evoclash oci://ghcr.io/lixiao189/charts/evoclash --version 0.1.0 -n evoclash --create-namespace
+#   （改过 chart 还没发版时，用仓库里的目录：helm install evoclash deploy/helm/evoclash ...）
 # 3. 连接（helm 安装完成后的提示里也有）
 evoclash --matchmaker http://$(kubectl -n evoclash get svc evoclash-matchmaker -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
 ```
@@ -156,14 +157,14 @@ evoclash --server 127.0.0.1:7000 --headless --autopilot
 
 ## CI / CD
 
-- **CI**（`.github/workflows/ci.yml`）：每次 push 到 `main` 和每个 PR 运行 rustfmt、clippy（`-D warnings`）、三平台 `cargo test`、cargo-deny（漏洞 / 许可证 / 来源）、`helm lint`。分支保护只需要勾选 `CI success` 这一项。
+- **CI**（`.github/workflows/ci.yml`）：每次 push 到 `main` 和每个 PR 运行 rustfmt、clippy（`-D warnings`）、三平台 `cargo test`、cargo-deny（漏洞 / 许可证 / 来源）、`helm lint`，并构建服务端 Docker 镜像（不推送）后实际运行：匹配服务拉起一局，等它发回心跳才算通过。这样 `Dockerfile` 写坏了，或者二进制在 distroless 基础镜像里起不来，PR 阶段就能发现。分支保护只需要勾选 `CI success` 这一项。
 - **发布**（`.github/workflows/release.yml`）：先把 `Cargo.toml` 的 `workspace.package.version` 和 `deploy/helm/evoclash/Chart.yaml` 的 `version` / `appVersion` 改成新版本并合入，然后推送同名 tag：
 
   ```bash
   git tag v0.2.0 && git push origin v0.2.0
   ```
 
-  会构建 Linux x86_64/arm64、macOS arm64、Windows x86_64 的二进制，附 `SHA256SUMS` 和构建来源证明发布到 GitHub Releases，并把服务端镜像推到 `ghcr.io/lixiao189/evoclash-server`（amd64 + arm64）。带 `-` 的 tag（如 `v0.2.0-rc.1`）标记为预发布，不更新 `latest`。
+  会构建 Linux x86_64/arm64、macOS arm64、Windows x86_64 的二进制，附 `SHA256SUMS` 和构建来源证明发布到 GitHub Releases，把服务端镜像推到 `ghcr.io/lixiao189/evoclash-server`（amd64 + arm64），镜像推完后再把 Helm chart 作为 OCI 包推到 `oci://ghcr.io/lixiao189/charts/evoclash`，同样附构建来源证明。带 `-` 的 tag（如 `v0.2.0-rc.1`）标记为预发布，不更新 `latest`。
 
   ```bash
   docker run --network host ghcr.io/lixiao189/evoclash-server --listen 0.0.0.0:8080 --public-host <公网 IP>
