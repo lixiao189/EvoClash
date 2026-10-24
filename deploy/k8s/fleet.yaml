@@ -1,0 +1,74 @@
+# Match servers as an Agones Fleet: one pod per match, each on its own host UDP port.
+# Lifecycle (see crates/server/src/agones.rs):
+#   Ready      empty server, part of the warm buffer; the matchmaker may send players here
+#   Allocated  the first player joined; Agones will not scale it down mid-match
+#   Shutdown   the match ended; Agones deletes the pod and the Fleet starts a fresh one
+apiVersion: agones.dev/v1
+kind: Fleet
+metadata:
+  name: evoclash
+spec:
+  replicas: 4
+  # Packed fills nodes before using new ones, which lets the cluster autoscaler drain nodes.
+  scheduling: Packed
+  strategy:
+    type: RollingUpdate
+    # Rolling updates only replace Ready servers; Allocated ones finish their match first.
+    rollingUpdate: { maxSurge: 25%, maxUnavailable: 25% }
+  template:
+    spec:
+      ports:
+        - name: game
+          containerPort: 7000
+          protocol: UDP
+          portPolicy: Dynamic
+      health:
+        # The server pings only while its simulation ticks; a hung match is replaced.
+        initialDelaySeconds: 5
+        periodSeconds: 5
+        failureThreshold: 3
+      template:
+        spec:
+          # SIGTERM drains (finish the match, then exit): one 4-minute match plus intermission.
+          terminationGracePeriodSeconds: 330
+          containers:
+            - name: evoclash-server
+              image: ghcr.io/lixiao189/evoclash-server
+              command: ["/app/evoclash-server"]
+              args:
+                - --agones
+                - --port
+                - "7000"
+                - --matchmaker
+                - http://evoclash-matchmaker-heartbeat:8080
+                - --max-players
+                - "6"
+                - --bots
+                - "4"
+              env:
+                - name: EVOCLASH_NETCODE_KEY
+                  valueFrom:
+                    secretKeyRef: { name: evoclash-netcode, key: key }
+              # A match ticks in well under 1 ms of one core; requests let many pack per node.
+              resources:
+                requests: { cpu: 100m, memory: 64Mi }
+                limits: { cpu: "1", memory: 256Mi }
+              securityContext:
+                runAsNonRoot: true
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: [ALL] }
+---
+# Keep empty Ready servers on standby so joins never wait for a pod to schedule.
+apiVersion: autoscaling.agones.dev/v1
+kind: FleetAutoscaler
+metadata:
+  name: evoclash
+spec:
+  fleetName: evoclash
+  policy:
+    type: Buffer
+    buffer:
+      bufferSize: 3
+      minReplicas: 3
+      maxReplicas: 300

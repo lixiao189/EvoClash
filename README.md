@@ -76,13 +76,18 @@ cargo build --release
 - **一局一个进程**，单进程只负责 2–6 人。在 debug 构建下，一局的 tick 平均耗时约 0.3 ms（`/v1/matches` 中的 `tick_us`），只占 15.6 ms tick 预算的约 2%，所以单机可以按核数跑很多局。
 - 容量 = 进程数。匹配服务优先把人塞进最满的局，满员或在排空（drain）的局不再分配，席位预留可防止并发加入时超卖。
 - 对局之间不共享状态，所以没有锁竞争，也没有跨局的故障传播。
+- **单进程只用 1 个工作线程**（`--threads`，默认 1）：一局一 tick 不到 1 ms，多线程只会让同机的几十个对局进程互相抢核。
+- **预热池**：匹配服务常备 `--warm-matches`（默认 1）个空局，突发加入不用等进程启动；Kubernetes 上由 Agones FleetAutoscaler 的 buffer 负责。
+- **过载避让**：tick 平均耗时超过约 9.4 ms（预算的 60%）的对局说明所在机器 CPU 不够，不再往里分配新玩家。
 
 ### 高可用：任何一个组件挂掉，影响都被限制在最小范围
 
 - **对局进程崩溃**：只影响这一局。匹配服务在 6 秒内发现心跳中断并把它摘除，新玩家会被分配到其他局。
 - **匹配服务重启**：正在进行的对局不受影响（对局进程不是匹配服务的子进程生命周期绑定，`kill_on_drop(false)`）。新实例通过心跳在 2 秒内自动重新接管全部对局（已实测）。重连密钥是 HMAC，不需要会话存储。
 - **玩家断线**：服务器保留其角色 20 秒（装备和分数都在）。客户端带退避自动重连，用重连密钥向匹配服务换新令牌后，接回原来的角色（已实测：挂起客户端 8 秒后恢复）。
-- **发布/维护**：`POST /v1/matches/{id}/drain` 让该局打完当前对局后退出，不会中途踢人。
+- **多副本匹配服务**：`--peer` 列出其他副本，拉起的对局会同时向所有副本发心跳；服务器的 `--matchmaker` 填主机名时会解析出全部地址逐一发心跳（Kubernetes 的 headless Service）。每个副本都有完整的对局视图，任何一个都能分配玩家。各副本的席位预留互不共享，偶尔超卖时由服务器的 netcode 人数上限兜底，被拒的客户端会自动换一局。
+- **客户端故障转移**：`--matchmaker` 可写多个地址（逗号分隔），客户端按 `/healthz` 往返时延排序，挂掉的往后放；重连时任一副本都能换新令牌。原对局已经不在（崩溃或结束）时自动加入新对局。
+- **发布/维护**：`POST /v1/matches/{id}/drain`，或者给对局进程发 SIGTERM（再发一次立即退出），都会让该局打完当前对局后退出，不会中途踢人；没有真人的对局直接退出。匹配服务也响应 SIGTERM 平滑停机。
 - **令牌安全**：连接令牌由匹配服务用共享密钥签名，30 秒过期；玩家名字写在加密的 user data 里，无法伪造。生产环境务必设置 `EVOCLASH_NETCODE_KEY`（64 位十六进制），否则会使用开发密钥。
 
 ### 低延迟
@@ -92,17 +97,45 @@ cargo build --release
 - **客户端预测**：本地移动和冲刺零延迟，误差通过回滚和平滑修正。本地输入不加延迟；预测的位置在固定步之间做插值，高刷新率下也平滑。
 - **零延迟射击手感**：自己的弹道在点击瞬间就在本地绘制，服务器不会把你自己的子弹再发回给你；命中由服务器裁决。
 - **延迟补偿**：服务器按每个客户端上报的插值延迟，把目标位置回溯到"你屏幕上看到它的那一刻"再判定命中（上限约 220 ms，防止高延迟玩家打"过去"）。
+- **就近选区**：客户端给多个匹配服务（每个区域一套）测时延，优先用最近的区域。
 - **调试**：`--fake-latency 80` 可以在客户端模拟网络延迟。
+
+## Kubernetes 部署
+
+`deploy/k8s/` 是基于 [Agones](https://agones.dev) 的部署清单，用 Kubernetes 接管进程托管、故障恢复和扩缩容：
+
+| 组件 | 资源 | 高可用要点 |
+|---|---|---|
+| 匹配服务 | `Deployment`（3 副本，HPA 3–10）+ `LoadBalancer` Service | 跨节点/可用区打散，PDB 至少保留 2 个，滚动更新不停服；`--no-launch` 只通过心跳接管对局 |
+| 心跳入口 | headless Service `evoclash-matchmaker-heartbeat` | DNS 返回所有匹配服务 Pod，对局向每一个都发心跳 |
+| 对局 | Agones `Fleet`（一局一个 Pod，动态 UDP 主机端口） | 卡死的对局不再上报健康，被自动替换；SIGTERM 时打完当前局再退出 |
+| 预热池 | Agones `FleetAutoscaler`（Buffer 3） | 常备空闲 Ready 对局，加入不用等 Pod 调度 |
+
+对局进程带 `--agones` 运行时：从 SDK sidecar 读取 GameServer 名字和公网 `节点 IP:主机端口` 作为对局 id 和令牌地址 → 就绪后标记 `Ready` → 只要模拟还在 tick 就上报 `Health` → 第一个真人加入时自己 `Allocate`（Agones 不会缩容进行中的对局）→ 对局结束后 `Shutdown`，Fleet 补一个新的。
+
+```bash
+# 1. 安装 Agones，并允许它管理 evoclash 命名空间的 GameServer
+helm install agones agones/agones -n agones-system --create-namespace \
+  --set "gameservers.namespaces={evoclash}"
+# 2. 共享密钥
+kubectl create namespace evoclash
+kubectl -n evoclash create secret generic evoclash-netcode --from-literal=key=$(openssl rand -hex 32)
+# 3. 部署（镜像标签在 kustomization.yaml 里改）
+kubectl apply -k deploy/k8s
+# 4. 连接
+evoclash --matchmaker http://$(kubectl -n evoclash get svc evoclash-matchmaker -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+```
+
+节点需要放通 Agones 的 UDP 端口段（默认 7000–8000）。多区域时每个区域部署一套，客户端用 `--matchmaker http://区域1,http://区域2` 自动选最近的。匹配服务的 `/metrics`（Prometheus 格式）可接入监控。
 
 ## 走向生产还缺什么
 
 当前版本是可运行的完整骨架，以下部分是有意留空的接口：
 
-- **编排**：把 `crates/matchmaker/src/fleet.rs`（本机拉起进程）替换为 Agones `GameServerAllocation`、Edgegap 或 Hathora 等。匹配服务的 `--no-launch` 模式已经支持只接管外部拉起的服务器。
-- **多副本匹配服务**：席位预留目前在单个实例的内存里。部署多副本时需要把 `Registry` 放进 Redis，并让心跳打到负载均衡地址。
-- **多区域**：每个区域部署一套匹配服务和对局集群，客户端按延迟选区（`JoinRequest.region` 已预留）。
+- **共享席位预留**：多副本匹配服务的席位预留各自在内存里，靠服务器人数上限兜底。需要严格不超卖时可以把 `Registry` 放进 Redis。
+- **全局入口**：多区域目前靠客户端配置多个地址测速，可以再加一层返回区域列表的服务（`JoinRequest.region` 已预留）。
 - **账号与反作弊**：`/v1/join` 前面接入登录；服务器已经是权威判定，但还缺速率和异常检测。
-- **指标**：把心跳数据（人数、tick 耗时）导出到 Prometheus 做自动扩缩容。
+- **告警**：`/metrics` 已导出人数、席位、过载对局和 tick 耗时，还缺 Prometheus 规则和看板。
 
 ## 测试
 
@@ -110,7 +143,7 @@ cargo build --release
 cargo test --workspace
 ```
 
-覆盖地图碰撞和寻路、令牌往返、重连密钥校验、席位预留、负载分配和排空。
+覆盖地图碰撞和寻路、令牌往返、重连密钥校验、席位预留、负载分配、排空、过载避让、预热池计数、Agones GameServer 解析和心跳地址展开。
 
 联机冒烟测试（无窗口、自动操作）：
 

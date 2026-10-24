@@ -5,10 +5,13 @@
 //! - `POST /v1/servers/heartbeat`  → match servers report load; reply may ask them to drain
 //! - `GET  /v1/matches`            → fleet overview
 //! - `POST /v1/matches/{id}/drain` → stop sending players to a match (deploys, maintenance)
-//! - `GET  /healthz`               → liveness for the load balancer
+//! - `GET  /healthz`               → liveness for the load balancer (clients also time it to pick a region)
+//! - `GET  /metrics`               → Prometheus text format, for dashboards and autoscaling
 //!
 //! It holds no state that can't be rebuilt: the fleet view comes from heartbeats and
 //! reconnect keys are HMACs, so a restart (or a replacement replica) loses nothing.
+//! Run several replicas with `--peer` and every match heartbeats to all of them, so any
+//! replica can place players and the others keep working when one goes down.
 
 mod fleet;
 mod registry;
@@ -16,11 +19,12 @@ mod tokens;
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -36,6 +40,11 @@ struct AppState {
     /// `None` when servers are provided by an external orchestrator (adopt-only mode).
     fleet: Option<Fleet>,
     key: [u8; 32],
+    /// Empty spare matches kept running so joins never wait on a process start.
+    warm_matches: usize,
+    joins: AtomicU64,
+    join_failures: AtomicU64,
+    rejoins: AtomicU64,
 }
 
 type Shared = Arc<AppState>;
@@ -64,6 +73,17 @@ fn issue(
     }
 }
 
+/// Start a match process and register it so it counts before its first heartbeat.
+fn launch(registry: &mut Registry, fleet: &Fleet) -> Result<(String, SocketAddr), String> {
+    let (id, addr) = fleet.launch(&registry.used_addrs())?;
+    println!("launched match {id} at {addr}");
+    registry.matches.insert(
+        id.clone(),
+        MatchInfo::new(id.clone(), addr, fleet.config.max_players),
+    );
+    Ok((id, addr))
+}
+
 async fn join(State(state): State<Shared>, Json(request): Json<JoinRequest>) -> Response {
     let name: String = request
         .name
@@ -79,12 +99,7 @@ async fn join(State(state): State<Shared>, Json(request): Json<JoinRequest>) -> 
         match registry.reserve_seat() {
             Some(seat) => Ok(seat),
             None => match &state.fleet {
-                Some(fleet) => fleet.launch(&registry.used_addrs()).map(|(id, addr)| {
-                    println!("launched match {id} at {addr}");
-                    let max = fleet.config.max_players;
-                    registry
-                        .matches
-                        .insert(id.clone(), MatchInfo::new(id.clone(), addr, max));
+                Some(fleet) => launch(&mut registry, fleet).map(|(id, addr)| {
                     registry.reserve_in(&id);
                     (id, addr)
                 }),
@@ -95,9 +110,13 @@ async fn join(State(state): State<Shared>, Json(request): Json<JoinRequest>) -> 
     match seat {
         Ok((match_id, addr)) => {
             println!("{name} ({client_id}) → {match_id}");
+            state.joins.fetch_add(1, Ordering::Relaxed);
             issue(&state, match_id, addr, client_id, &name)
         }
-        Err(e) => error(StatusCode::SERVICE_UNAVAILABLE, e),
+        Err(e) => {
+            state.join_failures.fetch_add(1, Ordering::Relaxed);
+            error(StatusCode::SERVICE_UNAVAILABLE, e)
+        }
     }
 }
 
@@ -121,6 +140,7 @@ async fn rejoin(State(state): State<Shared>, Json(request): Json<RejoinRequest>)
         }
         registry.reserve_in(&request.match_id)
     };
+    state.rejoins.fetch_add(1, Ordering::Relaxed);
     match addr {
         // The server knows the name from the original token; the body is kept on its side.
         Some(addr) => issue(&state, request.match_id, addr, request.client_id, ""),
@@ -143,6 +163,90 @@ async fn list_matches(State(state): State<Shared>) -> Response {
     Json(json!({ "matches": registry.views(), "launched_processes": running })).into_response()
 }
 
+async fn metrics(State(state): State<Shared>) -> Response {
+    use std::fmt::Write;
+
+    let views = state.registry.lock().expect("registry lock").views();
+    let count = |f: fn(&registry::MatchView) -> bool| views.iter().filter(|v| f(v)).count();
+    let sum = |f: fn(&registry::MatchView) -> u64| views.iter().map(f).sum::<u64>();
+    let mut out = String::new();
+    let mut gauge = |name: &str, help: &str, value: u64| {
+        let _ = writeln!(
+            out,
+            "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {value}"
+        );
+    };
+    gauge(
+        "evoclash_matches",
+        "Matches known from heartbeats or launches.",
+        views.len() as u64,
+    );
+    gauge(
+        "evoclash_matches_healthy",
+        "Matches heartbeating on time.",
+        count(|v| v.healthy) as u64,
+    );
+    gauge(
+        "evoclash_matches_draining",
+        "Matches finishing up before exit.",
+        count(|v| v.draining) as u64,
+    );
+    gauge(
+        "evoclash_matches_overloaded",
+        "Matches skipped for slow ticks.",
+        count(|v| v.overloaded) as u64,
+    );
+    gauge(
+        "evoclash_players",
+        "Players in all matches.",
+        sum(|v| v.players.into()),
+    );
+    gauge(
+        "evoclash_seats_reserved",
+        "Seats handed out, player not yet connected.",
+        sum(|v| v.reserved as u64),
+    );
+    gauge(
+        "evoclash_seats_total",
+        "Player capacity of all matches.",
+        sum(|v| v.max_players.into()),
+    );
+    if let Some(fleet) = &state.fleet {
+        gauge(
+            "evoclash_processes",
+            "Match processes launched by this replica.",
+            fleet.running() as u64,
+        );
+    }
+    for (name, help, counter) in [
+        ("evoclash_joins_total", "Join tokens issued.", &state.joins),
+        (
+            "evoclash_join_failures_total",
+            "Joins refused for lack of capacity.",
+            &state.join_failures,
+        ),
+        (
+            "evoclash_rejoins_total",
+            "Reconnect tokens issued.",
+            &state.rejoins,
+        ),
+    ] {
+        let value = counter.load(Ordering::Relaxed);
+        let _ = writeln!(
+            out,
+            "# HELP {name} {help}\n# TYPE {name} counter\n{name} {value}"
+        );
+    }
+    let _ = writeln!(
+        out,
+        "# HELP evoclash_tick_us Average simulation tick time per match.\n# TYPE evoclash_tick_us gauge"
+    );
+    for v in &views {
+        let _ = writeln!(out, "evoclash_tick_us{{match=\"{}\"}} {}", v.id, v.tick_us);
+    }
+    ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], out).into_response()
+}
+
 async fn drain(State(state): State<Shared>, Path(id): Path<String>) -> Response {
     let mut registry = state.registry.lock().expect("registry lock");
     match registry.matches.get_mut(&id) {
@@ -154,7 +258,7 @@ async fn drain(State(state): State<Shared>, Path(id): Path<String>) -> Response 
     }
 }
 
-/// Drop dead servers from the registry and collect exited processes.
+/// Drop dead servers from the registry, collect exited processes and keep the warm pool full.
 async fn janitor(state: Shared) {
     let mut interval = tokio::time::interval(Duration::from_secs(2));
     loop {
@@ -176,7 +280,36 @@ async fn janitor(state: Shared) {
                     .matches
                     .remove(&id);
             }
+            let mut registry = state.registry.lock().expect("registry lock");
+            for _ in registry.idle_matches()..state.warm_matches {
+                if let Err(e) = launch(&mut registry, fleet) {
+                    println!("cannot warm a spare match: {e}");
+                    break;
+                }
+            }
         }
+    }
+}
+
+/// Ctrl-C locally, SIGTERM from a container runtime or process manager.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(_) => std::future::pending().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
     }
 }
 
@@ -190,6 +323,8 @@ struct Args {
     server_bin: Option<PathBuf>,
     log_dir: PathBuf,
     launch: bool,
+    warm_matches: usize,
+    peers: Vec<String>,
 }
 
 fn parse_args() -> Args {
@@ -203,6 +338,8 @@ fn parse_args() -> Args {
         server_bin: None,
         log_dir: PathBuf::from("logs"),
         launch: true,
+        warm_matches: 1,
+        peers: Vec::new(),
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -228,12 +365,24 @@ fn parse_args() -> Args {
             "--server-bin" => args.server_bin = Some(value("--server-bin").into()),
             "--log-dir" => args.log_dir = value("--log-dir").into(),
             "--no-launch" => args.launch = false,
+            "--warm-matches" => {
+                args.warm_matches = value("--warm-matches").parse().expect("number")
+            }
+            "--peer" => args.peers.extend(
+                value("--peer")
+                    .split(',')
+                    .map(|url| url.trim().trim_end_matches('/').to_owned())
+                    .filter(|url| !url.is_empty()),
+            ),
             "-h" | "--help" => {
                 println!(
                     "evoclash-matchmaker [--listen 127.0.0.1:8080] [--public-host 127.0.0.1] [--ports 7000-7099]\n\
                      \x20                   [--max-matches 16] [--max-players 6] [--bots 4]\n\
-                     \x20                   [--server-bin PATH] [--log-dir logs] [--no-launch]\n\n\
-                     --no-launch  only adopt servers that heartbeat in (external orchestrator)"
+                     \x20                   [--server-bin PATH] [--log-dir logs] [--no-launch]\n\
+                     \x20                   [--warm-matches 1] [--peer URL[,URL...]]\n\n\
+                     --no-launch     only adopt servers that heartbeat in (external orchestrator)\n\
+                     --warm-matches  empty matches kept running so joins never wait on a launch\n\
+                     --peer          other matchmaker replicas; launched servers heartbeat to all"
                 );
                 std::process::exit(0);
             }
@@ -265,7 +414,9 @@ async fn main() {
             max_matches: args.max_matches,
             max_players: args.max_players,
             bots: args.bots,
-            matchmaker_url: format!("http://{}", args.listen),
+            matchmaker_urls: std::iter::once(format!("http://{}", args.listen))
+                .chain(args.peers.iter().cloned())
+                .collect(),
             log_dir: args.log_dir.clone(),
         })
     });
@@ -273,6 +424,10 @@ async fn main() {
         registry: Mutex::default(),
         fleet,
         key,
+        warm_matches: args.warm_matches,
+        joins: AtomicU64::new(0),
+        join_failures: AtomicU64::new(0),
+        rejoins: AtomicU64::new(0),
     });
     tokio::spawn(janitor(state.clone()));
 
@@ -281,6 +436,7 @@ async fn main() {
         .route("/v1/join", post(join))
         .route("/v1/rejoin", post(rejoin))
         .route("/v1/servers/heartbeat", post(heartbeat))
+        .route("/metrics", get(metrics))
         .route("/v1/matches", get(list_matches))
         .route("/v1/matches/{id}/drain", post(drain))
         .with_state(state);
@@ -291,7 +447,7 @@ async fn main() {
     println!("matchmaker listening on http://{}", args.listen);
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
+            shutdown_signal().await;
             println!("shutting down; running matches keep going and will be re-adopted");
         })
         .await

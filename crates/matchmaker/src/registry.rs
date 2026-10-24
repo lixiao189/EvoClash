@@ -13,6 +13,9 @@ pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(6);
 pub const STARTUP_GRACE: Duration = Duration::from_secs(10);
 /// Seats handed out but not yet visible in a heartbeat are held this long.
 const RESERVATION_TTL: Duration = Duration::from_secs(15);
+/// A match whose average tick takes longer than this (about 60% of the 15.6 ms budget) is on a
+/// starved host; adding players there would show up as lag, so new players go elsewhere.
+pub const OVERLOADED_TICK_US: u32 = 9_400;
 
 #[derive(Debug)]
 pub struct MatchInfo {
@@ -38,6 +41,7 @@ pub struct MatchView {
     pub max_players: u32,
     pub healthy: bool,
     pub draining: bool,
+    pub overloaded: bool,
     pub tick_us: u32,
 }
 
@@ -71,8 +75,21 @@ impl MatchInfo {
             .saturating_sub(self.players + self.reservations.len() as u32)
     }
 
+    pub fn overloaded(&self) -> bool {
+        self.tick_us > OVERLOADED_TICK_US
+    }
+
     fn joinable(&mut self, now: Instant) -> bool {
-        self.healthy(now) && self.accepting && !self.draining && self.free_seats(now) > 0
+        self.healthy(now)
+            && self.accepting
+            && !self.draining
+            && !self.overloaded()
+            && self.free_seats(now) > 0
+    }
+
+    /// Joinable and nobody in it or on the way: a warm spare for the next burst of joins.
+    fn idle(&mut self, now: Instant) -> bool {
+        self.joinable(now) && self.players == 0 && self.reservations.is_empty()
     }
 }
 
@@ -161,12 +178,22 @@ impl Registry {
                     max_players: m.max_players,
                     healthy: m.healthy(now),
                     draining: m.draining,
+                    overloaded: m.overloaded(),
                     tick_us: m.tick_us,
                 }
             })
             .collect();
         views.sort_by(|a, b| a.id.cmp(&b.id));
         views
+    }
+
+    pub fn idle_matches(&mut self) -> usize {
+        let now = Instant::now();
+        self.matches
+            .values_mut()
+            .map(|m| m.idle(now))
+            .filter(|idle| *idle)
+            .count()
     }
 
     pub fn used_addrs(&self) -> Vec<SocketAddr> {
@@ -208,6 +235,32 @@ mod tests {
         b.max_players = 6;
         reg.heartbeat(&b);
         assert_eq!(reg.reserve_seat().unwrap().0, "b");
+    }
+
+    #[test]
+    fn overloaded_matches_get_no_players() {
+        let mut reg = Registry::default();
+        let mut hot = beat("a", 0);
+        hot.tick_us = OVERLOADED_TICK_US + 1;
+        reg.heartbeat(&hot);
+        assert!(reg.reserve_seat().is_none());
+        reg.heartbeat(&beat("a", 0));
+        assert!(
+            reg.reserve_seat().is_some(),
+            "recovers once ticks are fast again"
+        );
+    }
+
+    #[test]
+    fn idle_counts_only_empty_joinable_matches() {
+        let mut reg = Registry::default();
+        reg.heartbeat(&beat("a", 0));
+        reg.heartbeat(&beat("b", 1));
+        reg.heartbeat(&beat("c", 0));
+        reg.matches.get_mut("c").unwrap().draining = true;
+        assert_eq!(reg.idle_matches(), 1);
+        reg.reserve_in("a");
+        assert_eq!(reg.idle_matches(), 0, "a reserved seat means it is taken");
     }
 
     #[test]

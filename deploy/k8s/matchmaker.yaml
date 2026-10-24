@@ -1,0 +1,107 @@
+# Matchmaker: stateless replicas behind a load balancer. Match servers heartbeat to every
+# replica through the headless Service, so each replica has the full fleet view and any of
+# them can place players; losing one (or a rolling update) doesn't interrupt joins.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: evoclash-matchmaker
+  labels: { app: evoclash-matchmaker }
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: evoclash-matchmaker }
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels: { app: evoclash-matchmaker }
+    spec:
+      # Spread replicas over nodes and zones so a node or zone outage leaves the rest running.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app: evoclash-matchmaker }
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app: evoclash-matchmaker }
+      containers:
+        - name: matchmaker
+          image: ghcr.io/lixiao189/evoclash-server
+          command: ["/app/evoclash-matchmaker"]
+          # Agones owns the game server pods; the matchmaker only adopts them via heartbeats.
+          args: ["--listen", "0.0.0.0:8080", "--no-launch"]
+          env:
+            - name: EVOCLASH_NETCODE_KEY
+              valueFrom:
+                secretKeyRef: { name: evoclash-netcode, key: key }
+          ports:
+            - { name: http, containerPort: 8080, protocol: TCP }
+          # Ready only after a full heartbeat round, so a new replica doesn't turn players
+          # away while its fleet view is still filling in.
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 2
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+---
+# Public entry point for clients (`evoclash --matchmaker http://<external-ip>`).
+apiVersion: v1
+kind: Service
+metadata:
+  name: evoclash-matchmaker
+spec:
+  type: LoadBalancer
+  selector: { app: evoclash-matchmaker }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+# Headless: DNS returns every ready matchmaker pod, and servers heartbeat to each of them.
+apiVersion: v1
+kind: Service
+metadata:
+  name: evoclash-matchmaker-heartbeat
+spec:
+  clusterIP: None
+  # A replica that is still starting must receive heartbeats in order to become useful.
+  publishNotReadyAddresses: true
+  selector: { app: evoclash-matchmaker }
+  ports:
+    - { name: http, port: 8080, targetPort: http }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: evoclash-matchmaker
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels: { app: evoclash-matchmaker }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: evoclash-matchmaker
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: evoclash-matchmaker }
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }
