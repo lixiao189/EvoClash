@@ -31,13 +31,14 @@ pub struct Textures {
     pub shadow: Handle<Image>,
     pub glow: Handle<Image>,
     survivor: Vec<SurvivorFrame>,
-    pub hand: Handle<Image>,
+    /// Sleeve reaching from the shoulder to the weapon grip; tinted like the jacket.
+    pub arm: Handle<Image>,
     /// Side view, two skitter frames.
     pub roach: [Handle<Image>; 2],
     pub pod: Handle<Image>,
     pub spore: Handle<Image>,
     pub splat: Handle<Image>,
-    weapons: [(Handle<Image>, Vec2); 6],
+    weapons: [WeaponSprite; 6],
     armors: [Handle<Image>; 3],
     pub medkit: Handle<Image>,
     pub emp: Handle<Image>,
@@ -48,19 +49,40 @@ impl Textures {
         &self.survivor[facing.index() * WALK_FRAMES + frame % WALK_FRAMES]
     }
 
-    /// Image and its size in texture pixels.
-    pub fn weapon(&self, kind: WeaponKind) -> (Handle<Image>, Vec2) {
-        self.weapons[weapon_index(kind)].clone()
+    pub fn weapon(&self, kind: WeaponKind) -> &WeaponSprite {
+        &self.weapons[weapon_index(kind)]
     }
 
     pub fn item(&self, item: Item) -> Handle<Image> {
         match item {
-            Item::Weapon { kind, .. } => self.weapon(kind).0,
+            Item::Weapon { kind, .. } => self.weapon(kind).icon.clone(),
             Item::Armor { kind, .. } => self.armors[armor_index(kind)].clone(),
             Item::Emp => self.emp.clone(),
             Item::Medkit => self.medkit.clone(),
         }
     }
+}
+
+/// A weapon as carried (with the survivor's fists gripping it) and as loot lying on the ground.
+#[derive(Clone)]
+pub struct WeaponSprite {
+    pub held: Handle<Image>,
+    pub icon: Handle<Image>,
+    /// Size in texture pixels.
+    pub size: Vec2,
+    /// Where the rear hand grips, in texture pixels from the top-left. The renderer pivots here.
+    pub grip: Vec2,
+}
+
+/// Where to put a held weapon and the sleeve reaching for it, so the rear fist lands on `pivot`.
+/// `size` and `grip` come from [`WeaponSprite`]; the weapon is drawn flipped vertically when it
+/// points left, which mirrors the grip too.
+pub fn held_layout(pivot: Vec2, aim: Vec2, size: Vec2, grip: Vec2) -> (Vec2, Vec2) {
+    let mut g = Vec2::new(grip.x - size.x / 2.0, size.y / 2.0 - grip.y) * PIXEL;
+    if aim.x < 0.0 {
+        g.y = -g.y;
+    }
+    (pivot - aim.rotate(g), pivot - aim * 3.0 * PIXEL)
 }
 
 fn weapon_index(kind: WeaponKind) -> usize {
@@ -93,9 +115,13 @@ pub fn build(images: &mut Assets<Image>) -> Textures {
         WeaponKind::Railgun,
     ]
     .map(|kind| {
-        let canvas = paint_weapon(kind);
-        let size = Vec2::new(canvas.w as f32, canvas.h as f32);
-        (add(canvas, true), size)
+        let (icon, held, grip) = paint_weapon(kind);
+        WeaponSprite {
+            size: Vec2::new(held.w as f32, held.h as f32),
+            held: add(held, true),
+            icon: add(icon, true),
+            grip,
+        }
     });
     Textures {
         ground: add(paint_ground(), true),
@@ -118,7 +144,7 @@ pub fn build(images: &mut Assets<Image>) -> Textures {
                 }
             })
             .collect(),
-        hand: add(paint_hand(), true),
+        arm: add(paint_arm(), true),
         roach: [0, 1].map(|frame| add(paint_roach(frame), true)),
         pod: add(paint_pod(), true),
         spore: add(paint_spore(), false),
@@ -186,6 +212,7 @@ fn noise(x: f32, y: f32, period: i32, seed: u32) -> f32 {
     top + (bottom - top) * sy
 }
 
+#[derive(Clone)]
 /// A tiny RGBA painter. Origin top-left, y down, pixel centers at +0.5.
 struct Canvas {
     w: u32,
@@ -733,22 +760,19 @@ fn paint_survivor(facing: Facing, frame: usize) -> (Canvas, Canvas) {
             jacket.rect(5, 13 + y0, 14, 21, cloth);
             jacket.clear(5, 13 + y0);
             jacket.clear(14, 13 + y0);
-            jacket.rect(3, 14 + y0, 4, 19 + y0, shade(cloth, 0.85));
-            jacket.rect(15, 14 + y0, 16, 19 + y0, shade(cloth, 0.85));
+            // Shoulders only: the arms reach forward to the weapon (see `paint_arm`).
+            jacket.rect(4, 14 + y0, 4, 16 + y0, shade(cloth, 0.85));
+            jacket.rect(15, 14 + y0, 15, 16 + y0, shade(cloth, 0.85));
             jacket.rect(13, 14 + y0, 14, 21, shade(cloth, 0.8));
             jacket.rect(6, 14 + y0, 6, 20, shade(cloth, 1.08));
-            gear.rect(3, 20 + y0, 4, 21 + y0, SKIN);
-            gear.rect(15, 20 + y0, 16, 21 + y0, SKIN);
             gear.rect(5, 21, 14, 21, STRAP);
         }
         Facing::Side => {
             jacket.rect(6, 13 + y0, 12, 21, cloth);
             jacket.rect(11, 13 + y0, 12, 21, shade(cloth, 0.8));
             jacket.clear(6, 13 + y0);
-            // One arm swings opposite the front leg.
-            let ax = 9 - stride;
-            jacket.rect(ax, 14 + y0, ax + 2, 19 + y0, shade(cloth, 0.85));
-            gear.rect(ax, 20 + y0, ax + 2, 21 + y0, SKIN);
+            // Shoulder seam; the arm itself reaches forward to the weapon.
+            jacket.rect(9, 14 + y0, 11, 15 + y0, shade(cloth, 0.86));
             gear.rect(6, 21, 12, 21, STRAP);
         }
     }
@@ -845,92 +869,235 @@ fn paint_head_side(c: &mut Canvas, y0: i32) {
     c.rect(6, 12 + y0, 7, 13 + y0, shade(SCARF, 0.8));
 }
 
-/// Glove drawn where a held weapon is gripped.
-fn paint_hand() -> Canvas {
-    let mut c = Canvas::new(6, 6);
-    c.disc(3.0, 3.0, 1.8, BOOTS);
-    c.put(3, 2, SKIN);
+/// Forearm sleeve, pointing +X, cuff at the right where the fist takes over.
+fn paint_arm() -> Canvas {
+    let mut c = Canvas::new(7, 5);
+    let cloth = rgb(0.93, 0.93, 0.93);
+    c.rect(1, 1, 5, 3, cloth);
+    c.rect(1, 1, 4, 1, shade(cloth, 1.08));
+    c.rect(1, 3, 5, 3, shade(cloth, 0.72));
+    c.rect(5, 1, 5, 3, shade(cloth, 0.8));
     c.outline(OUTLINE);
     c
 }
 
-fn paint_weapon(kind: WeaponKind) -> Canvas {
-    match kind {
-        WeaponKind::Stick => {
-            let mut c = Canvas::new(16, 5);
-            let wood = rgb(0.55, 0.38, 0.2);
-            c.rect(1, 2, 14, 2, wood);
-            c.rect(1, 1, 9, 1, shade(wood, 1.25));
-            c.rect(10, 1, 14, 3, shade(wood, 0.9));
-            c.put(6, 2, shade(wood, 0.6));
-            c.put(12, 2, shade(wood, 0.6));
-            c.outline(OUTLINE);
-            c
-        }
-        WeaponKind::Bow => {
-            let mut c = Canvas::new(8, 18);
-            let wood = rgb(0.62, 0.45, 0.25);
-            for i in 0..=24 {
-                let t = i as f32 / 24.0;
-                let a = (t - 0.5) * 2.4;
-                let (x, y) = (2.0 + a.cos() * 4.0, 9.0 + a.sin() * 7.5);
-                c.put(x as i32, y as i32, wood);
-            }
-            c.line(2.0, 1.5, 2.0, 16.5, rgb(0.85, 0.82, 0.72));
-            c.outline(OUTLINE);
-            c
-        }
-        WeaponKind::PipeShotgun => {
-            let mut c = Canvas::new(16, 6);
-            let pipe = rgb(0.5, 0.5, 0.48);
-            c.rect(5, 1, 14, 2, pipe);
-            c.rect(5, 1, 14, 1, shade(pipe, 1.3));
-            c.rect(5, 3, 13, 3, shade(pipe, 0.75));
-            c.rect(1, 2, 5, 4, rgb(0.45, 0.3, 0.17));
-            c.rect(8, 1, 9, 3, rgb(0.75, 0.62, 0.3));
-            c.outline(OUTLINE);
-            c
-        }
-        WeaponKind::Rifle => {
-            let mut c = Canvas::new(21, 7);
-            let metal = rgb(0.24, 0.26, 0.24);
-            c.rect(1, 2, 6, 3, rgb(0.3, 0.27, 0.2));
-            c.rect(6, 1, 15, 3, metal);
-            c.rect(6, 1, 15, 1, shade(metal, 1.5));
-            c.rect(15, 2, 19, 2, shade(metal, 0.8));
-            c.rect(10, 4, 11, 5, shade(metal, 0.7));
-            c.rect(8, 0, 9, 0, rgb(0.15, 0.15, 0.15));
-            c.outline(OUTLINE);
-            c
-        }
-        WeaponKind::Laser => {
-            let mut c = Canvas::new(19, 7);
-            let shell = rgb(0.85, 0.88, 0.9);
-            c.rect(1, 2, 15, 4, shell);
-            c.rect(1, 2, 15, 2, shade(shell, 1.1));
-            c.rect(1, 4, 15, 4, shade(shell, 0.7));
-            c.rect(4, 3, 13, 3, rgb(0.2, 1.0, 1.0));
-            c.rect(16, 2, 17, 4, rgb(0.15, 0.5, 0.55));
-            c.put(17, 3, rgb(0.7, 1.0, 1.0));
-            c.outline(OUTLINE);
-            c
-        }
-        WeaponKind::Railgun => {
-            let mut c = Canvas::new(26, 9);
-            let rail = rgb(0.35, 0.33, 0.4);
-            c.rect(1, 3, 6, 5, rgb(0.25, 0.22, 0.3));
-            c.rect(6, 2, 24, 2, rail);
-            c.rect(6, 6, 24, 6, rail);
-            c.rect(6, 3, 20, 5, rgb(0.18, 0.1, 0.25));
-            for x in [8, 11, 14, 17] {
-                c.rect(x, 1, x + 1, 7, rgb(0.75, 0.4, 1.0));
-                c.put(x, 1, rgb(1.0, 0.8, 1.0));
-            }
-            c.rect(21, 4, 24, 4, rgb(0.95, 0.7, 1.0));
-            c.outline(OUTLINE);
-            c
+/// A fist wrapped around something two pixels thick, seen side-on: 3x4 pixels from (x, y).
+/// It gets its own dark edge where it overlaps the weapon so it doesn't melt into it.
+fn paint_fist(c: &mut Canvas, x: i32, y: i32) {
+    for (ex, ey) in (x - 1..=x + 3)
+        .flat_map(|ex| [(ex, y - 1), (ex, y + 4)])
+        .chain((y..=y + 3).flat_map(|ey| [(x - 1, ey), (x + 3, ey)]))
+    {
+        if c.get(ex, ey)[3] > 0.5 {
+            c.put(ex, ey, OUTLINE);
         }
     }
+    c.rect(x, y, x + 2, y + 3, SKIN);
+    c.rect(x, y, x + 1, y, shade(SKIN, 1.08));
+    c.rect(x, y + 3, x + 2, y + 3, SKIN_SHADE);
+    c.rect(x, y + 1, x, y + 3, SKIN_SHADE);
+    // Knuckle creases between the curled fingers.
+    c.put(x + 2, y + 1, shade(SKIN_SHADE, 0.88));
+    c.put(x + 2, y + 2, shade(SKIN_SHADE, 0.88));
+    c.put(x + 1, y + 2, SKIN_SHADE);
+}
+
+/// Paint a weapon facing +X. Returns the loot icon, the held version with fists on it, and the
+/// rear grip in texture pixels.
+fn paint_weapon(kind: WeaponKind) -> (Canvas, Canvas, Vec2) {
+    let (base, fists): (Canvas, &[(i32, i32)]) = match kind {
+        WeaponKind::Stick => {
+            // Splintered club, tape-wrapped handle, a couple of bent nails.
+            let mut c = Canvas::new(20, 9);
+            let wood = rgb(0.6, 0.42, 0.22);
+            c.rect(1, 3, 9, 4, wood);
+            c.rect(1, 3, 9, 3, shade(wood, 1.22));
+            c.rect(1, 4, 9, 4, shade(wood, 0.72));
+            c.rect(1, 2, 1, 5, shade(wood, 0.65));
+            let tape = rgb(0.72, 0.68, 0.58);
+            for x in [2, 4, 6] {
+                c.rect(x, 3, x, 4, tape);
+                c.put(x, 4, shade(tape, 0.75));
+            }
+            for x in 9..=18 {
+                let t = (x - 9) as f32 / 9.0;
+                let half = 1.0 + t * 1.3;
+                let (y0, y1) = ((3.5 - half).round() as i32, (3.5 + half).round() as i32 - 1);
+                c.rect(x, y0, x, y1, wood);
+                c.put(x, y0, shade(wood, 1.25));
+                c.put(x, y1, shade(wood, 0.7));
+            }
+            c.rect(18, 2, 18, 5, shade(wood, 0.85));
+            for (x, y) in [(11, 3), (14, 4), (16, 2)] {
+                c.put(x, y, shade(wood, 0.62));
+            }
+            let nail = rgb(0.72, 0.72, 0.74);
+            for (x, y, dx) in [(12, 1, 1), (15, 0, -1), (14, 6, 1)] {
+                c.put(x, y, nail);
+                c.put(x + dx, y + if y > 3 { 1 } else { -1 }, shade(nail, 0.7));
+            }
+            (c, &[(3, 2)])
+        }
+        WeaponKind::Bow => {
+            // Recurve bow with a wrapped grip and an arrow on the string.
+            let mut c = Canvas::new(15, 21);
+            let wood = rgb(0.64, 0.44, 0.22);
+            for y in 1..=19 {
+                let t = (y as f32 - 10.0) / 9.0;
+                let x = (3.0 + 4.5 * (1.0 - t * t)).round() as i32;
+                c.put(x, y, wood);
+                if t.abs() < 0.6 {
+                    c.put(x - 1, y, shade(wood, 1.25));
+                } else if t.abs() > 0.88 {
+                    c.put(x + 1, y, shade(wood, 0.8));
+                }
+            }
+            c.rect(6, 8, 7, 12, rgb(0.36, 0.22, 0.13));
+            c.put(6, 9, rgb(0.5, 0.33, 0.2));
+            c.put(6, 11, rgb(0.5, 0.33, 0.2));
+            c.line(3.0, 1.5, 3.0, 19.5, rgb(0.9, 0.88, 0.78));
+            let shaft = rgb(0.78, 0.66, 0.45);
+            c.rect(2, 10, 11, 10, shaft);
+            let head = rgb(0.62, 0.64, 0.66);
+            c.rect(12, 10, 13, 10, head);
+            c.put(12, 9, shade(head, 1.2));
+            c.put(12, 11, shade(head, 0.7));
+            let feather = rgb(0.82, 0.25, 0.2);
+            c.rect(1, 9, 2, 9, feather);
+            c.rect(1, 11, 2, 11, shade(feather, 0.75));
+            (c, &[(5, 8)])
+        }
+        WeaponKind::PipeShotgun => {
+            // Scrap pipe on a wooden stock, held together with tape and a hose clamp.
+            let mut c = Canvas::new(23, 9);
+            let wood = rgb(0.5, 0.33, 0.18);
+            c.rect(1, 3, 2, 7, wood);
+            c.rect(3, 3, 7, 5, wood);
+            c.rect(1, 3, 7, 3, shade(wood, 1.25));
+            c.rect(1, 7, 2, 7, shade(wood, 0.65));
+            c.rect(3, 5, 7, 5, shade(wood, 0.72));
+            c.put(1, 5, shade(wood, 0.6));
+            let iron = rgb(0.42, 0.4, 0.38);
+            c.rect(8, 2, 11, 5, iron);
+            c.rect(8, 2, 11, 2, shade(iron, 1.35));
+            c.rect(8, 5, 11, 5, shade(iron, 0.7));
+            c.put(10, 3, rgb(0.55, 0.3, 0.16));
+            c.rect(9, 6, 10, 6, shade(iron, 0.7));
+            c.put(8, 6, shade(iron, 0.7));
+            let pipe = rgb(0.55, 0.55, 0.52);
+            c.rect(11, 2, 20, 4, pipe);
+            c.rect(11, 2, 20, 2, shade(pipe, 1.35));
+            c.rect(11, 4, 20, 4, shade(pipe, 0.66));
+            for (x, y) in [(13, 3), (18, 4), (16, 2)] {
+                c.put(x, y, rgb(0.6, 0.36, 0.2));
+            }
+            c.rect(20, 1, 21, 5, shade(pipe, 0.8));
+            c.rect(20, 1, 21, 1, shade(pipe, 1.2));
+            c.put(21, 3, OUTLINE);
+            let tape = rgb(0.68, 0.7, 0.66);
+            c.rect(17, 2, 17, 4, tape);
+            c.put(17, 4, shade(tape, 0.72));
+            (c, &[(5, 3), (14, 2)])
+        }
+        WeaponKind::Rifle => {
+            // Scoped rifle: stock, pistol grip, curved mag, vented handguard, muzzle brake.
+            let mut c = Canvas::new(27, 11);
+            let poly = rgb(0.32, 0.27, 0.2);
+            c.rect(1, 3, 1, 7, shade(poly, 0.6));
+            c.rect(2, 3, 4, 6, poly);
+            c.rect(5, 4, 7, 5, poly);
+            c.rect(2, 3, 7, 3, shade(poly, 1.3));
+            c.rect(2, 6, 4, 6, shade(poly, 0.72));
+            let metal = rgb(0.25, 0.27, 0.26);
+            c.rect(7, 3, 15, 5, metal);
+            c.rect(7, 3, 15, 3, shade(metal, 1.6));
+            c.rect(7, 5, 15, 5, shade(metal, 0.7));
+            c.rect(12, 4, 13, 4, shade(metal, 1.9));
+            c.rect(7, 6, 8, 8, shade(metal, 0.8));
+            c.put(9, 6, shade(metal, 0.6));
+            c.rect(11, 6, 12, 7, shade(metal, 0.85));
+            c.rect(12, 8, 13, 8, shade(metal, 0.85));
+            c.put(11, 6, shade(metal, 1.3));
+            let scope = rgb(0.14, 0.15, 0.15);
+            c.rect(8, 1, 13, 2, scope);
+            c.rect(8, 1, 12, 1, shade(scope, 2.0));
+            c.put(13, 1, rgb(0.55, 0.95, 1.0));
+            c.put(13, 2, rgb(0.2, 0.55, 0.65));
+            let guard = rgb(0.36, 0.33, 0.26);
+            c.rect(16, 3, 21, 5, guard);
+            c.rect(16, 3, 21, 3, shade(guard, 1.3));
+            c.rect(16, 5, 21, 5, shade(guard, 0.7));
+            for x in [17, 19, 21] {
+                c.put(x, 4, shade(guard, 0.55));
+            }
+            c.rect(22, 4, 24, 4, metal);
+            c.put(23, 3, shade(metal, 1.4));
+            c.rect(25, 3, 25, 5, shade(metal, 1.2));
+            (c, &[(6, 4), (17, 3)])
+        }
+        WeaponKind::Laser => {
+            // Pre-war energy carbine: white shell, glowing cell window, finned emitter.
+            let mut c = Canvas::new(23, 10);
+            let shell = rgb(0.86, 0.88, 0.9);
+            c.rect(2, 2, 15, 5, shell);
+            c.rect(1, 3, 1, 5, shade(shell, 0.85));
+            c.rect(2, 2, 15, 2, shade(shell, 1.12));
+            c.rect(2, 5, 15, 5, shade(shell, 0.68));
+            c.clear(2, 2);
+            c.rect(3, 3, 3, 4, rgb(0.95, 0.55, 0.15));
+            let cell = rgb(0.15, 0.85, 0.9);
+            c.rect(6, 3, 13, 4, shade(cell, 0.6));
+            for x in [7, 9, 11, 13] {
+                c.put(x, 3, rgb(0.75, 1.0, 1.0));
+                c.put(x - 1, 4, cell);
+            }
+            c.rect(4, 6, 6, 7, rgb(0.3, 0.32, 0.36));
+            let fin = rgb(0.2, 0.42, 0.48);
+            for x in [16, 18] {
+                c.rect(x, 1, x, 6, fin);
+                c.put(x, 1, shade(fin, 1.5));
+            }
+            c.rect(17, 3, 19, 4, shade(fin, 0.75));
+            c.rect(20, 3, 21, 4, rgb(0.55, 1.0, 1.0));
+            c.put(21, 3, rgb(0.95, 1.0, 1.0));
+            (c, &[(4, 4), (11, 4)])
+        }
+        WeaponKind::Railgun => {
+            // Twin rails with glowing coils and a capacitor pack.
+            let mut c = Canvas::new(31, 12);
+            let body = rgb(0.27, 0.24, 0.32);
+            c.rect(1, 4, 6, 7, body);
+            c.rect(1, 4, 6, 4, shade(body, 1.35));
+            c.rect(1, 7, 6, 7, shade(body, 0.7));
+            c.rect(6, 2, 12, 8, shade(body, 1.1));
+            c.rect(6, 2, 12, 2, shade(body, 1.6));
+            c.rect(6, 8, 12, 8, shade(body, 0.75));
+            c.rect(8, 4, 10, 5, rgb(0.75, 0.4, 1.0));
+            c.put(8, 4, rgb(1.0, 0.85, 1.0));
+            let rail = rgb(0.5, 0.48, 0.56);
+            c.rect(12, 2, 28, 2, rail);
+            c.rect(12, 8, 28, 8, shade(rail, 0.75));
+            c.rect(12, 3, 26, 7, rgb(0.14, 0.08, 0.2));
+            c.rect(12, 5, 26, 5, rgb(0.55, 0.25, 0.8));
+            for x in [14, 18, 22] {
+                c.rect(x, 1, x + 1, 9, rgb(0.62, 0.32, 0.9));
+                c.rect(x, 1, x + 1, 1, rgb(1.0, 0.82, 1.0));
+                c.rect(x + 1, 2, x + 1, 9, rgb(0.42, 0.2, 0.62));
+            }
+            c.rect(27, 4, 29, 6, rgb(0.85, 0.6, 1.0));
+            c.put(29, 5, rgb(1.0, 0.95, 1.0));
+            (c, &[(6, 5), (10, 6)])
+        }
+    };
+    let mut icon = base.clone();
+    icon.outline(OUTLINE);
+    let mut held = base;
+    for &(x, y) in fists {
+        paint_fist(&mut held, x, y);
+    }
+    held.outline(OUTLINE);
+    let (x, y) = fists[0];
+    (icon, held, Vec2::new(x as f32 + 1.5, y as f32 + 2.0))
 }
 
 // ---------------------------------------------------------------- loot
@@ -1121,6 +1288,35 @@ mod tests {
         }
     }
 
+    /// 24-bit BMP, bottom-up rows, each sheet pixel blown up `zoom` times.
+    fn write_bmp(sheet: &Canvas, zoom: i32, path: &str) {
+        let (w, h) = (sheet.w as i32, sheet.h as i32);
+        let (zw, zh) = (w * zoom, h * zoom);
+        let stride = (zw * 3 + 3) & !3;
+        let mut out = Vec::new();
+        let size = 54 + stride * zh;
+        out.extend(b"BM");
+        out.extend((size as u32).to_le_bytes());
+        out.extend([0u8; 4]);
+        out.extend(54u32.to_le_bytes());
+        out.extend(40u32.to_le_bytes());
+        out.extend(zw.to_le_bytes());
+        out.extend(zh.to_le_bytes());
+        out.extend(1u16.to_le_bytes());
+        out.extend(24u16.to_le_bytes());
+        out.extend([0u8; 24]);
+        for y in (0..zh).rev() {
+            let mut line = Vec::new();
+            for x in 0..zw {
+                let p = sheet.get(x / zoom, y / zoom);
+                line.extend([2, 1, 0].map(|i| (p[i].clamp(0.0, 1.0) * 255.0) as u8));
+            }
+            line.resize(stride as usize, 0);
+            out.extend(line);
+        }
+        std::fs::write(path, out).unwrap();
+    }
+
     /// Dev aid: `EVOCLASH_SPRITE_PREVIEW=out.bmp cargo test -p evoclash -- --ignored preview`
     /// writes every survivor walk frame (rows: down, up, side) plus the monsters, blown up 8x.
     #[test]
@@ -1167,31 +1363,130 @@ mod tests {
                 [1.0; 3],
             );
         }
-        // 24-bit BMP, bottom-up rows.
-        let (zw, zh) = (w * zoom, h * zoom);
-        let stride = (zw * 3 + 3) & !3;
-        let mut out = Vec::new();
-        let size = 54 + stride * zh;
-        out.extend(b"BM");
-        out.extend((size as u32).to_le_bytes());
-        out.extend([0u8; 4]);
-        out.extend(54u32.to_le_bytes());
-        out.extend(40u32.to_le_bytes());
-        out.extend(zw.to_le_bytes());
-        out.extend(zh.to_le_bytes());
-        out.extend(1u16.to_le_bytes());
-        out.extend(24u16.to_le_bytes());
-        out.extend([0u8; 24]);
-        for y in (0..zh).rev() {
-            let mut line = Vec::new();
-            for x in 0..zw {
-                let p = sheet.get(x / zoom, y / zoom);
-                line.extend([2, 1, 0].map(|i| (p[i].clamp(0.0, 1.0) * 255.0) as u8));
+        write_bmp(&sheet, zoom, &path);
+    }
+
+    /// Dev aid: `EVOCLASH_ARMED_PREVIEW=out.bmp cargo test -p evoclash -- --ignored preview_armed`
+    /// poses a survivor holding every weapon at several aim angles, the way the renderer does.
+    #[test]
+    #[ignore]
+    fn preview_armed() {
+        let Ok(path) = std::env::var("EVOCLASH_ARMED_PREVIEW") else {
+            return;
+        };
+        // Mirrors render.rs: one sheet pixel is one world pixel.
+        const GUN_HEIGHT: f32 = 26.0;
+        const FOOT_INSET: f32 = 2.0;
+        let tint = [0.35, 0.6, 0.95];
+        let angles = [0.0f32, 35.0, 80.0, 145.0, 180.0, -45.0, -90.0, -140.0];
+        let kinds = [
+            WeaponKind::Stick,
+            WeaponKind::Bow,
+            WeaponKind::PipeShotgun,
+            WeaponKind::Rifle,
+            WeaponKind::Laser,
+            WeaponKind::Railgun,
+        ];
+        let (cw, ch) = (96, 96);
+        let mut sheet =
+            Canvas::filled(cw * angles.len() as u32, ch * kinds.len() as u32, |x, y| {
+                if (x / 8 + y / 8) % 2 == 0 {
+                    rgb(0.78, 0.62, 0.36)
+                } else {
+                    rgb(0.74, 0.58, 0.33)
+                }
+            });
+        let arm = paint_arm();
+        // Draw `src` scaled by PIXEL, centered at world `at` (y up), rotated by `angle`.
+        let draw = |sheet: &mut Canvas,
+                    src: &Canvas,
+                    at: Vec2,
+                    angle: f32,
+                    flip: (bool, bool),
+                    tint: [f32; 3]| {
+            let (sin, cos) = angle.sin_cos();
+            let half = Vec2::new(src.w as f32, src.h as f32) * PIXEL / 2.0;
+            let r = half.length().ceil() as i32 + 1;
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    let d = Vec2::new(dx as f32 + 0.5, dy as f32 + 0.5);
+                    // World offset is (d.x, -d.y); undo rotation.
+                    let w = Vec2::new(d.x, -d.y);
+                    let l = Vec2::new(w.x * cos + w.y * sin, -w.x * sin + w.y * cos);
+                    let mut u = (l.x + half.x) / PIXEL;
+                    let mut v = (half.y - l.y) / PIXEL;
+                    if flip.0 {
+                        u = src.w as f32 - u;
+                    }
+                    if flip.1 {
+                        v = src.h as f32 - v;
+                    }
+                    if u < 0.0 || v < 0.0 {
+                        continue;
+                    }
+                    let p = src.get(u as i32, v as i32);
+                    if p[3] > 0.0 {
+                        sheet.put(
+                            (at.x + dx as f32) as i32,
+                            (-at.y + dy as f32) as i32,
+                            [p[0] * tint[0], p[1] * tint[1], p[2] * tint[2], p[3]],
+                        );
+                    }
+                }
             }
-            line.resize(stride as usize, 0);
-            out.extend(line);
+        };
+        for (row, kind) in kinds.iter().enumerate() {
+            let (_, weapon, grip) = paint_weapon(*kind);
+            let size = Vec2::new(weapon.w as f32, weapon.h as f32);
+            for (col, deg) in angles.iter().enumerate() {
+                let aim = Vec2::from_angle(deg.to_radians());
+                let feet = Vec2::new(
+                    col as f32 * cw as f32 + 48.0,
+                    -(row as f32 * ch as f32 + 84.0),
+                );
+                let (facing, flip) = Facing::from_aim(aim);
+                let (jacket, gear) = paint_survivor(facing, 0);
+                let body = feet + Vec2::Y * (SURVIVOR.y as f32 * PIXEL / 2.0 - FOOT_INSET);
+                let pivot = feet
+                    + Vec2::new(
+                        if facing == Facing::Side {
+                            if flip { -4.0 } else { 4.0 }
+                        } else {
+                            0.0
+                        },
+                        GUN_HEIGHT,
+                    );
+                let (center, arm_at) = held_layout(pivot, aim, size, grip);
+                let behind = facing == Facing::Up;
+                let gun = |sheet: &mut Canvas| {
+                    draw(
+                        sheet,
+                        &arm,
+                        arm_at,
+                        aim.to_angle(),
+                        (false, aim.x < 0.0),
+                        tint,
+                    );
+                    draw(
+                        sheet,
+                        &weapon,
+                        center,
+                        aim.to_angle(),
+                        (false, aim.x < 0.0),
+                        [1.0; 3],
+                    );
+                };
+                if behind {
+                    gun(&mut sheet);
+                }
+                draw(&mut sheet, &jacket, body, 0.0, (flip, false), tint);
+                draw(&mut sheet, &gear, body, 0.0, (flip, false), [1.0; 3]);
+                if !behind {
+                    gun(&mut sheet);
+                }
+            }
         }
-        std::fs::write(path, out).unwrap();
+        write_bmp(&sheet, 4, &path);
     }
 
     #[test]

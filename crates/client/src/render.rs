@@ -66,7 +66,8 @@ struct PlayerParts {
     jacket: Entity,
     gear: Entity,
     weapon: Entity,
-    hand: Entity,
+    /// Sleeve from the shoulder to the grip, tinted like the jacket.
+    arm: Entity,
     shown: Option<WeaponKind>,
     last: Vec2,
     /// Distance walked, in animation frames.
@@ -416,10 +417,11 @@ fn dress_player(
     let gear = commands
         .spawn((gear, transform.with_translation(lift + Vec3::Z * Z_STEP)))
         .id();
-    let (weapon, transform) = pixel_sprite(textures.weapon(WeaponKind::Stick).0);
+    let (weapon, transform) = pixel_sprite(textures.weapon(WeaponKind::Stick).held.clone());
     let weapon = commands.spawn((weapon, transform)).id();
-    let (hand, transform) = pixel_sprite(textures.hand.clone());
-    let hand = commands.spawn((hand, transform)).id();
+    let (mut arm, transform) = pixel_sprite(textures.arm.clone());
+    arm.color = player_color(player);
+    let arm = commands.spawn((arm, transform)).id();
     let shadow = commands
         .spawn(shadow(&textures, Vec2::new(46.0, 22.0)))
         .id();
@@ -432,13 +434,13 @@ fn dress_player(
                 jacket,
                 gear,
                 weapon,
-                hand,
+                arm,
                 shown: Some(WeaponKind::Stick),
                 last: Vec2::ZERO,
                 stride: 0.0,
             },
         ))
-        .add_children(&[shadow, jacket, gear, weapon, hand])
+        .add_children(&[shadow, jacket, gear, weapon, arm])
         .with_child((
             NameLabel,
             Text2d::new(player.name.clone()),
@@ -573,7 +575,7 @@ fn pose_players(
 
         // The weapon pivots at the hands; when you face away it's held in front of you, out of sight.
         let behind = facing == Facing::Up;
-        let (image, size) = tex.weapon(loadout.weapon);
+        let sprite_info = tex.weapon(loadout.weapon);
         let pivot = Vec2::new(
             if facing == Facing::Side {
                 if flip { -4.0 } else { 4.0 }
@@ -582,12 +584,12 @@ fn pose_players(
             },
             GUN_HEIGHT,
         );
-        let grip = 3.0 * PIXEL;
-        let center = pivot + aim * (size.x * PIXEL / 2.0 - grip);
+        let (center, arm_at) =
+            textures::held_layout(pivot, aim, sprite_info.size, sprite_info.grip);
         let z = if behind { -2.0 * Z_STEP } else { 3.0 * Z_STEP };
         if let Ok((mut sprite, mut transform)) = parts_q.get_mut(parts.weapon) {
             if parts.shown != Some(loadout.weapon) {
-                sprite.image = image;
+                sprite.image = sprite_info.held.clone();
                 parts.shown = Some(loadout.weapon);
             }
             // Keep the gun upright when it points left.
@@ -595,8 +597,11 @@ fn pose_players(
             transform.translation = center.extend(z);
             transform.rotation = Quat::from_rotation_z(aim.to_angle());
         }
-        if let Ok((_, mut transform)) = parts_q.get_mut(parts.hand) {
-            transform.translation = (pivot + aim * PIXEL).extend(z + Z_STEP);
+        // Under the weapon, so the fist closes over the cuff.
+        if let Ok((mut sprite, mut transform)) = parts_q.get_mut(parts.arm) {
+            sprite.flip_y = aim.x < 0.0;
+            transform.translation = arm_at.extend(z - Z_STEP);
+            transform.rotation = Quat::from_rotation_z(aim.to_angle());
         }
     }
 }
