@@ -195,7 +195,6 @@ impl Plugin for RenderPlugin {
                 follow_camera,
                 update_cursor,
                 draw_overlays,
-                draw_projectiles,
             )
                 .chain(),
         );
@@ -1110,7 +1109,7 @@ fn fade_splats(
     }
 }
 
-/// Spores get a glowing sprite; bullets stay as crisp gizmo tracers.
+/// Every projectile is a sprite: spores and EMP bolts glow, bullets are tinted streaks.
 fn dress_projectile(
     trigger: On<Add<Projectile>>,
     projectiles: Query<&Projectile>,
@@ -1120,27 +1119,50 @@ fn dress_projectile(
     let Ok(projectile) = projectiles.get(trigger.entity) else {
         return;
     };
-    if projectile.kind == ProjectileKind::Spore {
-        commands.entity(trigger.entity).insert((
+    let (sprite, anchor) = match projectile.kind {
+        ProjectileKind::Spore => (
             Sprite {
                 image: textures.spore.clone(),
                 custom_size: Some(Vec2::splat(22.0)),
                 ..default()
             },
-            Transform::from_xyz(0.0, 0.0, Z_PROJECTILE),
-            Visibility::Hidden,
-        ));
-    }
+            Anchor::CENTER,
+        ),
+        ProjectileKind::Emp => (
+            Sprite {
+                image: textures.glow.clone(),
+                color: Color::srgb(0.4, 0.8, 1.0),
+                custom_size: Some(Vec2::splat(30.0)),
+                ..default()
+            },
+            Anchor::CENTER,
+        ),
+        ProjectileKind::Shot(weapon) => (
+            Sprite {
+                image: textures.bolt.clone(),
+                color: weapon.stats().color,
+                custom_size: Some(tracer_size(weapon)),
+                ..default()
+            },
+            Anchor::CENTER_RIGHT,
+        ),
+    };
+    commands.entity(trigger.entity).insert((
+        sprite,
+        anchor,
+        Transform::from_xyz(0.0, 0.0, Z_PROJECTILE),
+        Visibility::Hidden,
+    ));
 }
 
 fn sync_projectiles(
-    mut projectiles: Query<
-        (&Pos, &mut Transform, &mut Visibility),
-        (With<Projectile>, With<Sprite>),
-    >,
+    mut projectiles: Query<(&Pos, &Projectile, &mut Transform, &mut Visibility), With<Sprite>>,
 ) {
-    for (pos, mut transform, mut visibility) in &mut projectiles {
+    for (pos, projectile, mut transform, mut visibility) in &mut projectiles {
         transform.translation = (pos.0 + Vec2::Y * GUN_HEIGHT).extend(Z_PROJECTILE);
+        if matches!(projectile.kind, ProjectileKind::Shot(_)) {
+            transform.rotation = Quat::from_rotation_z(projectile.vel.to_angle());
+        }
         visibility.set_if_neq(Visibility::Visible);
     }
 }
@@ -1190,9 +1212,70 @@ fn update_cursor(
     }
 }
 
+/// Marks one frame's worth of overlay sprites (bars, rings); redrawn from scratch every frame.
+#[derive(Component)]
+struct Overlay;
+
+const Z_OVERLAY: f32 = 6.0;
+
+struct Painter<'a, 'w, 's> {
+    commands: &'a mut Commands<'w, 's>,
+    textures: &'a Textures,
+}
+
+impl Painter<'_, '_, '_> {
+    /// An ellipse of the ring texture, centered on `center`.
+    fn oval(&mut self, center: Vec2, radii: Vec2, color: Color) {
+        // The painted ring peaks at 85% of the texture's half-size.
+        self.commands.spawn((
+            Overlay,
+            Sprite {
+                image: self.textures.shock.clone(),
+                color,
+                custom_size: Some(radii * 2.0 / 0.85),
+                ..default()
+            },
+            Transform::from_translation(center.extend(Z_OVERLAY)),
+        ));
+    }
+
+    /// A circle lying flat on the ground around someone's feet.
+    fn ring(&mut self, at: Vec2, r: f32, color: Color) {
+        self.oval(at, Vec2::new(r, r * 0.5), color);
+    }
+
+    fn disc(&mut self, at: Vec2, r: f32, color: Color) {
+        self.oval(at, Vec2::splat(r), color);
+    }
+
+    /// A bar growing rightward from `left`.
+    fn bar(&mut self, left: Vec2, width: f32, height: f32, color: Color) {
+        if width < 1.0 {
+            return;
+        }
+        self.commands.spawn((
+            Overlay,
+            Sprite {
+                image: self.textures.bar.clone(),
+                color,
+                custom_size: Some(Vec2::new(width, height)),
+                ..default()
+            },
+            Anchor::CENTER_LEFT,
+            Transform::from_translation(left.extend(Z_OVERLAY + 0.01)),
+        ));
+    }
+
+    fn gauge(&mut self, left: Vec2, width: f32, height: f32, frac: f32, color: Color) {
+        self.bar(left, width, height, Color::srgba(0.0, 0.0, 0.0, 0.6));
+        self.bar(left, width * frac.clamp(0.0, 1.0), height, color);
+    }
+}
+
 #[allow(clippy::type_complexity)]
 fn draw_overlays(
-    mut gizmos: Gizmos,
+    mut commands: Commands,
+    old: Query<Entity, With<Overlay>>,
     time: Res<Time>,
     fixed: Res<Time<Fixed>>,
     players: Query<(
@@ -1210,15 +1293,25 @@ fn draw_overlays(
     arena: Res<Arena>,
     indoors: Res<Indoors>,
 ) {
+    for entity in &old {
+        commands.entity(entity).despawn();
+    }
+    let mut paint = Painter {
+        commands: &mut commands,
+        textures: &textures,
+    };
     let t = time.elapsed_secs();
     // Radiation zones shimmer at the edges.
     for hazard in &arena.hazards {
         let glow = 0.25 + 0.12 * (t * 2.0).sin();
-        gizmos.rect_2d(
-            Isometry2d::from_translation(hazard.center()),
-            hazard.size(),
-            Color::srgb(0.6, 1.0, 0.3).with_alpha(glow),
-        );
+        paint.commands.spawn((
+            Overlay,
+            Sprite::from_color(
+                Color::srgb(0.6, 1.0, 0.3).with_alpha(glow * 0.35),
+                hazard.size(),
+            ),
+            Transform::from_translation(hazard.center().extend(Z_OVERLAY - 0.5)),
+        ));
     }
 
     // Monsters only show a health bar once they've been hurt.
@@ -1230,9 +1323,8 @@ fn draw_overlays(
         let w = monster.kind.radius() * 2.0;
         let top = monster_size(monster.kind, &textures, &images).y;
         let left = pos.0 + Vec2::new(-w / 2.0, top + 4.0);
-        gizmos.line_2d(left, left + Vec2::X * w, Color::srgba(0.0, 0.0, 0.0, 0.6));
-        let frac = (vitals.hp / max).clamp(0.0, 1.0);
-        gizmos.line_2d(left, left + Vec2::X * w * frac, Color::srgb(0.6, 0.95, 0.3));
+        let frac = vitals.hp / max;
+        paint.gauge(left, w, 4.0, frac, Color::srgb(0.6, 0.95, 0.3));
     }
 
     // Crates show their damage; safes show how far along the cracking is.
@@ -1251,8 +1343,7 @@ fn draw_overlays(
             }
             _ => continue,
         };
-        gizmos.line_2d(left, left + Vec2::X * w, Color::srgba(0.0, 0.0, 0.0, 0.6));
-        gizmos.line_2d(left, left + Vec2::X * w * frac.clamp(0.0, 1.0), color);
+        paint.gauge(left, w, 4.0, frac, color);
     }
 
     for (pos, samples, vitals, stats, local) in &players {
@@ -1267,19 +1358,14 @@ fn draw_overlays(
         // Armor shell: thicker and brighter the better the tech.
         if vitals.armor_points > 0.0 {
             let color = tier_color(vitals.armor.tier());
-            ring(&mut gizmos, p, PLAYER_RADIUS + 3.0, color);
+            paint.ring(p, PLAYER_RADIUS + 3.0, color);
             if vitals.armor.tier() >= 4 {
-                ring(&mut gizmos, p, PLAYER_RADIUS + 6.0, color.with_alpha(0.6));
+                paint.ring(p, PLAYER_RADIUS + 6.0, color.with_alpha(0.6));
             }
         }
         if vitals.emp_slow > 0 {
             let r = PLAYER_RADIUS + 9.0 + (t * 20.0).sin() * 2.0;
-            ring(
-                &mut gizmos,
-                p,
-                r,
-                Color::srgb(0.4, 0.8, 1.0).with_alpha(0.7),
-            );
+            paint.ring(p, r, Color::srgb(0.4, 0.8, 1.0).with_alpha(0.7));
         }
         if vitals.shield > 0 {
             // Spawn protection: a shimmering bubble that flickers faster as it runs out.
@@ -1287,17 +1373,12 @@ fn draw_overlays(
             let flicker = 0.45 + 0.35 * (t * (8.0 + 16.0 * (1.0 - left))).sin();
             let bubble = Color::srgb(0.55, 0.85, 1.0).with_alpha(flicker);
             let center = p + Vec2::Y * (SURVIVOR_HEIGHT / 2.0 - FOOT_INSET);
-            gizmos.ellipse_2d(
-                Isometry2d::from_translation(center),
-                Vec2::new(30.0, SURVIVOR_HEIGHT / 2.0 + 4.0),
-                bubble,
-            );
-            ring(&mut gizmos, p, PLAYER_RADIUS + 6.0, bubble);
+            paint.oval(center, Vec2::new(30.0, SURVIVOR_HEIGHT / 2.0 + 4.0), bubble);
+            paint.ring(p, PLAYER_RADIUS + 6.0, bubble);
         }
         if stats.has_bounty() {
             let pulse = 0.6 + 0.4 * (t * 6.0).sin();
-            ring(
-                &mut gizmos,
+            paint.ring(
                 p,
                 PLAYER_RADIUS + 14.0,
                 Color::srgb(1.0, 0.8, 0.1).with_alpha(pulse),
@@ -1307,22 +1388,13 @@ fn draw_overlays(
         // Health and armor bars.
         let bar_w = 44.0;
         let left = p + Vec2::new(-bar_w / 2.0, SURVIVOR_HEIGHT + 4.0);
-        gizmos.line_2d(
-            left,
-            left + Vec2::X * bar_w,
-            Color::srgba(0.0, 0.0, 0.0, 0.6),
-        );
         let hp = (vitals.hp / MAX_HP).clamp(0.0, 1.0);
         let hp_color = Color::srgb(1.0 - hp, 0.25 + 0.7 * hp, 0.25);
-        gizmos.line_2d(left, left + Vec2::X * bar_w * hp, hp_color);
+        paint.gauge(left, bar_w, 5.0, hp, hp_color);
         if vitals.armor_points > 0.0 {
             let ap = (vitals.armor_points / vitals.armor.max_points().max(1.0)).clamp(0.0, 1.0);
             let left = left + Vec2::Y * 4.0;
-            gizmos.line_2d(
-                left,
-                left + Vec2::X * bar_w * ap,
-                tier_color(vitals.armor.tier()),
-            );
+            paint.bar(left, bar_w * ap, 3.0, tier_color(vitals.armor.tier()));
         }
 
         if local {
@@ -1330,8 +1402,7 @@ fn draw_overlays(
             for (prop_pos, _, prop) in &props {
                 let reach = prop.kind.radius() + PLAYER_RADIUS + 40.0;
                 if prop.kind == PropKind::Safe && !prop.open && prop_pos.0.distance(p) < reach {
-                    ring(
-                        &mut gizmos,
+                    paint.ring(
                         prop_pos.0,
                         prop.kind.radius() + 8.0,
                         Color::srgb(1.0, 0.85, 0.3).with_alpha(0.5 + 0.4 * (t * 6.0).sin()),
@@ -1341,7 +1412,7 @@ fn draw_overlays(
             // Show what's in reach.
             for pickup in &pickups {
                 if pickup.0.distance(p) < 46.0 {
-                    gizmos.circle_2d(
+                    paint.disc(
                         pickup.0,
                         20.0,
                         Color::WHITE.with_alpha(0.5 + 0.5 * (t * 8.0).sin()),
@@ -1352,41 +1423,16 @@ fn draw_overlays(
     }
 }
 
-/// Shots fly at chest height: drawn lifted, resolved on the ground below.
-fn draw_projectiles(mut gizmos: Gizmos, projectiles: Query<(&Pos, &Projectile)>) {
-    for (pos, projectile) in &projectiles {
-        let at = pos.0 + Vec2::Y * GUN_HEIGHT;
-        match projectile.kind {
-            ProjectileKind::Shot(weapon) => {
-                let tail = at - projectile.vel.normalize_or_zero() * tracer_length(weapon);
-                gizmos.line_2d(tail, at, weapon.stats().color);
-            }
-            ProjectileKind::Emp => {
-                gizmos.circle_2d(at, 8.0, Color::srgb(0.4, 0.8, 1.0));
-                ring(&mut gizmos, pos.0, 6.0, Color::BLACK.with_alpha(0.4));
-            }
-            ProjectileKind::Spore => {}
-        }
-    }
-}
-
-/// A ring around someone's feet, flattened so it lies on the ground.
-fn ring(gizmos: &mut Gizmos, at: Vec2, r: f32, color: Color) {
-    gizmos.ellipse_2d(
-        Isometry2d::from_translation(at),
-        Vec2::new(r, r * 0.5),
-        color,
-    );
-}
-
-pub fn tracer_length(weapon: WeaponKind) -> f32 {
-    match weapon {
-        WeaponKind::Railgun => 140.0,
-        WeaponKind::Laser => 60.0,
-        WeaponKind::Rifle => 26.0,
-        WeaponKind::Bow => 22.0,
-        _ => 12.0,
-    }
+/// Streak sprite size: the bright head sits at the right end, on the bullet.
+pub fn tracer_size(weapon: WeaponKind) -> Vec2 {
+    let (length, thickness) = match weapon {
+        WeaponKind::Railgun => (170.0, 12.0),
+        WeaponKind::Laser => (80.0, 8.0),
+        WeaponKind::Rifle => (38.0, 7.0),
+        WeaponKind::Bow => (32.0, 6.0),
+        _ => (22.0, 6.0),
+    };
+    Vec2::new(length, thickness)
 }
 
 #[cfg(test)]

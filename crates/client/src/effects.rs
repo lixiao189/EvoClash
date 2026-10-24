@@ -1,9 +1,11 @@
 //! Juice: instant local tracers, swings, explosions, damage numbers, hit markers and the kill feed.
+//! Everything is a sprite; nothing here is drawn with gizmo lines.
 //!
 //! Your own shots are drawn the moment you click (the server's copy is never sent back to you),
 //! so firing feels zero-latency even though hits are decided by the server.
 
 use bevy::prelude::*;
+use bevy::sprite::Anchor;
 use evoclash_game::items::WeaponKind;
 use evoclash_game::protocol::*;
 use evoclash_game::sim::{Arena, PLAYER_RADIUS};
@@ -12,7 +14,10 @@ use lightyear::prelude::*;
 use rand::Rng;
 
 use crate::input::{GUN_HEIGHT, LocalPlayer};
-use crate::render::{CameraShake, UiFont, tracer_length};
+use crate::render::{CameraShake, UiFont, tracer_size};
+use crate::textures::Textures;
+
+const Z_FX: f32 = 7.0;
 
 pub struct EffectsPlugin;
 
@@ -30,7 +35,7 @@ impl Plugin for EffectsPlugin {
                 receive_events,
                 shake_on_damage,
                 age_effects,
-                draw_effects,
+                update_reticle,
             )
                 .chain(),
         );
@@ -63,20 +68,128 @@ struct Tracer {
 #[derive(Component)]
 struct Fx {
     kind: FxKind,
+    pos: Vec2,
+    tint: Color,
     age: f32,
     life: f32,
 }
 
 enum FxKind {
-    Swing {
-        pos: Vec2,
-        dir: Vec2,
-    },
-    Ring {
-        pos: Vec2,
-        radius: f32,
-        color: Color,
-    },
+    /// Crescent sweeping around the swinger.
+    Swing { dir: Vec2 },
+    /// Expanding shock ring.
+    Ring { radius: f32 },
+    /// Billowing fireball that darkens as it fades.
+    Puff { radius: f32 },
+    /// Short white-hot flash at the center.
+    Flash { radius: f32 },
+    /// Ember flung outward.
+    Spark { vel: Vec2 },
+}
+
+#[derive(Component)]
+struct Reticle;
+
+fn spawn_fx(
+    commands: &mut Commands,
+    textures: &Textures,
+    kind: FxKind,
+    pos: Vec2,
+    tint: Color,
+    life: f32,
+) {
+    let (image, z) = match kind {
+        FxKind::Swing { .. } => (&textures.slash, Z_FX),
+        FxKind::Ring { .. } => (&textures.shock, Z_FX - 0.2),
+        FxKind::Puff { .. } => (&textures.blast, Z_FX - 0.1),
+        FxKind::Flash { .. } => (&textures.glow, Z_FX),
+        FxKind::Spark { .. } => (&textures.glow, Z_FX + 0.1),
+    };
+    commands.spawn((
+        Fx {
+            kind,
+            pos,
+            tint,
+            age: 0.0,
+            life,
+        },
+        Sprite {
+            image: image.clone(),
+            color: tint,
+            custom_size: Some(Vec2::ZERO),
+            ..default()
+        },
+        Transform::from_translation(pos.extend(z)),
+    ));
+}
+
+fn spawn_swing(commands: &mut Commands, textures: &Textures, pos: Vec2, dir: Vec2) {
+    spawn_fx(
+        commands,
+        textures,
+        FxKind::Swing { dir },
+        pos + Vec2::Y * GUN_HEIGHT,
+        Color::srgb(1.0, 0.92, 0.75),
+        0.15,
+    );
+}
+
+fn spawn_boom(commands: &mut Commands, textures: &Textures, pos: Vec2, radius: f32, fire: bool) {
+    let mut rng = rand::rng();
+    let (shell, body, core, ember) = if fire {
+        (
+            Color::srgb(1.0, 0.6, 0.2),
+            Color::srgb(1.0, 0.5, 0.12),
+            Color::srgb(1.0, 0.95, 0.6),
+            Color::srgb(1.0, 0.75, 0.25),
+        )
+    } else {
+        (
+            Color::srgb(0.4, 0.8, 1.0),
+            Color::srgb(0.3, 0.65, 1.0),
+            Color::srgb(0.85, 0.97, 1.0),
+            Color::srgb(0.6, 0.9, 1.0),
+        )
+    };
+    spawn_fx(
+        commands,
+        textures,
+        FxKind::Ring { radius },
+        pos,
+        shell,
+        0.45,
+    );
+    spawn_fx(
+        commands,
+        textures,
+        FxKind::Puff { radius },
+        pos,
+        body,
+        if fire { 0.5 } else { 0.35 },
+    );
+    spawn_fx(
+        commands,
+        textures,
+        FxKind::Flash {
+            radius: radius * 0.9,
+        },
+        pos,
+        core,
+        0.25,
+    );
+    for _ in 0..if fire { 14 } else { 9 } {
+        let vel = Vec2::from_angle(rng.random_range(0.0..std::f32::consts::TAU))
+            * radius
+            * rng.random_range(1.0..3.0);
+        spawn_fx(
+            commands,
+            textures,
+            FxKind::Spark { vel },
+            pos,
+            ember,
+            rng.random_range(0.3..0.55),
+        );
+    }
 }
 
 #[derive(Component)]
@@ -86,6 +199,7 @@ struct DamageNumber {
 
 fn local_fire(
     mut commands: Commands,
+    textures: Res<Textures>,
     time: Res<Time>,
     mut gun: ResMut<LocalGun>,
     state: Query<&MatchState>,
@@ -104,14 +218,7 @@ fn local_fire(
     gun.cooldown = stats.cooldown as f32 / 64.0;
     let aim = input.aim.normalize_or(Vec2::X);
     if stats.melee {
-        commands.spawn(Fx {
-            kind: FxKind::Swing {
-                pos: pos.0,
-                dir: aim,
-            },
-            age: 0.0,
-            life: 0.15,
-        });
+        spawn_swing(&mut commands, &textures, pos.0, aim);
         return;
     }
     let mut rng = rand::rng();
@@ -128,12 +235,24 @@ fn local_fire(
             0.0
         };
         let dir = Vec2::from_angle(base + fan + bloom);
-        commands.spawn(Tracer {
-            pos: pos.0 + dir * (PLAYER_RADIUS + 4.0),
-            vel: dir * stats.range_or_speed,
-            ttl: stats.lifetime as f32 / 64.0,
-            weapon: loadout.weapon,
-        });
+        let start = pos.0 + dir * (PLAYER_RADIUS + 4.0);
+        commands.spawn((
+            Tracer {
+                pos: start,
+                vel: dir * stats.range_or_speed,
+                ttl: stats.lifetime as f32 / 64.0,
+                weapon: loadout.weapon,
+            },
+            Sprite {
+                image: textures.bolt.clone(),
+                color: stats.color,
+                custom_size: Some(tracer_size(loadout.weapon)),
+                ..default()
+            },
+            Anchor::CENTER_RIGHT,
+            Transform::from_translation((start + Vec2::Y * GUN_HEIGHT).extend(Z_FX))
+                .with_rotation(Quat::from_rotation_z(dir.to_angle())),
+        ));
     }
 }
 
@@ -141,7 +260,7 @@ fn step_tracers(
     mut commands: Commands,
     time: Res<Time>,
     arena: Res<Arena>,
-    mut tracers: Query<(Entity, &mut Tracer)>,
+    mut tracers: Query<(Entity, &mut Tracer, &mut Transform)>,
     others: Query<
         (&Pos, &Vitals),
         (
@@ -151,7 +270,7 @@ fn step_tracers(
     >,
 ) {
     let dt = time.delta_secs();
-    for (entity, mut tracer) in &mut tracers {
+    for (entity, mut tracer, mut transform) in &mut tracers {
         let from = tracer.pos;
         let to = from + tracer.vel * dt;
         tracer.ttl -= dt;
@@ -167,6 +286,7 @@ fn step_tracers(
             commands.entity(entity).despawn();
         } else {
             tracer.pos = to;
+            transform.translation = (to + Vec2::Y * GUN_HEIGHT).extend(Z_FX);
         }
     }
 }
@@ -174,6 +294,7 @@ fn step_tracers(
 #[allow(clippy::too_many_arguments)]
 fn receive_events(
     mut commands: Commands,
+    textures: Res<Textures>,
     time: Res<Time>,
     font: Res<UiFont>,
     mut receivers: Query<&mut MessageReceiver<GameEvent>, With<Client>>,
@@ -230,38 +351,13 @@ fn receive_events(
                     if me.is_some_and(|(_, p)| p.0.distance(pos) < 40.0) {
                         continue;
                     }
-                    commands.spawn(Fx {
-                        kind: FxKind::Swing { pos, dir },
-                        age: 0.0,
-                        life: 0.15,
-                    });
+                    spawn_swing(&mut commands, &textures, pos, dir);
                 }
                 GameEvent::Boom { pos, radius, fire } => {
                     if me.is_some_and(|(_, p)| p.0.distance(pos) < radius * 1.5) {
                         shake.0 = shake.0.max(if fire { 2.0 } else { 1.2 });
                     }
-                    let color = if fire {
-                        Color::srgb(1.0, 0.55, 0.15)
-                    } else {
-                        Color::srgb(0.4, 0.8, 1.0)
-                    };
-                    commands.spawn(Fx {
-                        kind: FxKind::Ring { pos, radius, color },
-                        age: 0.0,
-                        life: 0.45,
-                    });
-                    if fire {
-                        // A hot core inside the shock ring.
-                        commands.spawn(Fx {
-                            kind: FxKind::Ring {
-                                pos,
-                                radius: radius * 0.5,
-                                color: Color::srgb(1.0, 0.9, 0.4),
-                            },
-                            age: 0.0,
-                            life: 0.3,
-                        });
-                    }
+                    spawn_boom(&mut commands, &textures, pos, radius, fire);
                 }
             }
         }
@@ -288,17 +384,55 @@ fn shake_on_damage(
 fn age_effects(
     mut commands: Commands,
     time: Res<Time>,
-    mut fx: Query<(Entity, &mut Fx)>,
-    mut numbers: Query<(Entity, &mut DamageNumber, &mut Transform, &mut TextColor)>,
+    mut fx: Query<(Entity, &mut Fx, &mut Sprite, &mut Transform)>,
+    mut numbers: Query<(Entity, &mut DamageNumber, &mut Transform, &mut TextColor), Without<Fx>>,
     mut marker: ResMut<HitMarker>,
 ) {
     let dt = time.delta_secs();
     marker.0 += dt;
-    for (entity, mut fx) in &mut fx {
+    for (entity, mut fx, mut sprite, mut transform) in &mut fx {
+        let fx = &mut *fx;
         fx.age += dt;
         if fx.age > fx.life {
             commands.entity(entity).despawn();
+            continue;
         }
+        let t = fx.age / fx.life;
+        let fade = 1.0 - t;
+        let tint = fx.tint.to_srgba();
+        let (size, alpha, tint) = match fx.kind {
+            FxKind::Swing { dir } => {
+                let reach = WeaponKind::Stick.stats().range_or_speed + PLAYER_RADIUS;
+                transform.rotation = Quat::from_rotation_z(dir.to_angle() - 1.0 + 2.0 * t);
+                (2.0 * reach, fade, tint)
+            }
+            FxKind::Ring { radius } => (2.0 * radius * (0.3 + 0.7 * t) / 0.85, fade, tint),
+            FxKind::Puff { radius } => {
+                let grow = 1.0 - fade * fade;
+                // Cool from the base color toward soot.
+                let soot = Srgba::new(0.12, 0.08, 0.07, 1.0);
+                (
+                    2.0 * radius * (0.45 + 0.55 * grow) / 0.72,
+                    fade.powf(1.3),
+                    Srgba::new(
+                        tint.red + (soot.red - tint.red) * t,
+                        tint.green + (soot.green - tint.green) * t,
+                        tint.blue + (soot.blue - tint.blue) * t,
+                        1.0,
+                    ),
+                )
+            }
+            FxKind::Flash { radius } => (2.0 * radius * (1.0 - 0.4 * t), fade * fade, tint),
+            FxKind::Spark { ref mut vel } => {
+                fx.pos += *vel * dt;
+                *vel *= 0.93;
+                (3.0 + 9.0 * fade, fade, tint)
+            }
+        };
+        sprite.custom_size = Some(Vec2::splat(size));
+        sprite.color = tint.with_alpha(alpha).into();
+        transform.translation.x = fx.pos.x;
+        transform.translation.y = fx.pos.y;
     }
     for (entity, mut number, mut transform, mut color) in &mut numbers {
         number.age += dt;
@@ -310,46 +444,33 @@ fn age_effects(
     }
 }
 
-fn draw_effects(
-    mut gizmos: Gizmos,
-    tracers: Query<&Tracer>,
-    fx: Query<&Fx>,
+fn update_reticle(
+    mut commands: Commands,
+    textures: Res<Textures>,
     marker: Res<HitMarker>,
     cursor: Res<crate::input::CursorWorld>,
+    mut reticle: Query<(&mut Sprite, &mut Transform, &mut Visibility), With<Reticle>>,
 ) {
-    let lift = Vec2::Y * GUN_HEIGHT;
-    for tracer in &tracers {
-        let tail = tracer.pos - tracer.vel.normalize_or_zero() * tracer_length(tracer.weapon);
-        gizmos.line_2d(tail + lift, tracer.pos + lift, tracer.weapon.stats().color);
-    }
-    for fx in &fx {
-        let t = fx.age / fx.life;
-        match fx.kind {
-            FxKind::Swing { pos, dir } => {
-                let reach = WeaponKind::Stick.stats().range_or_speed + PLAYER_RADIUS;
-                let base = dir.to_angle();
-                let sweep = -1.0 + 2.0 * t;
-                let a = Vec2::from_angle(base + sweep * 1.0);
-                gizmos.line_2d(
-                    pos + lift + a * PLAYER_RADIUS,
-                    pos + lift + a * reach,
-                    Color::srgba(1.0, 0.9, 0.7, 1.0 - t),
-                );
-            }
-            FxKind::Ring { pos, radius, color } => {
-                gizmos.circle_2d(pos, radius * (0.3 + 0.7 * t), color.with_alpha(1.0 - t));
-            }
-        }
-    }
-    if let Some(c) = cursor.0 {
-        let flash = marker.0 < 0.12;
-        let (size, color) = if flash {
-            (11.0, Color::srgb(1.0, 0.3, 0.2))
-        } else {
-            (7.0, Color::WHITE.with_alpha(0.8))
-        };
-        for d in [Vec2::X, Vec2::Y, -Vec2::X, -Vec2::Y] {
-            gizmos.line_2d(c + d * 4.0, c + d * size, color);
-        }
-    }
+    let Ok((mut sprite, mut transform, mut visibility)) = reticle.single_mut() else {
+        commands.spawn((
+            Reticle,
+            Sprite::from_image(textures.reticle.clone()),
+            Transform::from_xyz(0.0, 0.0, Z_FX + 1.0),
+            Visibility::Hidden,
+        ));
+        return;
+    };
+    let Some(c) = cursor.0 else {
+        visibility.set_if_neq(Visibility::Hidden);
+        return;
+    };
+    visibility.set_if_neq(Visibility::Visible);
+    let flash = marker.0 < 0.12;
+    sprite.color = if flash {
+        Color::srgb(1.0, 0.3, 0.2)
+    } else {
+        Color::WHITE.with_alpha(0.8)
+    };
+    transform.scale = Vec3::splat(if flash { 1.4 } else { 1.0 });
+    transform.translation = c.extend(Z_FX + 1.0);
 }
