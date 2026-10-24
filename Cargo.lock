@@ -3475,6 +3475,7 @@ name = "evoclash-server"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "ctrlc",
  "evoclash-game",
  "lightyear",
  "rand 0.9.5",

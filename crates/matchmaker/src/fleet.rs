@@ -5,7 +5,7 @@
 //! needs "give me a fresh server address".
 
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -21,8 +21,8 @@ pub struct FleetConfig {
     pub max_matches: usize,
     pub max_players: u32,
     pub bots: u32,
-    /// URL the servers heartbeat to (this matchmaker).
-    pub matchmaker_url: String,
+    /// URLs the servers heartbeat to: this matchmaker plus its peer replicas.
+    pub matchmaker_urls: Vec<String>,
     pub log_dir: PathBuf,
 }
 
@@ -49,11 +49,16 @@ impl Fleet {
         if children.len() >= self.config.max_matches {
             return Err("fleet at capacity".into());
         }
+        // Skip ports another process still holds (e.g. a match from before a restart that hasn't
+        // heartbeated in yet), so a fresh server never dies on a bind error with a player en route.
         let port = self
             .config
             .ports
             .clone()
-            .find(|p| !used.iter().any(|a| a.port() == *p))
+            .find(|p| {
+                !used.iter().any(|a| a.port() == *p)
+                    && UdpSocket::bind((Ipv4Addr::UNSPECIFIED, *p)).is_ok()
+            })
             .ok_or("no free ports")?;
         let addr = SocketAddr::new(self.config.public_host, port);
         let id = format!("m{port}-{:06x}", rand::random::<u32>() & 0xff_ffff);
@@ -74,7 +79,7 @@ impl Fleet {
             .arg("--bots")
             .arg(self.config.bots.to_string())
             .arg("--matchmaker")
-            .arg(&self.config.matchmaker_url)
+            .arg(self.config.matchmaker_urls.join(","))
             .arg("--single-match")
             .stdin(Stdio::null())
             .stdout(log.try_clone().map_err(|e| e.to_string())?)

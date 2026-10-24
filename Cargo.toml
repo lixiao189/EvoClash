@@ -36,6 +36,8 @@ rand = "0.9"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "signal", "sync", "time"] }
 axum = "0.8"
 ureq = { version = "3", features = ["json"] }
+# SIGTERM (not just Ctrl-C) so orchestrators can drain match servers gracefully.
+ctrlc = { version = "3.4", features = ["termination"] }
 base64 = "0.22"
 hmac = "0.12"
 sha2 = "0.10"

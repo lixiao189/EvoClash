@@ -1,0 +1,14 @@
+# kubectl apply -k deploy/k8s
+# Prerequisites (see README "Kubernetes 部署"):
+#   - Agones installed and allowed to manage GameServers in the `evoclash` namespace
+#   - Secret `evoclash-netcode` with key `key` = 64 hex chars (shared by matchmaker and servers)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: evoclash
+resources:
+  - namespace.yaml
+  - matchmaker.yaml
+  - fleet.yaml
+images:
+  - name: ghcr.io/lixiao189/evoclash-server
+    newTag: latest

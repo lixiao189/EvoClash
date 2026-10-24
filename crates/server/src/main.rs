@@ -1,9 +1,11 @@
 //! EvoClash dedicated match server.
 //!
 //! One process hosts exactly one match. Scaling out means running more processes
-//! (one per core is a good default); a crash or deploy only affects the matches on
+//! (one per core is a good default, and each process sticks to `--threads` worker threads
+//! so they don't fight over cores); a crash or deploy only affects the matches on
 //! that process, and the matchmaker routes new players around it.
 
+mod agones;
 mod bots;
 mod combat;
 mod config;
@@ -14,7 +16,7 @@ mod ops;
 
 use std::time::Duration;
 
-use bevy::app::ScheduleRunnerPlugin;
+use bevy::app::{ScheduleRunnerPlugin, TaskPoolOptions, TaskPoolPlugin};
 use bevy::log::LogPlugin;
 use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
@@ -25,12 +27,27 @@ use lightyear::prelude::*;
 use crate::config::ServerConfig;
 
 fn main() {
-    let config = ServerConfig::from_args();
+    let mut config = ServerConfig::from_args();
+    let agones = config.agones.then(|| {
+        let sdk = agones::AgonesSdk::from_env();
+        let (name, public_addr) = sdk
+            .discover()
+            .unwrap_or_else(|e| panic!("cannot reach the Agones SDK sidecar: {e}"));
+        config.match_id = name;
+        config.public_addr = public_addr;
+        // One pod per match: Agones replaces it with a fresh Ready server afterwards.
+        config.single_match = true;
+        sdk
+    });
 
     let mut app = App::new();
     app.add_plugins((
         // Wake up often enough that a fixed tick never waits on the loop, without spinning a core.
-        MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_millis(1))),
+        MinimalPlugins
+            .set(ScheduleRunnerPlugin::run_loop(Duration::from_millis(1)))
+            .set(TaskPoolPlugin {
+                task_pool_options: TaskPoolOptions::with_num_threads(config.threads),
+            }),
         LogPlugin::default(),
         StatesPlugin,
     ));
@@ -48,5 +65,14 @@ fn main() {
         monsters::MonstersPlugin,
         ops::OpsPlugin,
     ));
-    app.run();
+    if let Some(sdk) = &agones {
+        app.add_plugins(agones::AgonesPlugin(sdk.clone()));
+    }
+    let exit = app.run();
+    if let Some(sdk) = agones
+        && let Err(e) = sdk.shutdown()
+    {
+        eprintln!("{e}");
+    }
+    std::process::exit(if exit.is_success() { 0 } else { 1 });
 }

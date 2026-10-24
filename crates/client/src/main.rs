@@ -1,6 +1,7 @@
 //! EvoClash client.
 //!
-//! `evoclash --matchmaker http://127.0.0.1:8080 --name Alice`  (production path)
+//! `evoclash --matchmaker http://127.0.0.1:8080 --name Alice`  (production path; a comma list
+//!                                                             of replicas/regions picks the nearest)
 //! `evoclash --server 127.0.0.1:7000 --id 1`                    (dev: direct connect with the dev key)
 
 mod effects;
@@ -26,7 +27,8 @@ use crate::session::Session;
 #[derive(Resource, Clone, Debug)]
 pub struct ClientArgs {
     pub name: String,
-    pub matchmaker: Option<String>,
+    /// Matchmaker URLs (replicas or regions); the client uses the nearest one that answers.
+    pub matchmakers: Vec<String>,
     pub server: Option<String>,
     pub client_id: u64,
     pub headless: bool,
@@ -39,7 +41,7 @@ pub struct ClientArgs {
 fn parse_args() -> ClientArgs {
     let mut args = ClientArgs {
         name: std::env::var("USER").unwrap_or_else(|_| "幸存者".into()),
-        matchmaker: None,
+        matchmakers: Vec::new(),
         server: None,
         client_id: rand::random::<u32>() as u64,
         headless: false,
@@ -54,7 +56,13 @@ fn parse_args() -> ClientArgs {
         };
         match arg.as_str() {
             "--name" => args.name = value("--name"),
-            "--matchmaker" => args.matchmaker = Some(value("--matchmaker")),
+            "--matchmaker" => args.matchmakers.extend(
+                value("--matchmaker")
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|url| !url.is_empty())
+                    .map(str::to_owned),
+            ),
             "--server" => args.server = Some(value("--server")),
             "--id" => args.client_id = value("--id").parse().expect("invalid --id"),
             "--headless" => args.headless = true,
@@ -66,7 +74,7 @@ fn parse_args() -> ClientArgs {
             }
             "-h" | "--help" => {
                 println!(
-                    "evoclash [--matchmaker URL | --server HOST:PORT [--id N]] [--name NAME]\n\
+                    "evoclash [--matchmaker URL[,URL...] | --server HOST:PORT [--id N]] [--name NAME]\n\
                      \x20        [--headless] [--autopilot] [--fake-latency MS]"
                 );
                 std::process::exit(0);
@@ -74,7 +82,7 @@ fn parse_args() -> ClientArgs {
             other => panic!("unknown argument {other}"),
         }
     }
-    if args.matchmaker.is_none() && args.server.is_none() {
+    if args.matchmakers.is_empty() && args.server.is_none() {
         args.server = Some(format!(
             "127.0.0.1:{}",
             evoclash_game::net::DEFAULT_GAME_PORT
