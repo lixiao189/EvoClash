@@ -78,6 +78,16 @@ Keep it cheap:
 - Agents run scoped, quiet checks (`-p <crate>`, `-q`, `--message-format=short`); the full `make check` runs once, in `game-tester`, before the PR.
 - Reports are capped (≈15 lines, file:line refs, no code dumps); relay only what the user needs.
 
+Escalate the model per call (Agent `model: "opus"`), not by editing the agent files, when a task touches:
+
+- `sim.rs` or client prediction/rollback — a mismatch doesn't fail the build, it shows up as rubber-banding under lag;
+- lag compensation (`combat.rs` position history) or `SimSet` ordering (when damage and events land);
+- map generation (`map.rs`/`nav.rs`) — must stay bit-identical across wasm/native and pass the seed sweeps;
+- unfamiliar Bevy 0.20 / lightyear 0.31 APIs, where a weaker model guesses old signatures;
+- one feature spanning protocol + server + client.
+
+Alternatively the lead writes the interface/design for such work, a sonnet agent implements it, and the lead reviews the diff. Also escalate (don't retry) when an agent fails the same build or test twice, or comes back with a wrong or vague result — a few failed sonnet rounds cost more than one opus run. If `game-tester` misreads failures, rerun it on sonnet.
+
 ## Releases
 
 Bump `workspace.package.version` in `Cargo.toml` and `version`/`appVersion` in `deploy/helm/evoclash/Chart.yaml`, merge it, then push a matching tag `vX.Y.Z` (tags containing `-` are pre-releases). `release.yml` checks that the tag matches both versions, builds the web client (the only release asset, `evoclash-web-vX.Y.Z.tar.gz`) and the Linux server/matchmaker binaries that only go into the image (with `web/` bundled), pushes `ghcr.io/lixiao189/evoclash-server`, then pushes the chart to `oci://ghcr.io/lixiao189/charts/evoclash`.
