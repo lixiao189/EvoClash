@@ -1,0 +1,200 @@
+{{- $mm := .Values.matchmaker }}
+{{- $selector := include "evoclash.selectorLabels" (dict "root" . "component" "matchmaker") }}
+# Stateless replicas: the fleet view comes from heartbeats and reconnect keys are HMACs, so
+# losing a replica (or a rolling update) doesn't interrupt joins.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "evoclash.matchmaker" . }}
+  labels:
+    {{- include "evoclash.labels" . | nindent 4 }}
+    app.kubernetes.io/component: matchmaker
+spec:
+  {{- if not $mm.autoscaling.enabled }}
+  replicas: {{ $mm.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- $selector | nindent 6 }}
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels:
+        {{- include "evoclash.commonLabels" . | nindent 8 }}
+        {{- $selector | nindent 8 }}
+      {{- with $mm.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # Spread replicas over nodes and zones so one outage leaves the rest running.
+      topologySpreadConstraints:
+        {{- range list "kubernetes.io/hostname" "topology.kubernetes.io/zone" }}
+        - maxSkew: 1
+          topologyKey: {{ . }}
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- $selector | nindent 14 }}
+        {{- end }}
+      containers:
+        - name: matchmaker
+          image: {{ include "evoclash.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/app/evoclash-matchmaker"]
+          # Agones owns the match server pods; the matchmaker only adopts them via heartbeats.
+          args:
+            - --listen
+            - 0.0.0.0:8080
+            - --no-launch
+            {{- range $mm.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            {{- include "evoclash.keyEnv" . | nindent 12 }}
+          ports:
+            - { name: http, containerPort: 8080, protocol: TCP }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 2
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml $mm.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+      {{- with $mm.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $mm.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $mm.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+# Public entry point for clients.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "evoclash.matchmaker" . }}
+  labels:
+    {{- include "evoclash.labels" . | nindent 4 }}
+    app.kubernetes.io/component: matchmaker
+  {{- with $mm.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $mm.service.type }}
+  {{- with $mm.service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    {{- $selector | nindent 4 }}
+  ports:
+    - { name: http, port: {{ $mm.service.port }}, targetPort: http }
+---
+# Headless: DNS returns every matchmaker pod, and match servers heartbeat to each of them.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "evoclash.heartbeat" . }}
+  labels:
+    {{- include "evoclash.labels" . | nindent 4 }}
+    app.kubernetes.io/component: matchmaker
+spec:
+  clusterIP: None
+  # A replica that is still starting must receive heartbeats in order to become useful.
+  publishNotReadyAddresses: true
+  selector:
+    {{- $selector | nindent 4 }}
+  ports:
+    - { name: http, port: 8080, targetPort: http }
+{{- if $mm.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "evoclash.matchmaker" . }}
+  labels:
+    {{- include "evoclash.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ $mm.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- $selector | nindent 6 }}
+{{- end }}
+{{- if $mm.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "evoclash.matchmaker" . }}
+  labels:
+    {{- include "evoclash.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "evoclash.matchmaker" . }}
+  minReplicas: {{ $mm.autoscaling.minReplicas }}
+  maxReplicas: {{ $mm.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $mm.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- if $mm.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "evoclash.matchmaker" . }}
+  labels:
+    {{- include "evoclash.labels" . | nindent 4 }}
+  {{- with $mm.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with $mm.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with $mm.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range $mm.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        # Only what clients call; heartbeats and drain stay reachable inside the cluster only.
+        paths:
+          {{- range list "/v1/join" "/v1/rejoin" "/healthz" }}
+          - path: {{ . }}
+            pathType: Exact
+            backend:
+              service:
+                name: {{ include "evoclash.matchmaker" $ }}
+                port: { name: http }
+          {{- end }}
+    {{- end }}
+{{- end }}

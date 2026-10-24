@@ -1,0 +1,14 @@
+apiVersion: v2
+name: evoclash
+description: EvoClash matchmaker (Deployment) and match servers (Agones Fleet) on Kubernetes
+type: application
+# Chart version and appVersion follow workspace.package.version; release.yml checks they match.
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+home: https://github.com/lixiao189/EvoClash
+sources:
+  - https://github.com/lixiao189/EvoClash
+annotations:
+  # Agones must be installed separately and allowed to manage GameServers in the release namespace.
+  agones.dev/required: ">=1.40.0"

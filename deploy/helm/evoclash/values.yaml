@@ -1,0 +1,96 @@
+fullnameOverride: ""
+
+
+# Both components ship in one image (Dockerfile): /app/evoclash-matchmaker and /app/evoclash-server.
+image:
+  repository: ghcr.io/lixiao189/evoclash-server
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# 32-byte netcode key shared by the matchmaker and every match server (signs connect tokens).
+netcodeKey:
+  # Use an existing Secret instead of creating one.
+  existingSecret: ""
+  secretKey: key
+  # 64 hex chars. Left empty, a random key is generated on install and kept across upgrades.
+  value: ""
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile: { type: RuntimeDefault }
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: { drop: [ALL] }
+
+matchmaker:
+  # Stateless replicas; match servers heartbeat to all of them via the headless Service.
+  replicas: 3
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+  # Public entry point for clients: evoclash --matchmaker http://<address>:<port>
+  service:
+    type: LoadBalancer
+    port: 80
+    annotations: {}
+    loadBalancerSourceRanges: []
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts: []
+    #  - host: play.example.com
+    tls: []
+  extraArgs: []
+  resources:
+    requests: { cpu: 100m, memory: 64Mi }
+    limits: { memory: 256Mi }
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+server:
+  maxPlayers: 6
+  # Keep at least this many combatants by adding bots (0 disables).
+  bots: 4
+  monsters: true
+  # ECS worker threads per match process; a match ticks in well under 1 ms of one core.
+  threads: 1
+  containerPort: 7000
+  # SIGTERM drains (finish the match, then exit): one 4-minute match plus intermission.
+  terminationGracePeriodSeconds: 330
+  # Agones health checking; the server only pings while its simulation ticks.
+  health:
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    failureThreshold: 3
+  extraArgs: []
+  resources:
+    requests: { cpu: 100m, memory: 64Mi }
+    limits: { cpu: "1", memory: 256Mi }
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+fleet:
+  # Initial size; the FleetAutoscaler takes over when enabled.
+  replicas: 4
+  # Packed fills nodes before using new ones, so the cluster autoscaler can drain empty nodes.
+  scheduling: Packed
+  rollingUpdate: { maxSurge: 25%, maxUnavailable: 25% }
+  # Empty Ready servers kept on standby so joins never wait for a pod to schedule.
+  autoscaler:
+    enabled: true
+    bufferSize: 3
+    minReplicas: 3
+    maxReplicas: 300

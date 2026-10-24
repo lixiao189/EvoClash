@@ -102,7 +102,7 @@ cargo build --release
 
 ## Kubernetes 部署
 
-`deploy/k8s/` 是基于 [Agones](https://agones.dev) 的部署清单，用 Kubernetes 接管进程托管、故障恢复和扩缩容：
+Helm chart `deploy/helm/evoclash` 基于 [Agones](https://agones.dev)，用 Kubernetes 接管进程托管、故障恢复和扩缩容：
 
 | 组件 | 资源 | 高可用要点 |
 |---|---|---|
@@ -117,16 +117,19 @@ cargo build --release
 # 1. 安装 Agones，并允许它管理 evoclash 命名空间的 GameServer
 helm install agones agones/agones -n agones-system --create-namespace \
   --set "gameservers.namespaces={evoclash}"
-# 2. 共享密钥
-kubectl create namespace evoclash
-kubectl -n evoclash create secret generic evoclash-netcode --from-literal=key=$(openssl rand -hex 32)
-# 3. 部署（镜像标签在 kustomization.yaml 里改）
-kubectl apply -k deploy/k8s
-# 4. 连接
+# 2. 部署（netcode 密钥首次安装时随机生成，升级时沿用；也可用 netcodeKey.existingSecret 指定）
+helm install evoclash deploy/helm/evoclash -n evoclash --create-namespace
+# 3. 连接（helm 安装完成后的提示里也有）
 evoclash --matchmaker http://$(kubectl -n evoclash get svc evoclash-matchmaker -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
 ```
 
-节点需要放通 Agones 的 UDP 端口段（默认 7000–8000）。多区域时每个区域部署一套，客户端用 `--matchmaker http://区域1,http://区域2` 自动选最近的。匹配服务的 `/metrics`（Prometheus 格式）可接入监控。
+常用参数见 `deploy/helm/evoclash/values.yaml`：镜像标签（默认等于 chart 的 `appVersion`）、匹配服务副本与 HPA、每局人数/机器人、预热池大小、资源配额、节点调度等。只想预览生成的 Pod 清单：
+
+```bash
+helm template evoclash deploy/helm/evoclash -n evoclash --set fleet.autoscaler.bufferSize=5
+```
+
+节点需要放通 Agones 的 UDP 端口段（默认 7000–8000）。`LoadBalancer` 会把匹配服务的全部接口（包括心跳和 drain）暴露出去；公网部署建议改用 `matchmaker.ingress`，它只放行 `/v1/join`、`/v1/rejoin` 和 `/healthz`。多区域时每个区域部署一套，客户端用 `--matchmaker http://区域1,http://区域2` 自动选最近的。匹配服务的 `/metrics`（Prometheus 格式）可接入监控。
 
 ## 走向生产还缺什么
 
@@ -153,8 +156,8 @@ evoclash --server 127.0.0.1:7000 --headless --autopilot
 
 ## CI / CD
 
-- **CI**（`.github/workflows/ci.yml`）：每次 push 到 `main` 和每个 PR 运行 rustfmt、clippy（`-D warnings`）、三平台 `cargo test`、cargo-deny（漏洞 / 许可证 / 来源）。分支保护只需要勾选 `CI success` 这一项。
-- **发布**（`.github/workflows/release.yml`）：先把 `Cargo.toml` 的 `workspace.package.version` 改成新版本并合入，然后推送同名 tag：
+- **CI**（`.github/workflows/ci.yml`）：每次 push 到 `main` 和每个 PR 运行 rustfmt、clippy（`-D warnings`）、三平台 `cargo test`、cargo-deny（漏洞 / 许可证 / 来源）、`helm lint`。分支保护只需要勾选 `CI success` 这一项。
+- **发布**（`.github/workflows/release.yml`）：先把 `Cargo.toml` 的 `workspace.package.version` 和 `deploy/helm/evoclash/Chart.yaml` 的 `version` / `appVersion` 改成新版本并合入，然后推送同名 tag：
 
   ```bash
   git tag v0.2.0 && git push origin v0.2.0

@@ -20,7 +20,7 @@ env:
 
 jobs:
   check-version:
-    name: Check tag matches Cargo version
+    name: Check tag matches Cargo and chart versions
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -33,6 +33,13 @@ jobs:
             echo "::error::tag $GITHUB_REF_NAME does not match workspace version $version"
             exit 1
           fi
+          for field in version appVersion; do
+            chart=$(sed -n "s/^$field: *\"\{0,1\}\([^\"]*\)\"\{0,1\}$/\1/p" deploy/helm/evoclash/Chart.yaml)
+            if [ "$chart" != "$version" ]; then
+              echo "::error::Chart.yaml $field $chart does not match workspace version $version"
+              exit 1
+            fi
+          done
 
   build:
     name: Build (${{ matrix.target }})
