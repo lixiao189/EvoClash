@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
+use evoclash_game::items::ArmorKind;
 use evoclash_game::map::ARENA_HALF;
 use evoclash_game::nav::{NavGrid, next_waypoint};
 use evoclash_game::protocol::*;
@@ -59,12 +60,19 @@ pub struct BotsPlugin;
 
 impl Plugin for BotsPlugin {
     fn build(&self, app: &mut App) {
-        let grid = NavGrid::new(&app.world().resource::<Arena>().0, PLAYER_RADIUS + 6.0);
-        app.insert_resource(Nav(grid));
         app.add_systems(
             FixedUpdate,
-            (balance_bots, think).chain().in_set(SimSet::Input),
+            (rebuild_nav, balance_bots, think)
+                .chain()
+                .in_set(SimSet::Input),
         );
+    }
+}
+
+/// Each match has a new layout, so the grid is rebuilt whenever the arena changes.
+fn rebuild_nav(mut commands: Commands, arena: Res<Arena>, nav: Option<Res<Nav>>) {
+    if nav.is_none() || arena.is_changed() {
+        commands.insert_resource(Nav(NavGrid::new(&arena, PLAYER_RADIUS + 6.0)));
     }
 }
 
@@ -137,11 +145,17 @@ fn steer(input: &mut PlayerInput, dir: Vec2) {
 #[allow(clippy::type_complexity)]
 fn think(
     arena: Res<Arena>,
-    nav: Res<Nav>,
+    nav: Option<Res<Nav>>,
     mut bots: Query<(Entity, &mut Bot, &mut CurrentInput, &Pos, &Vitals, &Loadout)>,
-    others: Query<(Entity, &Pos, &Vitals, Option<&Monster>, Has<Human>)>,
+    others: Query<
+        (Entity, &Pos, &Vitals, Option<&Monster>, Has<Human>),
+        Or<(With<Player>, With<Monster>)>,
+    >,
     items: Query<(&Pos, &Pickup)>,
 ) {
+    let Some(nav) = nav else {
+        return;
+    };
     let mut rng = rand::rng();
     let mut claims: HashMap<Entity, u32> = HashMap::new();
     for (_, bot, ..) in &bots {
@@ -155,6 +169,9 @@ fn think(
             bot.target = None;
             continue;
         }
+        // Radiation is only worth braving in power armor.
+        let sealed = vitals.armor == ArmorKind::PowerArmor && vitals.armor_points > 0.0;
+        let safe = |p: Vec2| sealed || !arena.in_hazard(p);
         // Stuck on a wall: pick somewhere else.
         if pos.0.distance_squared(bot.last_pos) < 0.25 && current.0.move_dir() != Vec2::ZERO {
             bot.stuck += 1;
@@ -235,17 +252,23 @@ fn think(
                 .iter()
                 .filter(|(_, pickup)| auto_wants(&pickup.item, vitals, loadout))
                 .map(|(p, _)| p.0)
-                .filter(|p| p.distance(pos.0) < SIGHT * 1.3)
+                .filter(|p| p.distance(pos.0) < SIGHT * 1.3 && (safe(*p) || vitals.hp > 70.0))
                 .min_by(|a, b| a.distance(pos.0).total_cmp(&b.distance(pos.0)));
             if bot.stuck >= 12
                 || bot.goal.distance(pos.0) < 40.0
+                || !safe(bot.goal)
                 || (upgrade.is_none() && rng.random_bool(0.01))
             {
                 let bound = ARENA_HALF * 0.9;
-                bot.goal = Vec2::new(
-                    rng.random_range(-bound.x..bound.x),
-                    rng.random_range(-bound.y..bound.y),
-                );
+                for _ in 0..8 {
+                    bot.goal = Vec2::new(
+                        rng.random_range(-bound.x..bound.x),
+                        rng.random_range(-bound.y..bound.y),
+                    );
+                    if safe(bot.goal) {
+                        break;
+                    }
+                }
                 bot.stuck = 0;
             }
             let goal = upgrade.unwrap_or(bot.goal);

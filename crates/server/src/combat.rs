@@ -64,9 +64,13 @@ impl Flight {
     }
 }
 
-/// Hit radius of a combatant or monster.
-fn body_radius(monster: Option<&Monster>) -> f32 {
-    monster.map_or(PLAYER_RADIUS, |m| m.kind.radius())
+/// Hit radius of a combatant, monster or prop.
+fn body_radius(monster: Option<&Monster>, prop: Option<&Prop>) -> f32 {
+    match (monster, prop) {
+        (Some(m), _) => m.kind.radius(),
+        (_, Some(p)) => p.kind.radius(),
+        _ => PLAYER_RADIUS,
+    }
 }
 
 fn combat_allowed(state: &MatchState) -> bool {
@@ -110,7 +114,14 @@ fn fire_weapons(
         &Rewind,
         Option<&Human>,
     )>,
-    targets: Query<(Entity, &Pos, &Vitals, &PosHistory, Option<&Monster>)>,
+    targets: Query<(
+        Entity,
+        &Pos,
+        &Vitals,
+        &PosHistory,
+        Option<&Monster>,
+        Option<&Prop>,
+    )>,
     mut damage: ResMut<DamageQueue>,
     mut outbox: ResMut<Outbox>,
 ) {
@@ -128,11 +139,11 @@ fn fire_weapons(
         cd.fire = stats.cooldown;
 
         if stats.melee {
-            for (target, target_pos, target_vitals, history, monster) in &targets {
+            for (target, target_pos, target_vitals, history, monster, prop) in &targets {
                 if target == entity || !target_vitals.alive {
                     continue;
                 }
-                let reach = stats.range_or_speed + body_radius(monster);
+                let reach = stats.range_or_speed + body_radius(monster, prop);
                 let seen_at = rewound(history, tick.0, rewind.0, target_pos.0);
                 let offset = seen_at - pos.0;
                 let dist = offset.length();
@@ -149,6 +160,7 @@ fn fire_weapons(
                     armor_mult: stats.armor_mult,
                     weapon: Some(loadout.weapon),
                     emp: false,
+                    cause: None,
                 });
             }
             outbox.fast.push(GameEvent::Melee {
@@ -248,7 +260,17 @@ fn step_projectiles(
     tick: Res<SimTick>,
     arena: Res<Arena>,
     mut projectiles: Query<(Entity, &mut Pos, &Projectile, &mut Flight)>,
-    targets: Query<(Entity, &Pos, &Vitals, &PosHistory, Option<&Monster>), Without<Projectile>>,
+    targets: Query<
+        (
+            Entity,
+            &Pos,
+            &Vitals,
+            &PosHistory,
+            Option<&Monster>,
+            Option<&Prop>,
+        ),
+        Without<Projectile>,
+    >,
     mut damage: ResMut<DamageQueue>,
     mut outbox: ResMut<Outbox>,
 ) {
@@ -280,12 +302,14 @@ fn step_projectiles(
                                 armor_mult: 1.0,
                                 weapon: Some(WeaponKind::Stick),
                                 emp: true,
+                                cause: Some("电磁脉冲"),
                             });
                         }
                     }
                     outbox.fast.push(GameEvent::Boom {
                         pos: at,
                         radius: EMP_RADIUS,
+                        fire: false,
                     });
                     commands.entity(entity).despawn();
                 } else {
@@ -300,16 +324,16 @@ fn step_projectiles(
                 let limit = wall_t.unwrap_or(1.0);
                 let mut hits: Vec<(f32, Entity)> = targets
                     .iter()
-                    .filter(|(target, _, vitals, _, monster)| {
+                    .filter(|(target, _, vitals, _, monster, prop)| {
                         *target != flight.owner
                             && vitals.alive
-                            // Monsters don't hurt each other.
-                            && !(spore && monster.is_some())
+                            // Monsters don't hurt each other, or set off the scenery.
+                            && !(spore && (monster.is_some() || prop.is_some()))
                             && !flight.already_hit.contains(target)
                     })
-                    .filter_map(|(target, target_pos, _, history, monster)| {
+                    .filter_map(|(target, target_pos, _, history, monster, prop)| {
                         let seen_at = rewound(history, tick.0, flight.rewind, target_pos.0);
-                        segment_circle(from, to, seen_at, body_radius(monster) + 3.0)
+                        segment_circle(from, to, seen_at, body_radius(monster, prop) + 3.0)
                             .filter(|t| *t <= limit)
                             .map(|t| (t, target))
                     })
@@ -327,6 +351,7 @@ fn step_projectiles(
                         armor_mult: flight.armor_mult,
                         weapon,
                         emp: false,
+                        cause: spore.then_some("孢子"),
                     });
                 }
                 let stopped = (!flight.piercing && !hits.is_empty()) || wall_t.is_some();

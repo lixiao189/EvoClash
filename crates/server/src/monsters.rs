@@ -5,7 +5,7 @@ use bevy::prelude::*;
 use evoclash_game::items::{Item, roll_loot};
 use evoclash_game::map::{ARENA_HALF, VAULT_CENTER};
 use evoclash_game::protocol::*;
-use evoclash_game::sim::{Arena, DT, PLAYER_RADIUS};
+use evoclash_game::sim::{Arena, DT, Obstacles, PLAYER_RADIUS};
 use lightyear::prelude::*;
 use rand::Rng;
 
@@ -15,8 +15,8 @@ use crate::gameplay::{
     Damage, DamageQueue, Outbox, PosHistory, SimSet, TICKS_PER_SEC, resolve_damage, spawn_pickup,
 };
 
-const ROACHES: usize = 6;
-const PODS: usize = 3;
+const ROACHES: usize = 14;
+const PODS: usize = 6;
 /// Ticks between top-ups, so a cleared area stays quiet for a while.
 const SPAWN_EVERY: u32 = 5 * TICKS_PER_SEC;
 
@@ -146,6 +146,7 @@ fn nearest(players: &[Vec2], from: Vec2) -> Option<(Vec2, f32)> {
 
 fn roam(
     arena: Res<Arena>,
+    obstacles: Res<Obstacles>,
     mut monsters: Query<(&Monster, &mut Pos, &mut Brain)>,
     players: Query<(&Pos, &Vitals), (With<Player>, Without<Monster>)>,
 ) {
@@ -175,7 +176,7 @@ fn roam(
             }
         };
         let want = pos.0 + velocity * DT;
-        let next = arena.resolve_circle(want, monster.kind.radius());
+        let next = arena.resolve_with(want, monster.kind.radius(), &obstacles.0);
         if next.distance_squared(want) > 1.0 {
             // Bumped into a wall: pick a new direction next tick.
             brain.turn_in = 0;
@@ -216,6 +217,7 @@ fn attack(
                         armor_mult: 1.0,
                         weapon: None,
                         emp: false,
+                        cause: Some("撕咬"),
                     });
                 }
             }

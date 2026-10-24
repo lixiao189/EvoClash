@@ -10,6 +10,7 @@ mod bots;
 mod combat;
 mod config;
 mod connections;
+mod environment;
 mod gameplay;
 mod monsters;
 mod ops;
@@ -62,6 +63,7 @@ fn main() {
         connections::ConnectionsPlugin,
         gameplay::GameplayPlugin,
         combat::CombatPlugin,
+        environment::EnvironmentPlugin,
         bots::BotsPlugin,
         monsters::MonstersPlugin,
         ops::OpsPlugin,

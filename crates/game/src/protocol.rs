@@ -8,6 +8,7 @@ use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::items::{ArmorKind, Item, WeaponKind};
+use crate::map::PropKind;
 
 // ---------------------------------------------------------------- inputs
 
@@ -201,6 +202,18 @@ pub struct Monster {
     pub kind: MonsterKind,
 }
 
+/// A crate, barrel or safe placed by the map generator. Hit points live in its `Vitals`.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Reflect)]
+pub struct Prop {
+    pub kind: PropKind,
+    /// Tier of the loot inside.
+    pub tier: u8,
+    /// Safe cracking progress, 0..=100.
+    pub progress: u8,
+    /// A cracked safe stays open (and empty) for a while.
+    pub open: bool,
+}
+
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Reflect)]
 pub struct Projectile {
     pub kind: ProjectileKind,
@@ -229,6 +242,8 @@ pub struct MatchState {
     /// Ticks until the vault opens and spits out apex tech.
     pub vault_in: u32,
     pub winner: Option<String>,
+    /// Seed of this match's arena layout; clients generate the same map from it.
+    pub map_seed: u64,
 }
 
 // ---------------------------------------------------------------- messages
@@ -238,8 +253,8 @@ pub enum GameEvent {
     Kill {
         killer: String,
         victim: String,
-        /// `None` when a monster did it.
-        weapon: Option<WeaponKind>,
+        /// Weapon name, or how the wasteland did it ("油桶爆炸", "辐射", a bite).
+        how: String,
         bounty: bool,
     },
     Hit {
@@ -256,6 +271,8 @@ pub enum GameEvent {
     Boom {
         pos: Vec2,
         radius: f32,
+        /// A fireball (exploding barrel) rather than an electric pulse.
+        fire: bool,
     },
     Announce(String),
 }
@@ -296,6 +313,7 @@ impl Plugin for ProtocolPlugin {
         app.component::<Projectile>().replicate();
         app.component::<Pickup>().replicate();
         app.component::<Monster>().replicate();
+        app.component::<Prop>().replicate();
         app.component::<MatchState>().replicate();
 
         app.register_message::<GameEvent>()

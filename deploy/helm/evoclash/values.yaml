@@ -59,15 +59,15 @@ matchmaker:
   affinity: {}
 
 server:
-  maxPlayers: 6
+  maxPlayers: 8
   # Keep at least this many combatants by adding bots (0 disables).
-  bots: 4
+  bots: 6
   monsters: true
   # ECS worker threads per match process; a match ticks in well under 1 ms of one core.
   threads: 1
   containerPort: 7000
-  # SIGTERM drains (finish the match, then exit): one 4-minute match plus intermission.
-  terminationGracePeriodSeconds: 330
+  # SIGTERM drains (finish the match, then exit): one 8-minute match plus warmup and intermission.
+  terminationGracePeriodSeconds: 540
   # Agones health checking; the server only pings while its simulation ticks.
   health:
     initialDelaySeconds: 5
