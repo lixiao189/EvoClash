@@ -28,7 +28,8 @@ impl Plugin for EffectsPlugin {
         app.init_resource::<LocalGun>()
             .init_resource::<KillFeed>()
             .init_resource::<Banner>()
-            .init_resource::<HitMarker>();
+            .init_resource::<HitMarker>()
+            .init_resource::<BossBar>();
         app.add_systems(
             Update,
             (
@@ -54,6 +55,16 @@ pub struct KillFeed(pub Vec<(String, f32)>);
 
 #[derive(Resource, Default)]
 pub struct Banner(pub Option<(String, f32)>);
+
+/// Latest behemoth health report; cleared when it is gone.
+#[derive(Resource, Default)]
+pub struct BossBar(pub Option<BossHealth>);
+
+#[derive(Clone, Copy)]
+pub struct BossHealth {
+    pub max: f32,
+    pub phase: u8,
+}
 
 /// Seconds since our last confirmed hit (drawn as a crosshair flash).
 #[derive(Resource, Default)]
@@ -409,6 +420,7 @@ fn receive_events(
     mut banner: ResMut<Banner>,
     mut marker: ResMut<HitMarker>,
     mut shake: ResMut<CameraShake>,
+    mut boss: ResMut<BossBar>,
 ) {
     let now = time.elapsed_secs();
     let me = me.single().ok();
@@ -429,6 +441,11 @@ fn receive_events(
                     }
                 }
                 GameEvent::Announce(text) => banner.0 = Some((text, now)),
+                GameEvent::BossHp { max, phase, .. } => {
+                    boss.0 = Some(BossHealth { max, phase });
+                }
+                // The announcement already names whoever took it down.
+                GameEvent::BossDown { .. } => boss.0 = None,
                 GameEvent::Hit {
                     pos,
                     amount,

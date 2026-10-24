@@ -50,6 +50,14 @@ const STRIDE_PX: f32 = 22.0;
 const CAMERA_SCALE: f32 = 0.8;
 /// Relative odds of each decor piece: grass, bush, boulder, skull, tire.
 const DECOR_WEIGHTS: [u32; 5] = [36, 20, 26, 6, 12];
+/// Elites are drawn this much bigger, in gold.
+const ELITE_SCALE: f32 = 1.2;
+const ELITE_TINT: Color = Color::srgb(1.0, 0.86, 0.4);
+const ELITE_RING: Color = Color::srgb(1.0, 0.78, 0.15);
+/// How high a drone's body floats above its shadow.
+const DRONE_HOVER: f32 = 26.0;
+/// The crawler is seen from above; its center sits this far above its ground point.
+const CRAWLER_LIFT: f32 = 22.0;
 
 /// Depth for something standing at ground height `y`: further down the screen is closer.
 fn depth(y: f32) -> f32 {
@@ -94,10 +102,20 @@ struct PickupIcon {
 #[derive(Component)]
 struct MonsterParts {
     body: Entity,
+    /// Resting height of the body sprite relative to the monster's ground point.
+    base_y: f32,
     last: Vec2,
     flip: bool,
     phase: f32,
 }
+
+/// Seconds a puddle has existed here; `Puddle::ttl` is only set at spawn.
+#[derive(Component, Default)]
+struct PuddleAge(f32);
+
+/// Arrow at the screen edge pointing toward the behemoth.
+#[derive(Component)]
+struct BossArrow;
 
 /// A ground shadow kept on the shadow layer however its parent is depth-sorted.
 #[derive(Component)]
@@ -207,7 +225,9 @@ impl Plugin for RenderPlugin {
                 pin_shadows,
                 sync_projectiles,
                 fade_splats,
+                age_puddles,
                 follow_camera,
+                boss_arrow,
                 update_cursor,
                 draw_overlays,
             )
@@ -1066,15 +1086,36 @@ fn bob_pickups(time: Res<Time>, mut icons: Query<(&PickupIcon, &mut Transform)>)
     }
 }
 
+fn monster_image(kind: MonsterKind, textures: &Textures) -> Handle<Image> {
+    match kind {
+        MonsterKind::Roach => textures.roach[0].clone(),
+        MonsterKind::SporePod => textures.pod.clone(),
+        MonsterKind::Dog => textures.dog[0].clone(),
+        MonsterKind::Ghoul => textures.ghoul[0].clone(),
+        MonsterKind::Spitter => textures.spitter.clone(),
+        MonsterKind::Crawler => textures.crawler.clone(),
+        MonsterKind::Raider => textures.raider[0].clone(),
+        MonsterKind::Drone => textures.drone[0].clone(),
+        MonsterKind::Behemoth => textures.behemoth[0].clone(),
+    }
+}
+
 fn monster_size(kind: MonsterKind, textures: &Textures, images: &Assets<Image>) -> Vec2 {
-    let handle = match kind {
-        MonsterKind::Roach => &textures.roach[0],
-        MonsterKind::SporePod => &textures.pod,
-    };
     images
-        .get(handle)
+        .get(&monster_image(kind, textures))
         .map_or(Vec2::splat(32.0), |i| i.size_f32())
         * PIXEL
+}
+
+/// Height of the top of a monster's sprite above its ground point.
+fn monster_top(monster: &Monster, textures: &Textures, images: &Assets<Image>) -> f32 {
+    let size = monster_size(monster.kind, textures, images);
+    let top = match monster.kind {
+        MonsterKind::Drone => size.y + DRONE_HOVER - FOOT_INSET,
+        MonsterKind::Crawler => CRAWLER_LIFT + size.y / 2.0,
+        _ => size.y,
+    };
+    top * if monster.elite { ELITE_SCALE } else { 1.0 }
 }
 
 fn dress_monster(
@@ -1088,17 +1129,14 @@ fn dress_monster(
         return;
     };
     let pos = pos.map_or(Vec2::ZERO, |p| p.0);
-    let image = match monster.kind {
-        MonsterKind::Roach => textures.roach[0].clone(),
-        MonsterKind::SporePod => textures.pod.clone(),
+    let (sprite, transform) = pixel_sprite(monster_image(monster.kind, &textures));
+    let (anchor, base_y) = match monster.kind {
+        MonsterKind::Crawler => (Anchor::CENTER, CRAWLER_LIFT),
+        MonsterKind::Drone => (Anchor::BOTTOM_CENTER, DRONE_HOVER - FOOT_INSET),
+        _ => (Anchor::BOTTOM_CENTER, -FOOT_INSET),
     };
-    let (sprite, transform) = pixel_sprite(image);
     let body = commands
-        .spawn((
-            sprite,
-            Anchor::BOTTOM_CENTER,
-            transform.with_translation(Vec3::Y * -FOOT_INSET),
-        ))
+        .spawn((sprite, anchor, transform.with_translation(Vec3::Y * base_y)))
         .id();
     let r = monster.kind.radius();
     let shadow = commands
@@ -1111,6 +1149,7 @@ fn dress_monster(
             Visibility::Hidden,
             MonsterParts {
                 body,
+                base_y,
                 last: pos,
                 flip: false,
                 phase: pos.x * 0.01,
@@ -1127,6 +1166,7 @@ fn sync_monsters(
     mut monsters: Query<(
         &Monster,
         &Pos,
+        Option<&MonsterState>,
         &mut MonsterParts,
         &mut Transform,
         &mut Visibility,
@@ -1134,7 +1174,7 @@ fn sync_monsters(
     mut bodies: Query<(&mut Sprite, &mut Transform), Without<Monster>>,
 ) {
     let t = time.elapsed_secs();
-    for (monster, pos, mut parts, mut transform, mut visibility) in &mut monsters {
+    for (monster, pos, state, mut parts, mut transform, mut visibility) in &mut monsters {
         transform.translation = pos.0.extend(depth(pos.0.y));
         visibility.set_if_neq(if indoors.conceals(&arena, pos.0) {
             Visibility::Hidden
@@ -1144,28 +1184,90 @@ fn sync_monsters(
         let Ok((mut sprite, mut body)) = bodies.get_mut(parts.body) else {
             continue;
         };
+        let state = state.copied().unwrap_or_default();
+        let moved = pos.0 - parts.last;
+        let moving = moved.length_squared() > 0.01;
+        parts.last = pos.0;
+        // Side-view creatures face where they look (roaches: where they crawl).
         match monster.kind {
             MonsterKind::Roach => {
-                let moved = pos.0 - parts.last;
-                let moving = moved.length_squared() > 0.01;
-                parts.last = pos.0;
                 if moved.x.abs() > 0.05 {
                     parts.flip = moved.x < 0.0;
                 }
-                sprite.flip_x = parts.flip;
-                let frame = if moving {
-                    (t * 16.0 + parts.phase) as usize % 2
-                } else {
-                    0
-                };
-                sprite.image = textures.roach[frame].clone();
             }
+            MonsterKind::Dog | MonsterKind::Ghoul | MonsterKind::Spitter | MonsterKind::Raider => {
+                let dir = state.facing.cos();
+                if dir.abs() > 0.2 {
+                    parts.flip = dir < 0.0;
+                }
+            }
+            _ => {}
+        }
+        sprite.flip_x = parts.flip;
+        let walk = |rate: f32, frames: usize| {
+            if moving {
+                (t * rate + parts.phase) as usize % frames
+            } else {
+                0
+            }
+        };
+        let mut scale = Vec2::splat(PIXEL * if monster.elite { ELITE_SCALE } else { 1.0 });
+        let mut offset = Vec2::new(0.0, parts.base_y);
+        let mut tint = if monster.elite {
+            ELITE_TINT
+        } else {
+            Color::WHITE
+        };
+        match monster.kind {
+            MonsterKind::Roach => sprite.image = textures.roach[walk(16.0, 2)].clone(),
             MonsterKind::SporePod => {
                 // Breathe: squash and stretch around the planted roots.
                 let pulse = 0.05 * (t * 3.0 + parts.phase).sin();
-                body.scale = Vec3::new(PIXEL * (1.0 + pulse), PIXEL * (1.0 - pulse), 1.0);
+                scale *= Vec2::new(1.0 + pulse, 1.0 - pulse);
+            }
+            MonsterKind::Dog => sprite.image = textures.dog[walk(18.0, 2)].clone(),
+            MonsterKind::Ghoul => {
+                sprite.image = textures.ghoul[walk(9.0, 2)].clone();
+                if state.action == MonsterAction::Arming {
+                    // Blinks faster as the fuse runs down.
+                    let rate = 6.0 + 500.0 / (state.fuse as f32 + 24.0);
+                    if (t * rate).sin() > 0.0 {
+                        tint = Color::srgb(1.0, 0.3, 0.25);
+                    }
+                    let swell = 1.0 + 0.06 * (t * rate).sin();
+                    scale *= Vec2::splat(swell);
+                }
+            }
+            MonsterKind::Spitter => {
+                let pulse = 0.04 * (t * 4.0 + parts.phase).sin();
+                scale *= Vec2::new(1.0 - pulse, 1.0 + pulse);
+            }
+            MonsterKind::Crawler => body.rotation = Quat::from_rotation_z(state.facing),
+            MonsterKind::Raider => sprite.image = textures.raider[walk(10.0, 4)].clone(),
+            MonsterKind::Drone => {
+                sprite.image = textures.drone[(t * 30.0) as usize % 2].clone();
+                offset.y += 4.0 * (t * 3.0 + parts.phase).sin();
+            }
+            MonsterKind::Behemoth => {
+                sprite.image = textures.behemoth[walk(3.0, 2)].clone();
+                tint = match state.phase {
+                    0 | 1 => tint,
+                    2 => Color::srgb(1.0, 0.82, 0.7),
+                    _ => Color::srgb(1.0, 0.5 + 0.12 * (t * 8.0).sin(), 0.42),
+                };
+                if state.action == MonsterAction::Charge && state.fuse > 0 {
+                    // Rearing up and trembling before the rush.
+                    offset.x = 3.0 * (t * 70.0).sin();
+                    scale *= Vec2::new(1.0 - 0.03, 1.0 + 0.05);
+                } else if state.action == MonsterAction::Slam && state.fuse > 0 {
+                    scale *= Vec2::new(1.0 + 0.04, 1.0 + 0.1);
+                }
             }
         }
+        sprite.color = tint;
+        body.scale = scale.extend(1.0);
+        body.translation.x = offset.x;
+        body.translation.y = offset.y;
     }
 }
 
@@ -1294,6 +1396,23 @@ fn dress_projectile(
             },
             Anchor::CENTER,
         ),
+        ProjectileKind::Acid => (
+            Sprite {
+                image: textures.acid.clone(),
+                custom_size: Some(Vec2::splat(26.0)),
+                ..default()
+            },
+            Anchor::CENTER,
+        ),
+        ProjectileKind::Bolt => (
+            Sprite {
+                image: textures.bolt.clone(),
+                color: Color::srgb(0.45, 0.95, 1.0),
+                custom_size: Some(Vec2::new(26.0, 7.0)),
+                ..default()
+            },
+            Anchor::CENTER_RIGHT,
+        ),
         ProjectileKind::Emp => (
             Sprite {
                 image: textures.glow.clone(),
@@ -1326,11 +1445,75 @@ fn sync_projectiles(
 ) {
     for (pos, projectile, mut transform, mut visibility) in &mut projectiles {
         transform.translation = (pos.0 + Vec2::Y * GUN_HEIGHT).extend(Z_PROJECTILE);
-        if matches!(projectile.kind, ProjectileKind::Shot(_)) {
+        if matches!(
+            projectile.kind,
+            ProjectileKind::Shot(_) | ProjectileKind::Bolt
+        ) {
             transform.rotation = Quat::from_rotation_z(projectile.vel.to_angle());
         }
         visibility.set_if_neq(Visibility::Visible);
     }
+}
+
+fn age_puddles(
+    mut commands: Commands,
+    time: Res<Time>,
+    new: Query<Entity, (With<Puddle>, Without<PuddleAge>)>,
+    mut ages: Query<&mut PuddleAge>,
+) {
+    for entity in &new {
+        commands.entity(entity).insert(PuddleAge::default());
+    }
+    for mut age in &mut ages {
+        age.0 += time.delta_secs();
+    }
+}
+
+/// While the behemoth is out of view, an arrow at the screen edge points the way.
+fn boss_arrow(
+    mut commands: Commands,
+    time: Res<Time>,
+    textures: Res<Textures>,
+    window: Query<&Window, With<PrimaryWindow>>,
+    camera: Query<&Transform, (With<Camera2d>, Without<BossArrow>)>,
+    bosses: Query<(&Pos, &Monster, &Vitals)>,
+    mut arrow: Query<(&mut Transform, &mut Visibility, &mut Sprite), With<BossArrow>>,
+) {
+    let Ok((mut transform, mut visibility, mut sprite)) = arrow.single_mut() else {
+        commands.spawn((
+            BossArrow,
+            Sprite {
+                image: textures.arrow.clone(),
+                custom_size: Some(Vec2::splat(34.0)),
+                ..default()
+            },
+            Transform::from_xyz(0.0, 0.0, Z_OVERLAY + 10.0),
+            Visibility::Hidden,
+        ));
+        return;
+    };
+    let boss = bosses
+        .iter()
+        .find(|(_, m, v)| m.kind == MonsterKind::Behemoth && v.alive);
+    let (Some((boss, ..)), Ok(window), Ok(cam)) = (boss, window.single(), camera.single()) else {
+        visibility.set_if_neq(Visibility::Hidden);
+        return;
+    };
+    let center = cam.translation.truncate();
+    let half = Vec2::new(window.width(), window.height()) * 0.5 * CAMERA_SCALE;
+    let to = boss.0 - center;
+    if to.x.abs() < half.x && to.y.abs() < half.y {
+        visibility.set_if_neq(Visibility::Hidden);
+        return;
+    }
+    let inner = half - Vec2::splat(40.0 * CAMERA_SCALE);
+    let k = (inner.x / to.x.abs().max(1.0)).min(inner.y / to.y.abs().max(1.0));
+    let at = center + to * k.min(1.0);
+    transform.translation = at.extend(Z_OVERLAY + 10.0);
+    transform.rotation = Quat::from_rotation_z(to.to_angle());
+    sprite.color =
+        Color::srgb(1.0, 0.35, 0.2).with_alpha(0.7 + 0.3 * (time.elapsed_secs() * 6.0).sin());
+    visibility.set_if_neq(Visibility::Visible);
 }
 
 fn follow_camera(
@@ -1410,6 +1593,27 @@ impl Painter<'_, '_, '_> {
         self.oval(at, Vec2::new(r, r * 0.5), color);
     }
 
+    /// A true-radius circle on the ground (world distances are not foreshortened).
+    fn zone(&mut self, at: Vec2, r: f32, color: Color) {
+        self.oval(at, Vec2::splat(r), color);
+    }
+
+    /// A straight stripe from `from` toward `angle`.
+    fn line(&mut self, from: Vec2, angle: f32, length: f32, width: f32, color: Color) {
+        self.commands.spawn((
+            Overlay,
+            Sprite {
+                image: self.textures.bar.clone(),
+                color,
+                custom_size: Some(Vec2::new(length, width)),
+                ..default()
+            },
+            Anchor::CENTER_LEFT,
+            Transform::from_translation(from.extend(Z_OVERLAY - 0.4))
+                .with_rotation(Quat::from_rotation_z(angle)),
+        ));
+    }
+
     fn disc(&mut self, at: Vec2, r: f32, color: Color) {
         self.oval(at, Vec2::splat(r), color);
     }
@@ -1471,9 +1675,10 @@ fn draw_overlays(
         ),
         Has<LocalPlayer>,
     )>,
+    monsters: Query<(&Pos, &Vitals, &Monster, Option<&MonsterState>)>,
+    puddles: Query<(&Pos, &Puddle, &PuddleAge)>,
     owners: Query<&Player>,
     turrets: Query<(&Pos, &Vitals, &Turret)>,
-    monsters: Query<(&Pos, &Vitals, &Monster)>,
     props: Query<(&Pos, &Vitals, &Prop)>,
     pickups: Query<&Pos, With<Pickup>>,
     textures: Res<Textures>,
@@ -1502,17 +1707,92 @@ fn draw_overlays(
         ));
     }
 
-    // Monsters only show a health bar once they've been hurt.
-    for (pos, vitals, monster) in &monsters {
-        let max = monster.kind.max_hp();
-        if vitals.hp >= max || indoors.conceals(&arena, pos.0) {
+    // Puddles lie on the ground under everyone, fading out over their last seconds.
+    for (pos, puddle, age) in &puddles {
+        let life = puddle.ttl as f32 / 64.0;
+        let fade = ((life - age.0) / 2.0).clamp(0.0, 1.0) * (age.0 / 0.25).clamp(0.0, 1.0);
+        let (fill, edge) = match puddle.kind {
+            PuddleKind::Acid => (Color::srgb(0.45, 0.85, 0.15), Color::srgb(0.7, 1.0, 0.3)),
+            PuddleKind::Radiation => (Color::srgb(0.7, 0.95, 0.2), Color::srgb(1.0, 1.0, 0.4)),
+        };
+        let bubble = 0.75 + 0.25 * (t * 4.0 + pos.0.x).sin();
+        paint.commands.spawn((
+            Overlay,
+            Sprite {
+                image: textures.glow.clone(),
+                color: fill.with_alpha(0.85 * fade * bubble),
+                custom_size: Some(Vec2::splat(puddle.radius * 2.3)),
+                ..default()
+            },
+            Transform::from_translation(pos.0.extend(Z_DECAL + 0.7)),
+        ));
+        paint.zone(pos.0, puddle.radius, edge.with_alpha(0.55 * fade));
+    }
+
+    for (pos, vitals, monster, state) in &monsters {
+        if indoors.conceals(&arena, pos.0) {
             continue;
         }
-        let w = monster.kind.radius() * 2.0;
-        let top = monster_size(monster.kind, &textures, &images).y;
+        let state = state.copied().unwrap_or_default();
+        let r = monster.kind.radius();
+        if monster.elite {
+            let pulse = 0.55 + 0.25 * (t * 4.0 + pos.0.x).sin();
+            paint.ring(pos.0, r + 6.0, ELITE_RING.with_alpha(pulse));
+        }
+        // Telegraphs: where the blow will land, and how soon.
+        match (monster.kind, state.action) {
+            (MonsterKind::Ghoul, MonsterAction::Arming) => {
+                let blink = 0.5 + 0.5 * (t * (8.0 + 400.0 / (state.fuse as f32 + 30.0))).sin();
+                paint.zone(
+                    pos.0,
+                    GHOUL_BLAST_RADIUS,
+                    Color::srgb(1.0, 0.3, 0.15).with_alpha(0.18 + 0.2 * blink),
+                );
+            }
+            (MonsterKind::Behemoth, MonsterAction::Slam) if state.fuse > 0 => {
+                let urgency = 1.0 - (state.fuse as f32 / 96.0).min(1.0);
+                let color = Color::srgb(1.0, 0.25, 0.1);
+                paint.zone(
+                    pos.0,
+                    BEHEMOTH_SLAM_RADIUS,
+                    color.with_alpha(0.35 + 0.45 * urgency),
+                );
+                paint.zone(
+                    pos.0,
+                    BEHEMOTH_SLAM_RADIUS * (0.2 + 0.8 * urgency),
+                    color.with_alpha(0.3),
+                );
+            }
+            (MonsterKind::Behemoth, MonsterAction::Charge) if state.fuse > 0 => {
+                let blink = 0.35 + 0.3 * (t * 14.0).sin().abs();
+                paint.line(
+                    pos.0,
+                    state.facing,
+                    900.0,
+                    2.0 * r,
+                    Color::srgb(1.0, 0.25, 0.1).with_alpha(blink * 0.5),
+                );
+            }
+            _ => {}
+        }
+        // The boss has its own bar at the top of the screen.
+        if monster.kind == MonsterKind::Behemoth {
+            continue;
+        }
+        // Monsters only show a health bar once they've been hurt (elites always do).
+        let max = monster.kind.max_hp() * if monster.elite { ELITE_HP_MULT } else { 1.0 };
+        if vitals.hp >= max && !monster.elite {
+            continue;
+        }
+        let w = r * 2.0;
+        let top = monster_top(monster, &textures, &images);
         let left = pos.0 + Vec2::new(-w / 2.0, top + 4.0);
         let frac = vitals.hp / max;
         paint.gauge(left, w, 4.0, frac, Color::srgb(0.6, 0.95, 0.3));
+        if monster.elite {
+            // Gold pip marks the bar.
+            paint.bar(left + Vec2::new(w + 3.0, 0.0), 7.0, 7.0, ELITE_RING);
+        }
     }
 
     // Crates show their damage; safes show how far along the cracking is.

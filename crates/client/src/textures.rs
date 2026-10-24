@@ -47,6 +47,20 @@ pub struct Textures {
     pub roach: [Handle<Image>; 2],
     pub pod: Handle<Image>,
     pub spore: Handle<Image>,
+    /// Side views facing right, two gait frames.
+    pub dog: [Handle<Image>; 2],
+    pub ghoul: [Handle<Image>; 2],
+    pub spitter: Handle<Image>,
+    /// Seen from above, facing +X; rotated to its heading at draw time.
+    pub crawler: Handle<Image>,
+    pub raider: [Handle<Image>; WALK_FRAMES],
+    /// Two rotor phases.
+    pub drone: [Handle<Image>; 2],
+    pub behemoth: [Handle<Image>; 2],
+    /// Acid glob in flight.
+    pub acid: Handle<Image>,
+    /// Chevron pointing +X, white; tinted for off-screen markers.
+    pub arrow: Handle<Image>,
     pub splat: Handle<Image>,
     weapons: [WeaponSprite; 6],
     armors: [Handle<Image>; 3],
@@ -226,6 +240,15 @@ pub fn build(images: &mut Assets<Image>) -> Textures {
         roach: [0, 1].map(|frame| add(paint_roach(frame), true)),
         pod: add(paint_pod(), true),
         spore: add(paint_spore(), false),
+        dog: [0, 1].map(|frame| add(paint_dog(frame), true)),
+        ghoul: [0, 1].map(|frame| add(paint_ghoul(frame), true)),
+        spitter: add(paint_spitter(), true),
+        crawler: add(paint_crawler(), true),
+        raider: [0, 1, 2, 3].map(|frame| add(paint_raider(frame), true)),
+        drone: [0, 1].map(|frame| add(paint_drone(frame), true)),
+        behemoth: [0, 1].map(|frame| add(paint_behemoth(frame), true)),
+        acid: add(paint_acid(), true),
+        arrow: add(paint_arrow(), true),
         splat: add(paint_splat(), true),
         weapons,
         armors: [ArmorKind::Scrap, ArmorKind::Kevlar, ArmorKind::PowerArmor]
@@ -1437,6 +1460,293 @@ fn paint_splat() -> Canvas {
     c
 }
 
+/// Copy `src` onto `dst` at (dx, dy), multiplying its color by `tint`.
+fn stack(dst: &mut Canvas, src: &Canvas, dx: i32, dy: i32, tint: [f32; 3]) {
+    for y in 0..src.h as i32 {
+        for x in 0..src.w as i32 {
+            let p = src.get(x, y);
+            if p[3] > 0.0 {
+                dst.put(
+                    dx + x,
+                    dy + y,
+                    [p[0] * tint[0], p[1] * tint[1], p[2] * tint[2], p[3]],
+                );
+            }
+        }
+    }
+}
+
+/// Feral dog in profile, facing right: lean brown coat, pale snout.
+fn paint_dog(frame: i32) -> Canvas {
+    let mut c = Canvas::new(32, 20);
+    let fur = rgb(0.5, 0.33, 0.19);
+    let dark = shade(fur, 0.6);
+    // Legs gather and stretch in a gallop.
+    for (i, x) in [7.0, 10.0, 21.0, 24.0].into_iter().enumerate() {
+        let swing = if (i as i32 + frame) % 2 == 0 {
+            3.0
+        } else {
+            -3.0
+        };
+        c.line(x, 11.0, x + swing * 0.5, 14.5, dark);
+        c.line(x + swing * 0.5, 14.5, x + swing, 17.5, dark);
+    }
+    c.line(5.0, 8.0, 1.5, 4.0 + frame as f32, dark);
+    c.ellipse(15.0, 10.0, 10.5, 4.6, fur);
+    c.ellipse(15.0, 7.8, 9.0, 2.4, shade(fur, 1.2));
+    c.ellipse(15.0, 13.0, 8.0, 1.8, shade(fur, 0.8));
+    // Head, ears, snout.
+    c.ellipse(26.0, 8.0, 4.2, 3.6, fur);
+    c.rect(22, 3, 24, 6, dark);
+    c.rect(26, 8, 31, 10, rgb(0.86, 0.78, 0.64));
+    c.rect(26, 10, 31, 10, rgb(0.62, 0.52, 0.42));
+    c.put(31, 8, OUTLINE);
+    c.put(27, 6, rgb(1.0, 0.8, 0.2));
+    c.put(28, 10, rgb(1.0, 1.0, 0.95));
+    c.put(30, 10, rgb(1.0, 1.0, 0.95));
+    // Mange patches.
+    for (x, y) in [(10, 8), (16, 11), (19, 7)] {
+        c.put(x, y, shade(fur, 0.65));
+    }
+    c.outline(OUTLINE);
+    c
+}
+
+/// Hunched, swollen ghoul with a glowing red chest; the renderer blinks it when armed.
+fn paint_ghoul(frame: i32) -> Canvas {
+    let mut c = Canvas::new(26, 32);
+    let skin = rgb(0.42, 0.58, 0.3);
+    let dark = shade(skin, 0.65);
+    // Bowed legs.
+    let step = if frame == 0 { 1 } else { -1 };
+    c.rect(7 + step, 23, 10 + step, 29, dark);
+    c.rect(15 - step, 23, 18 - step, 29, dark);
+    c.rect(6 + step, 29, 10 + step, 30, shade(dark, 0.7));
+    c.rect(15 - step, 29, 19 - step, 30, shade(dark, 0.7));
+    // Long arms dragging.
+    c.line(5.0, 12.0, 2.0, 21.0, dark);
+    c.line(2.0, 21.0, 3.0, 26.0, dark);
+    c.line(21.0, 12.0, 24.0, 21.0, dark);
+    c.line(24.0, 21.0, 23.0, 26.0, dark);
+    // Bloated torso under a hunched back.
+    c.ellipse(13.0, 18.0, 8.5, 7.5, skin);
+    c.ellipse(13.0, 11.0, 9.5, 4.0, shade(skin, 1.12));
+    c.bevel(13.0, 17.0, 9.0, 0.5);
+    // Head sunk between the shoulders.
+    c.ellipse(13.0, 8.0, 4.0, 3.6, shade(skin, 0.9));
+    c.put(11, 7, rgb(1.0, 0.3, 0.2));
+    c.put(15, 7, rgb(1.0, 0.3, 0.2));
+    c.rect(11, 10, 15, 10, OUTLINE);
+    // Glowing core.
+    c.disc(13.0, 18.0, 4.0, rgb(0.75, 0.15, 0.08));
+    c.disc(13.0, 18.0, 2.7, rgb(1.0, 0.4, 0.15));
+    c.disc(13.0, 18.0, 1.3, rgb(1.0, 0.9, 0.5));
+    for (x, y) in [(8, 15), (19, 21), (9, 22)] {
+        c.put(x, y, rgb(0.8, 0.9, 0.4));
+    }
+    c.outline(OUTLINE);
+    c
+}
+
+/// Squat spitter with a swollen purple acid sac; faces right.
+fn paint_spitter() -> Canvas {
+    let mut c = Canvas::new(32, 30);
+    let skin = rgb(0.36, 0.3, 0.38);
+    let sac = rgb(0.58, 0.28, 0.66);
+    // Stubby legs.
+    for x in [8, 13, 18] {
+        c.rect(x, 22, x + 2, 27, shade(skin, 0.7));
+        c.rect(x - 1, 27, x + 3, 28, shade(skin, 0.5));
+    }
+    // Neck and head leaning forward, jaw open.
+    c.ellipse(24.0, 13.0, 4.0, 3.4, skin);
+    c.line(20.0, 17.0, 23.0, 14.0, skin);
+    c.rect(26, 14, 30, 15, rgb(0.15, 0.04, 0.12));
+    c.put(29, 15, rgb(0.7, 1.0, 0.3));
+    c.put(25, 11, rgb(0.8, 1.0, 0.3));
+    // Sac.
+    c.ellipse(13.0, 16.0, 11.0, 9.0, sac);
+    c.ellipse(11.0, 13.0, 7.0, 4.5, shade(sac, 1.25));
+    c.bevel(13.0, 16.0, 11.0, 0.8);
+    for (x, y, r) in [(8.0, 18.0, 2.0), (16.0, 12.0, 1.6), (17.0, 20.0, 2.2)] {
+        c.disc(x, y, r, shade(sac, 0.7));
+        c.put(x as i32, y as i32 - 1, rgb(0.8, 1.0, 0.4));
+    }
+    // Sloshing acid inside, visible through the skin.
+    c.ellipse(13.0, 20.0, 7.0, 3.0, rgb(0.5, 0.9, 0.2));
+    c.outline(OUTLINE);
+    c
+}
+
+/// Armored beetle seen from above, facing +X: dull plates behind, a bright front plate.
+fn paint_crawler() -> Canvas {
+    let mut c = Canvas::new(40, 28);
+    let shell = rgb(0.34, 0.33, 0.31);
+    let leg = rgb(0.2, 0.19, 0.18);
+    for i in 0..4 {
+        let x = 10.0 + i as f32 * 6.0;
+        c.line(x, 6.0, x + 3.0, 1.5, leg);
+        c.line(x, 22.0, x + 3.0, 26.5, leg);
+    }
+    c.ellipse(19.0, 14.0, 15.0, 11.0, shell);
+    c.ellipse(17.0, 12.0, 11.0, 6.5, shade(shell, 1.18));
+    // Overlapping back plates.
+    for x in [8.0, 13.0, 18.0, 23.0] {
+        c.line(x, 5.0, x, 23.0, shade(shell, 0.55));
+        c.line(x + 1.0, 6.0, x + 1.0, 22.0, shade(shell, 1.3));
+    }
+    c.line(5.0, 14.0, 26.0, 14.0, shade(shell, 0.6));
+    // Rust streaks.
+    for (x, y) in [(9, 8), (15, 18), (21, 9), (11, 19)] {
+        c.rect(x, y, x + 1, y + 1, rgb(0.5, 0.3, 0.16));
+    }
+    // Lighter, thicker front plate so the armored side reads.
+    let plate = rgb(0.74, 0.76, 0.82);
+    c.ellipse(31.0, 14.0, 7.0, 9.5, shade(plate, 0.8));
+    c.ellipse(31.5, 13.0, 5.5, 7.5, plate);
+    c.line(33.0, 6.0, 33.0, 22.0, shade(plate, 0.7));
+    for y in [7, 11, 17, 21] {
+        c.put(30, y, shade(plate, 0.55));
+    }
+    c.put(35, 9, rgb(1.0, 0.3, 0.2));
+    c.put(35, 19, rgb(1.0, 0.3, 0.2));
+    c.outline(OUTLINE);
+    c
+}
+
+/// A raider: the survivor in a dark red jacket and red bandana, gun drawn.
+fn paint_raider(frame: usize) -> Canvas {
+    let mut c = Canvas::new(28, 30);
+    let (jacket, mut gear) = paint_survivor(Facing::Side, frame);
+    let bob = if frame % 2 == 1 { 1 } else { 0 };
+    let red = rgb(0.85, 0.12, 0.1);
+    // Bandana over the face and a knotted headband; clear the goggles' lens first.
+    gear.rect(8, 11 + bob, 14, 12 + bob, red);
+    gear.rect(6, 12 + bob, 7, 13 + bob, shade(red, 0.75));
+    gear.rect(7, 4 + bob, 14, 4 + bob, red);
+    gear.put(13, 4 + bob, shade(red, 1.2));
+    gear.put(4, 5 + bob, red);
+    stack(&mut c, &jacket, 4, 0, [0.52, 0.3, 0.26]);
+    stack(&mut c, &gear, 4, 0, [1.0; 3]);
+    // Arm and a pistol held out front.
+    let metal = rgb(0.22, 0.22, 0.25);
+    c.line(
+        14.0,
+        15.0 + bob as f32,
+        19.0,
+        17.0 + bob as f32,
+        rgb(0.45, 0.26, 0.22),
+    );
+    c.rect(19, 16 + bob, 26, 17 + bob, metal);
+    c.rect(19, 18 + bob, 20, 19 + bob, metal);
+    c.rect(21, 16 + bob, 24, 16 + bob, shade(metal, 1.6));
+    c.put(19, 17 + bob, rgb(0.8, 0.65, 0.5));
+    c.outline(OUTLINE);
+    c
+}
+
+/// Small quad-rotor seen from a slight angle; the rotors are translucent discs.
+fn paint_drone(frame: i32) -> Canvas {
+    let mut c = Canvas::new(28, 20);
+    let hull = rgb(0.38, 0.4, 0.46);
+    for (x, y) in [(4.0, 5.0), (24.0, 5.0), (4.0, 13.0), (24.0, 13.0)] {
+        c.line(14.0, 10.0, x, y, shade(hull, 0.6));
+        c.disc(x, y, 1.6, shade(hull, 0.5));
+    }
+    c.ellipse(14.0, 10.0, 6.0, 4.5, hull);
+    c.ellipse(13.0, 8.5, 4.0, 2.0, shade(hull, 1.3));
+    // Camera eye.
+    c.disc(17.0, 11.0, 2.0, rgb(0.15, 0.05, 0.05));
+    c.disc(17.0, 11.0, 1.1, rgb(1.0, 0.25, 0.2));
+    c.outline(OUTLINE);
+    // Spinning blades: blur disc with a bright blade streak whose angle flips per frame.
+    for (x, y) in [(4.0, 5.0), (24.0, 5.0), (4.0, 13.0), (24.0, 13.0)] {
+        c.ellipse(x, y - 1.0, 4.2, 1.8, [0.8, 0.85, 0.9, 0.35]);
+        let (dx, dy) = if frame == 0 { (3.8, 0.4) } else { (2.6, 1.3) };
+        c.line(
+            x - dx,
+            y - 1.0 - dy,
+            x + dx,
+            y - 1.0 + dy,
+            [0.9, 0.95, 1.0, 0.9],
+        );
+    }
+    c
+}
+
+/// The radiation behemoth: a slab-shouldered hulk laced with glowing cracks.
+fn paint_behemoth(frame: i32) -> Canvas {
+    let mut c = Canvas::new(72, 66);
+    let hide = rgb(0.38, 0.34, 0.3);
+    let glow = rgb(0.62, 1.0, 0.28);
+    let step = if frame == 0 { 1 } else { -1 };
+    // Pillar legs.
+    c.rect(22 + step, 44, 31 + step, 62, shade(hide, 0.65));
+    c.rect(41 - step, 44, 50 - step, 62, shade(hide, 0.65));
+    c.rect(20 + step, 61, 33 + step, 64, shade(hide, 0.45));
+    c.rect(39 - step, 61, 52 - step, 64, shade(hide, 0.45));
+    // Dangling fists.
+    c.ellipse(8.0, 40.0, 7.0, 8.0, shade(hide, 0.85));
+    c.ellipse(64.0, 40.0, 7.0, 8.0, shade(hide, 0.85));
+    c.line(14.0, 22.0, 8.0, 36.0, shade(hide, 0.75));
+    c.line(58.0, 22.0, 64.0, 36.0, shade(hide, 0.75));
+    c.line(15.0, 22.0, 9.0, 36.0, shade(hide, 0.75));
+    c.line(57.0, 22.0, 63.0, 36.0, shade(hide, 0.75));
+    // Torso and hump of shoulders.
+    c.ellipse(36.0, 36.0, 20.0, 17.0, hide);
+    c.ellipse(36.0, 24.0, 26.0, 11.0, shade(hide, 1.1));
+    c.ellipse(32.0, 22.0, 14.0, 5.0, shade(hide, 1.3));
+    c.bevel(36.0, 32.0, 24.0, 0.5);
+    // Small head sunk in the hump with burning eyes.
+    c.ellipse(36.0, 15.0, 8.0, 6.5, shade(hide, 0.85));
+    c.rect(31, 14, 34, 15, glow);
+    c.rect(38, 14, 41, 15, glow);
+    c.rect(32, 19, 40, 19, OUTLINE);
+    c.put(33, 19, glow);
+    c.put(36, 19, glow);
+    c.put(39, 19, glow);
+    // Glowing cracks.
+    for (x0, y0, x1, y1) in [
+        (36.0, 24.0, 30.0, 33.0),
+        (30.0, 33.0, 34.0, 41.0),
+        (34.0, 41.0, 29.0, 48.0),
+        (36.0, 26.0, 43.0, 32.0),
+        (43.0, 32.0, 41.0, 40.0),
+        (22.0, 26.0, 26.0, 34.0),
+        (50.0, 26.0, 46.0, 36.0),
+        (10.0, 36.0, 12.0, 44.0),
+    ] {
+        c.line(x0, y0, x1, y1, shade(glow, 0.55));
+        c.line(x0 + 1.0, y0, x1 + 1.0, y1, glow);
+    }
+    c.disc(36.0, 36.0, 3.0, glow);
+    c.disc(36.0, 36.0, 1.5, rgb(1.0, 1.0, 0.8));
+    c.outline(OUTLINE);
+    c
+}
+
+/// Solid arrowhead pointing +X.
+fn paint_arrow() -> Canvas {
+    let mut c = Canvas::new(20, 20);
+    for x in 0..16 {
+        let half = ((16 - x) as f32 * 0.6).min(9.0);
+        c.rect(x, 10 - half as i32, x, 9 + half as i32, rgb(1.0, 1.0, 1.0));
+    }
+    c.outline(OUTLINE);
+    c
+}
+
+/// Opaque acid glob with a bright highlight, dark rim so it reads on any ground.
+fn paint_acid() -> Canvas {
+    let mut c = Canvas::new(14, 14);
+    c.disc(7.0, 7.0, 5.5, rgb(0.34, 0.62, 0.1));
+    c.disc(7.0, 7.5, 4.2, rgb(0.55, 0.92, 0.2));
+    c.disc(5.5, 5.5, 1.8, rgb(0.9, 1.0, 0.6));
+    c.put(9, 9, rgb(0.35, 0.65, 0.12));
+    c.outline(OUTLINE);
+    c
+}
+
 // ---------------------------------------------------------------- city
 
 /// Short random walk of dark pixels, for cracks in tiles.
@@ -2206,6 +2516,71 @@ mod tests {
         write_bmp(&sheet, 3, &path);
     }
 
+    /// Dev aid: `EVOCLASH_SPRITE_PREVIEW=out.bmp cargo test -p evoclash -- --ignored preview_monsters`
+    /// shows every monster next to a survivor for scale (2x world size), blown up 3x.
+    #[test]
+    #[ignore]
+    fn preview_monsters() {
+        let Ok(path) = std::env::var("EVOCLASH_SPRITE_PREVIEW") else {
+            return;
+        };
+        let mut sheet = Canvas::filled(560, 300, |x, y| {
+            if (x / 8 + y / 8) % 2 == 0 {
+                rgb(0.36, 0.22, 0.16)
+            } else {
+                rgb(0.33, 0.2, 0.15)
+            }
+        });
+        // Everything here is drawn at world scale: PIXEL (2) sheet pixels per texture pixel.
+        let draw = |sheet: &mut Canvas, src: &Canvas, x: i32, feet: i32, tint: [f32; 3]| {
+            for y in 0..src.h as i32 * 2 {
+                for xx in 0..src.w as i32 * 2 {
+                    let p = src.get(xx / 2, y / 2);
+                    if p[3] > 0.0 {
+                        sheet.put(
+                            x + xx,
+                            feet - src.h as i32 * 2 + y,
+                            [p[0] * tint[0], p[1] * tint[1], p[2] * tint[2], p[3]],
+                        );
+                    }
+                }
+            }
+        };
+        let (jacket, gear) = paint_survivor(Facing::Side, 0);
+        draw(&mut sheet, &jacket, 4, 80, [0.35, 0.6, 0.95]);
+        draw(&mut sheet, &gear, 4, 80, [1.0; 3]);
+        let gold = [1.35, 1.1, 0.5];
+        let row1 = [
+            paint_roach(0),
+            paint_pod(),
+            paint_dog(0),
+            paint_dog(1),
+            paint_ghoul(0),
+            paint_spitter(),
+            paint_crawler(),
+        ];
+        let mut x = 50;
+        for (i, c) in row1.iter().enumerate() {
+            draw(&mut sheet, c, x, 80, if i == 3 { gold } else { [1.0; 3] });
+            x += c.w as i32 * 2 + 4;
+        }
+        let row2 = [
+            paint_raider(0),
+            paint_raider(1),
+            paint_drone(0),
+            paint_drone(1),
+            paint_acid(),
+        ];
+        let mut x = 4;
+        for c in &row2 {
+            draw(&mut sheet, c, x, 150, [1.0; 3]);
+            x += c.w as i32 * 2 + 4;
+        }
+        draw(&mut sheet, &paint_behemoth(0), 4, 290, [1.0; 3]);
+        draw(&mut sheet, &paint_behemoth(1), 160, 290, [1.0, 0.5, 0.42]);
+        write_bmp(&sheet, 3, &path);
+    }
+
     /// Dev aid: 自动炮塔 (base with the head in four directions) and 陷阱 over ground color, 6x.
     #[test]
     #[ignore]
@@ -2242,6 +2617,14 @@ mod tests {
             paint_survivor(Facing::Side, 1).0,
             paint_roach(0),
             paint_pod(),
+            paint_dog(1),
+            paint_ghoul(0),
+            paint_spitter(),
+            paint_crawler(),
+            paint_raider(2),
+            paint_drone(1),
+            paint_behemoth(1),
+            paint_acid(),
             paint_medkit(),
             paint_reticle(),
             paint_bar(),

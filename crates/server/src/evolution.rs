@@ -187,7 +187,7 @@ pub(crate) fn choose_perks(
     }
 }
 
-fn grant_xp(
+pub(crate) fn grant_xp(
     mut queue: ResMut<XpQueue>,
     mut outbox: ResMut<Outbox>,
     mut players: Query<(&Player, &mut Evolution, &mut Stats)>,

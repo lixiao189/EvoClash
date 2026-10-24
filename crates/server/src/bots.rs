@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 use evoclash_game::evolution::{EvoPath, Evolution, Skill, SkillState};
-use evoclash_game::items::ArmorKind;
+use evoclash_game::items::{ArmorKind, WeaponKind};
 use evoclash_game::map::ARENA_HALF;
 use evoclash_game::nav::{NavGrid, next_waypoint};
 use evoclash_game::protocol::*;
@@ -60,8 +60,25 @@ pub struct Bot {
     pub path: EvoPath,
 }
 
+/// Walkable grid for the current arena; raiders path with it too.
 #[derive(Resource)]
-struct Nav(NavGrid);
+pub struct Nav(pub NavGrid);
+
+/// How far a weapon is worth firing from.
+pub fn engage_range(weapon: WeaponKind) -> f32 {
+    let stats = weapon.stats();
+    if stats.melee {
+        stats.range_or_speed + 20.0
+    } else {
+        stats.range_or_speed * stats.lifetime as f32 * DT * 0.8
+    }
+}
+
+/// Aim at a target with a fixed personal error plus a little wobble, so nobody laser-beams you.
+pub fn aim_toward(to_enemy: Vec2, aim_error: f32, rng: &mut impl Rng) -> Vec2 {
+    let wobble = rng.random_range(-0.05..0.05);
+    Vec2::from_angle(to_enemy.to_angle() + aim_error + wobble)
+}
 
 pub struct BotsPlugin;
 
@@ -244,14 +261,9 @@ fn think(
 
         if let Some((_, enemy_pos, enemy_armor, dist, _)) = enemy {
             let to_enemy = (enemy_pos - pos.0).normalize_or(Vec2::X);
-            let wobble = rng.random_range(-0.05..0.05);
-            input.aim = Vec2::from_angle(to_enemy.to_angle() + bot.aim_error + wobble);
+            input.aim = aim_toward(to_enemy, bot.aim_error, &mut rng);
             let stats = loadout.weapon.stats();
-            let range = if stats.melee {
-                stats.range_or_speed + 20.0
-            } else {
-                stats.range_or_speed * stats.lifetime as f32 * DT * 0.8
-            };
+            let range = engage_range(loadout.weapon);
             if rng.random_bool(0.03) {
                 bot.strafe = -bot.strafe;
             }

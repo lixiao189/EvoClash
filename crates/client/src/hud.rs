@@ -10,7 +10,7 @@ use evoclash_game::map::PropKind;
 use evoclash_game::protocol::*;
 use evoclash_game::sim::{Arena, DASH_COOLDOWN, PLAYER_RADIUS};
 
-use crate::effects::{Banner, KillFeed};
+use crate::effects::{Banner, BossBar, KillFeed};
 use crate::input::LocalPlayer;
 use crate::render::UiFont;
 
@@ -35,7 +35,18 @@ enum HudText {
     Location,
     /// What you can do right here (crack a safe).
     Hint,
+    /// Countdown to the behemoth's arrival.
+    BossEta,
+    /// Name and health numbers above the boss bar.
+    BossName,
 }
+
+/// The boss bar's root, and the part of it that drains.
+#[derive(Component)]
+struct BossPanel;
+
+#[derive(Component)]
+struct BossFill;
 
 /// Each evolution path has its own color in the HUD and effects.
 pub fn path_color(path: EvoPath) -> Color {
@@ -138,6 +149,72 @@ fn spawn_hud(mut commands: Commands, font: Res<UiFont>) {
         Node::default(),
         Justify::Center,
     ));
+    commands.spawn(centered(36.0)).with_child(text_node(
+        &font,
+        17.0,
+        HudText::BossEta,
+        Node::default(),
+        Justify::Center,
+    ));
+    // Boss bar: a drained red fill with ticks where the phases change (60% and 30%).
+    commands
+        .spawn((
+            BossPanel,
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(100.0),
+                width: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                row_gap: Val::Px(3.0),
+                ..default()
+            },
+            Visibility::Hidden,
+        ))
+        .with_children(|panel| {
+            panel.spawn(text_node(
+                &font,
+                18.0,
+                HudText::BossName,
+                Node::default(),
+                Justify::Center,
+            ));
+            panel
+                .spawn((
+                    Node {
+                        width: Val::Px(420.0),
+                        height: Val::Px(14.0),
+                        border: UiRect::all(Val::Px(2.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.65)),
+                    BorderColor::all(Color::srgb(0.12, 0.1, 0.1)),
+                ))
+                .with_children(|bar| {
+                    bar.spawn((
+                        BossFill,
+                        Node {
+                            width: Val::Percent(100.0),
+                            height: Val::Percent(100.0),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.85, 0.2, 0.12)),
+                    ));
+                    for at in [60.0, 30.0] {
+                        bar.spawn((
+                            Node {
+                                position_type: PositionType::Absolute,
+                                left: Val::Percent(at),
+                                top: Val::Px(0.0),
+                                width: Val::Px(2.0),
+                                height: Val::Percent(100.0),
+                                ..default()
+                            },
+                            BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.8)),
+                        ));
+                    }
+                });
+        });
     commands.spawn(centered(52.0)).with_child(text_node(
         &font,
         26.0,
@@ -554,14 +631,68 @@ fn update_hud(
     state: Query<&MatchState>,
     feed: Res<KillFeed>,
     banner: Res<Banner>,
+    boss_bar: Res<BossBar>,
+    bosses: Query<(&Monster, &Vitals, Option<&MonsterState>)>,
+    mut panel: Query<&mut Visibility, With<BossPanel>>,
+    mut fill: Query<(&mut Node, &mut BackgroundColor), With<BossFill>>,
     mut texts: Query<(&HudText, &mut Text, &mut TextColor)>,
 ) {
     let now = time.elapsed_secs();
     let me = me.single().ok();
     let state = state.iter().next();
 
+    // The boss bar tracks the live monster, with the max and phase from the server's report.
+    let boss = bosses
+        .iter()
+        .find(|(m, v, _)| m.kind == MonsterKind::Behemoth && v.alive)
+        .and_then(|(_, vitals, mstate)| {
+            let report = boss_bar.0?;
+            let phase = mstate.map_or(report.phase, |s| s.phase.max(1));
+            Some((vitals.hp.min(report.max), report.max, phase))
+        });
+    for mut visibility in &mut panel {
+        visibility.set_if_neq(if boss.is_some() {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        });
+    }
+    if let Some((hp, max, phase)) = boss {
+        for (mut node, mut bg) in &mut fill {
+            node.width = Val::Percent(100.0 * (hp / max.max(1.0)).clamp(0.0, 1.0));
+            bg.0 = match phase {
+                1 => Color::srgb(0.85, 0.2, 0.12),
+                2 => Color::srgb(0.95, 0.4, 0.1),
+                _ => Color::srgb(1.0, 0.7, 0.1),
+            };
+        }
+    }
+
     for (kind, mut text, mut color) in &mut texts {
         let value = match kind {
+            HudText::BossName => match boss {
+                Some((hp, max, phase)) => {
+                    color.0 = Color::srgb(1.0, 0.55, 0.35);
+                    format!("辐射巨兽  阶段 {phase}   {hp:.0}/{max:.0}")
+                }
+                None => String::new(),
+            },
+            HudText::BossEta => match state.filter(|s| s.boss_eta > 0) {
+                Some(s) => {
+                    let blink = if s.boss_eta < 64 * 10 {
+                        0.7 + 0.3 * (now * 8.0).sin()
+                    } else {
+                        1.0
+                    };
+                    color.0 = Color::srgb(1.0, 0.55, 0.3).with_alpha(blink);
+                    format!(
+                        "辐射巨兽 {:02}:{:02}",
+                        s.boss_eta / 64 / 60,
+                        s.boss_eta / 64 % 60
+                    )
+                }
+                None => String::new(),
+            },
             HudText::Status => match me {
                 Some((_, vitals, loadout, stats, dash, _)) => {
                     let weapon = loadout.weapon.stats();

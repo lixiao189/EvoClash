@@ -1,4 +1,4 @@
-//! In-match evolution: XP, levels 1–10, perks along three paths and the skills a path grants.
+//! In-match evolution: XP, levels 1-10, perks along three paths and the skills a path grants.
 //!
 //! Everything here is plain data and arithmetic shared by server (authority) and client (HUD,
 //! prediction). Only the movement multiplier feeds the deterministic sim (`sim::speed_mult`);
@@ -8,7 +8,6 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::items::{ArmorKind, WeaponKind};
-use crate::protocol::MonsterKind;
 use crate::sim::MAX_HP;
 
 const SEC: u16 = 64;
@@ -71,14 +70,6 @@ pub fn scaled_xp(base: u32, mult: f32) -> u32 {
 
 pub fn player_kill_xp(victim_level: u8, bounty: bool, giant_slayer: bool) -> u32 {
     60 + 20 * victim_level as u32 + if bounty { 50 } else { 0 } + if giant_slayer { 40 } else { 0 }
-}
-
-/// XP for killing a monster. Kept in one place so `MonsterKind::xp()` can replace it later.
-pub fn monster_xp(kind: MonsterKind) -> u32 {
-    match kind {
-        MonsterKind::Roach => 25,
-        MonsterKind::SporePod => 60,
-    }
 }
 
 pub fn crate_xp(tier: u8) -> u32 {
@@ -622,6 +613,15 @@ mod tests {
         assert_eq!(player_kill_xp(5, true, true), 60 + 100 + 50 + 40);
         assert_eq!(crate_xp(2), 20);
         assert_eq!(safe_xp(3), 90);
+        // Monster XP lives on `MonsterKind::xp()`; elites are worth triple.
+        use crate::protocol::{Monster, MonsterKind};
+        assert_eq!(MonsterKind::Roach.xp(), 25);
+        assert_eq!(MonsterKind::SporePod.xp(), 60);
+        let elite = Monster {
+            kind: MonsterKind::Dog,
+            elite: true,
+        };
+        assert_eq!(elite.xp(), 75);
     }
 
     fn pick_perk(evo: &mut Evolution, perk: Perk) {

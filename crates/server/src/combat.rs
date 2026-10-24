@@ -16,6 +16,7 @@ use crate::gameplay::{
     Cooldowns, CurrentInput, Damage, DamageQueue, Outbox, PosHistory, Rewind, SimSet, SimTick,
     spawn_pickup,
 };
+use crate::monsters::spawn_puddle;
 use crate::skills::TurretBrain;
 
 const PICKUP_RADIUS: f32 = 46.0;
@@ -49,15 +50,17 @@ pub struct Flight {
     armor_mult: f32,
     piercing: bool,
     already_hit: Vec<Entity>,
-    /// Kill-feed name when it isn't the weapon's (e.g. "自动炮塔").
+    /// Fired by a monster: passes through other monsters and props.
+    fauna: bool,
+    /// Kill-feed name when it isn't the weapon's (e.g. "自动炮塔", "酸液").
     cause: Option<&'static str>,
     /// EMP blast radius.
     radius: f32,
 }
 
 impl Flight {
-    /// A plain, non-rewound projectile, e.g. a monster's spore.
-    pub fn simple(owner: Entity, ttl: u16, damage: f32) -> Self {
+    /// A plain, non-rewound monster projectile (spore, acid, bolt).
+    pub fn fauna(owner: Entity, ttl: u16, damage: f32, cause: &'static str) -> Self {
         Self {
             owner,
             rewind: 0,
@@ -66,6 +69,24 @@ impl Flight {
             armor_mult: 1.0,
             piercing: false,
             already_hit: Vec::new(),
+            fauna: true,
+            cause: Some(cause),
+            radius: 0.0,
+        }
+    }
+
+    /// A raider's gunshot: weapon stats, but it never hits other monsters.
+    pub fn raider_shot(owner: Entity, weapon: WeaponKind) -> Self {
+        let stats = weapon.stats();
+        Self {
+            owner,
+            rewind: 0,
+            ttl: stats.lifetime,
+            damage: stats.damage,
+            armor_mult: stats.armor_mult,
+            piercing: stats.piercing,
+            already_hit: Vec::new(),
+            fauna: true,
             cause: None,
             radius: 0.0,
         }
@@ -74,8 +95,16 @@ impl Flight {
     /// A shot fired on someone's behalf (a turret): hits are credited to `owner`.
     pub fn turret_shot(owner: Entity, ttl: u16, damage: f32, cause: &'static str) -> Self {
         Self {
+            owner,
+            rewind: 0,
+            ttl,
+            damage,
+            armor_mult: 1.0,
+            piercing: false,
+            already_hit: Vec::new(),
+            fauna: false,
             cause: Some(cause),
-            ..Self::simple(owner, ttl, damage)
+            radius: 0.0,
         }
     }
 }
@@ -224,6 +253,7 @@ fn fire_weapons(
                     armor_mult,
                     piercing: stats.piercing,
                     already_hit: Vec::new(),
+                    fauna: false,
                     cause: None,
                     radius: 0.0,
                 },
@@ -277,6 +307,7 @@ fn throw_emps(
                 armor_mult: 1.0,
                 piercing: false,
                 already_hit: Vec::new(),
+                fauna: false,
                 cause: None,
                 radius: EMP_RADIUS * evo.emp_radius_mult(),
             },
@@ -347,11 +378,15 @@ pub(crate) fn step_projectiles(
                     pos.0 = to;
                 }
             }
-            ProjectileKind::Shot(_) | ProjectileKind::Spore => {
-                let (weapon, spore) = match projectile.kind {
-                    ProjectileKind::Shot(weapon) => (Some(weapon), false),
-                    _ => (None, true),
+            ProjectileKind::Shot(_)
+            | ProjectileKind::Spore
+            | ProjectileKind::Acid
+            | ProjectileKind::Bolt => {
+                let weapon = match projectile.kind {
+                    ProjectileKind::Shot(weapon) => Some(weapon),
+                    _ => None,
                 };
+                let fauna = flight.fauna;
                 let limit = wall_t.unwrap_or(1.0);
                 let mut hits: Vec<(f32, Entity)> = targets
                     .iter()
@@ -361,7 +396,7 @@ pub(crate) fn step_projectiles(
                             // Your own turret doesn't soak up your shots.
                             && turret.is_none_or(|t| t.owner() != flight.owner)
                             // Monsters don't hurt each other, or set off the scenery.
-                            && !(spore && (monster.is_some() || prop.is_some()))
+                            && !(fauna && (monster.is_some() || prop.is_some()))
                             && !flight.already_hit.contains(target)
                     })
                     .filter_map(|(target, target_pos, _, history, monster, prop, _)| {
@@ -384,11 +419,17 @@ pub(crate) fn step_projectiles(
                         armor_mult: flight.armor_mult,
                         weapon,
                         emp: false,
-                        cause: flight.cause.or(spore.then_some("孢子")),
+                        cause: flight.cause,
                     });
                 }
                 let stopped = (!flight.piercing && !hits.is_empty()) || wall_t.is_some();
                 if stopped || flight.ttl == 0 {
+                    if projectile.kind == ProjectileKind::Acid {
+                        let t = hits.first().map_or(limit, |h| h.0);
+                        // Land just short of the wall, not inside it.
+                        let at = from + (to - from) * t * 0.9;
+                        spawn_puddle(&mut commands, PuddleKind::Acid, at, Some(flight.owner));
+                    }
                     commands.entity(entity).despawn();
                 } else {
                     pos.0 = to;
