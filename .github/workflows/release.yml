@@ -1,6 +1,7 @@
 name: Release
 
-# Push a tag like `v0.2.0` (matching the workspace version) to publish binaries and the server image.
+# Push a tag like `v0.2.0` (matching the workspace and chart versions) to publish binaries, the
+# server image and the Helm chart.
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
@@ -177,5 +178,44 @@ jobs:
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+  # The Helm chart as an OCI artifact next to the image it deploys:
+  #   helm install evoclash oci://ghcr.io/<owner>/charts/evoclash --version X.Y.Z
+  # Published after the image so the chart never points at a tag that doesn't exist yet.
+  chart:
+    name: Helm chart
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Chart registry
+        # GHCR requires lowercase repository names.
+        run: echo "CHART_REPO=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts" >> "$GITHUB_ENV"
+      # Helm is preinstalled on GitHub's Ubuntu runners.
+      - run: helm lint --strict deploy/helm/evoclash
+      - run: helm package deploy/helm/evoclash --destination chart
+      - id: push
+        name: Push
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "$GH_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          helm push chart/evoclash-*.tgz "oci://$CHART_REPO" 2>&1 | tee push.log
+          digest=$(sed -n 's/^Digest: *//p' push.log)
+          [ -n "$digest" ] || { echo "::error::no digest in helm push output"; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.CHART_REPO }}/evoclash
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
