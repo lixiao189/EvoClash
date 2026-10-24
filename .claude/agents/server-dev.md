@@ -15,6 +15,8 @@ Rules that bite:
 - Put new systems in the right `SimSet` (`Input → Simulate → Combat → Resolve → Flow`); damage goes through `DamageQueue`, outgoing events through `Outbox`.
 - New replicated component → register in `ProtocolPlugin`; any wire change → bump `PROTOCOL_ID` in `net.rs`.
 
+Only edit the files your brief assigns you; other agents may be editing the rest. If you need a change elsewhere (especially a hub file listed in CLAUDE.md under "Avoid edit conflicts"), say exactly what in your report instead of making it.
+
 Keep token use low: grep then read line ranges; never cat whole large files; check only the crates you touched, with quiet output:
 `cargo clippy -p <crate> --all-targets --locked --message-format=short -- -D warnings` and `cargo test -p <crate> --locked -q`. Leave the full CI run to `tester`.
 
