@@ -1,8 +1,10 @@
-//! EvoClash client.
+//! EvoClash browser client (wasm32). Served by the matchmaker, which it joins through the same
+//! origin it was loaded from: `http://127.0.0.1:8080/play/?name=Alice` (`&lag=100` simulates latency).
 //!
-//! `evoclash --matchmaker http://127.0.0.1:8080 --name Alice`  (production path; a comma list
-//!                                                             of replicas/regions picks the nearest)
-//! `evoclash --server 127.0.0.1:7000 --id 1`                    (dev: direct connect with the dev key)
+//! The crate still compiles natively so its tests (sprite previews) run with `cargo test`, but
+//! the game itself only runs in a browser: `make run`.
+// Natively only the tests use the game code; the wasm build (checked in CI) catches dead code.
+#![cfg_attr(not(target_family = "wasm"), allow(dead_code, unused_imports))]
 
 mod effects;
 mod hud;
@@ -12,149 +14,73 @@ mod render;
 mod session;
 mod textures;
 
-use std::time::Duration;
-
-use bevy::app::ScheduleRunnerPlugin;
-use bevy::log::LogPlugin;
 use bevy::prelude::*;
-use bevy::state::app::StatesPlugin;
-use bevy::winit::WinitSettings;
 use evoclash_game::net::tick_duration;
 use lightyear::prelude::client::ClientPlugins;
-
-use crate::session::Session;
 
 #[derive(Resource, Clone, Debug)]
 pub struct ClientArgs {
     pub name: String,
-    /// Matchmaker URLs (replicas or regions); the client uses the nearest one that answers.
-    pub matchmakers: Vec<String>,
-    pub server: Option<String>,
-    pub client_id: u64,
-    pub headless: bool,
-    /// Drive inputs automatically (soak tests, headless load generation).
-    pub autopilot: bool,
+    /// Matchmaker base URL: the origin the page was served from.
+    pub matchmaker: String,
     /// Simulated one-way latency in ms for testing prediction (dev only).
     pub fake_latency_ms: u64,
 }
 
-fn parse_args() -> ClientArgs {
-    let mut args = ClientArgs {
-        name: std::env::var("USER").unwrap_or_else(|_| "幸存者".into()),
-        matchmakers: Vec::new(),
-        server: None,
-        client_id: rand::random::<u32>() as u64,
-        headless: false,
-        autopilot: false,
-        fake_latency_ms: 0,
-    };
-    let mut it = std::env::args().skip(1);
-    while let Some(arg) = it.next() {
-        let mut value = |name: &str| {
-            it.next()
-                .unwrap_or_else(|| panic!("missing value for {name}"))
-        };
-        match arg.as_str() {
-            "--name" => args.name = value("--name"),
-            "--matchmaker" => args.matchmakers.extend(
-                value("--matchmaker")
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|url| !url.is_empty())
-                    .map(str::to_owned),
-            ),
-            "--server" => args.server = Some(value("--server")),
-            "--id" => args.client_id = value("--id").parse().expect("invalid --id"),
-            "--headless" => args.headless = true,
-            "--autopilot" => args.autopilot = true,
-            "--fake-latency" => {
-                args.fake_latency_ms = value("--fake-latency")
-                    .parse()
-                    .expect("invalid --fake-latency")
-            }
-            "-h" | "--help" => {
-                println!(
-                    "evoclash [--matchmaker URL[,URL...] | --server HOST:PORT [--id N]] [--name NAME]\n\
-                     \x20        [--headless] [--autopilot] [--fake-latency MS]"
-                );
-                std::process::exit(0);
-            }
-            other => panic!("unknown argument {other}"),
-        }
-    }
-    if args.matchmakers.is_empty() && args.server.is_none() {
-        args.server = Some(format!(
-            "127.0.0.1:{}",
-            evoclash_game::net::DEFAULT_GAME_PORT
-        ));
-    }
-    args
+/// Read the page URL. `None` until the player has picked a name (index.html asks for one).
+#[cfg(target_family = "wasm")]
+fn page_args() -> Option<ClientArgs> {
+    let location = web_sys::window()?.location();
+    let params = web_sys::UrlSearchParams::new_with_str(&location.search().ok()?).ok()?;
+    let name = params.get("name").filter(|name| !name.trim().is_empty())?;
+    Some(ClientArgs {
+        name,
+        matchmaker: location.origin().ok()?,
+        fake_latency_ms: params
+            .get("lag")
+            .and_then(|lag| lag.parse().ok())
+            .unwrap_or(0),
+    })
 }
 
+#[cfg(target_family = "wasm")]
 fn main() {
-    let args = parse_args();
-    let session = match Session::establish(&args) {
-        Ok(session) => session,
-        Err(e) => {
-            eprintln!("could not join a match: {e}");
-            std::process::exit(1);
-        }
+    let Some(args) = page_args() else {
+        return;
     };
 
     let mut app = App::new();
-    if args.headless {
-        app.add_plugins((
-            MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
-                1.0 / 60.0,
-            ))),
-            LogPlugin::default(),
-            StatesPlugin,
-        ));
-    } else {
-        app.add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: format!("EvoClash — {}", args.name),
-                resolution: (1280, 800).into(),
-                ..default()
-            }),
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(Window {
+            title: format!("EvoClash — {}", args.name),
+            canvas: Some("#game".into()),
+            fit_canvas_to_parent: true,
+            // Keep browser shortcuts (F5, Ctrl+W, …) working.
+            prevent_default_event_handling: false,
             ..default()
-        }));
-        // Keep simulating at full rate when the window loses focus (multiple local clients).
-        app.insert_resource(WinitSettings::continuous());
-    }
+        }),
+        ..default()
+    }));
     app.add_plugins(ClientPlugins {
         tick_duration: tick_duration(),
     });
     app.add_plugins(evoclash_game::SharedPlugin);
-    app.insert_resource(args.clone());
-    app.insert_resource(session);
+    app.insert_resource(args);
     app.add_plugins((
         session::SessionPlugin,
         input::InputPlugin,
         predict::PredictPlugin,
+        render::RenderPlugin,
+        effects::EffectsPlugin,
+        hud::HudPlugin,
     ));
-    if args.headless {
-        app.add_systems(Update, log_events_headless);
-    } else {
-        app.add_plugins((render::RenderPlugin, effects::EffectsPlugin, hud::HudPlugin));
-    }
     app.run();
 }
 
-/// Without a HUD, still drain server events (and surface the kill feed in the log).
-fn log_events_headless(
-    mut receivers: Query<
-        &mut lightyear::prelude::MessageReceiver<evoclash_game::protocol::GameEvent>,
-    >,
-) {
-    use evoclash_game::protocol::GameEvent;
-    for mut receiver in &mut receivers {
-        for event in receiver.receive() {
-            match event {
-                GameEvent::Kill { killer, victim, .. } => info!("{killer} killed {victim}"),
-                GameEvent::Announce(text) => info!("{text}"),
-                _ => {}
-            }
-        }
-    }
+#[cfg(not(target_family = "wasm"))]
+fn main() {
+    eprintln!(
+        "the EvoClash client runs in the browser: `make run`, then open http://127.0.0.1:8080"
+    );
+    std::process::exit(1);
 }

@@ -24,7 +24,9 @@ bevy = { version = "0.20", default-features = false, features = [
 lightyear = { version = "0.31", default-features = false, features = [
   "std",
   "netcode",
-  "udp",
+  # Browsers can't open raw UDP sockets; WebTransport (QUIC, still UDP underneath) keeps
+  # unreliable, unordered delivery for game traffic.
+  "webtransport",
   "input_native",
   "replication",
   "prediction",
@@ -35,10 +37,14 @@ serde_json = "1"
 rand = "0.9"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "signal", "sync", "time"] }
 axum = "0.8"
+# Serves the wasm client from the matchmaker, so the game and its API share one origin.
+tower-http = { version = "0.7", features = ["fs"] }
 ureq = { version = "3", features = ["json"] }
 # SIGTERM (not just Ctrl-C) so orchestrators can drain match servers gracefully.
 ctrlc = { version = "3.4", features = ["termination"] }
 base64 = "0.22"
+# Async HTTP that works from wasm (browser fetch).
+ehttp = { version = "0.7", default-features = false }
 hmac = "0.12"
 sha2 = "0.10"
 
@@ -57,3 +63,9 @@ opt-level = 3
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# The browser client (`make web`): stripped and size-optimized, since players download it.
+[profile.web]
+inherits = "release"
+opt-level = "s"
+strip = true

@@ -1,0 +1,3 @@
+# rand → getrandom 0.3 needs its browser backend picked explicitly on wasm.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

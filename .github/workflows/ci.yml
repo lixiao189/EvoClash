@@ -20,7 +20,8 @@ env:
   # Debug info makes Bevy's target dir huge and slows cache save/restore; CI doesn't need it.
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
-  # Native libraries the client (winit, audio, gamepad) links against on Linux.
+  # Native libraries the client (winit, audio, gamepad) links against on Linux; the client only
+  # runs in browsers, but it still compiles natively for clippy and its tests.
   LINUX_DEPS: pkg-config libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
 
 jobs:
@@ -54,10 +55,13 @@ jobs:
         with:
           toolchain: stable
           components: clippy
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # The build players actually run.
+      - run: cargo clippy -p evoclash --target wasm32-unknown-unknown --locked -- -D warnings
 
   test:
     name: Test (${{ matrix.os }})
@@ -123,15 +127,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: stable
+          targets: wasm32-unknown-unknown
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: trunk
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # Dev profile (dependencies are still optimized): this checks packaging, not performance.
       - run: cargo build --locked -p evoclash-server -p evoclash-matchmaker
-      - name: Stage binaries like release.yml does
+      - run: trunk build --release --locked
+        working-directory: crates/client
+      - name: Stage binaries and the browser client like release.yml does
         run: |
           mkdir -p dist/amd64
           cp target/debug/evoclash-server target/debug/evoclash-matchmaker dist/amd64/
+          cp -r target/web dist/amd64/web
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -140,13 +151,14 @@ jobs:
           push: false
           load: true
           tags: evoclash-server:ci
-      - name: Smoke test (matchmaker launches a match that heartbeats back)
+      - name: Smoke test (serves the browser client; launches a match that heartbeats back)
         run: |
           # The image runs as nonroot and has no shell, so match logs go to a host directory.
           mkdir -m 777 match-logs
           docker run -d --name evoclash --network host -v "$PWD/match-logs:/logs" \
             evoclash-server:ci --listen 127.0.0.1:8080 --log-dir /logs --warm-matches 1
           for _ in $(seq 60); do
+            curl -fsS http://127.0.0.1:8080/play/ | grep -q 'evoclash' || { sleep 1; continue; }
             if curl -fsS http://127.0.0.1:8080/v1/matches \
               | jq -e '[.matches[] | select(.healthy and .tick_us > 0)] | length > 0'; then
               exit 0

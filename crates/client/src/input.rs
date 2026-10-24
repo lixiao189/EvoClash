@@ -1,12 +1,10 @@
-//! Keyboard/mouse (or autopilot) → `PlayerInput`, written into lightyear's input buffer every tick.
+//! Keyboard/mouse → `PlayerInput`, written into lightyear's input buffer every tick.
 
 use bevy::prelude::*;
 use evoclash_game::protocol::{Player, PlayerInput, Pos};
 use lightyear::prelude::client::input::InputSystems;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
 use lightyear::prelude::*;
-
-use crate::ClientArgs;
 
 /// Mouse position in world space, filled in by the renderer.
 #[derive(Resource, Default)]
@@ -53,8 +51,6 @@ fn buffer_input(
     keys: Option<Res<ButtonInput<KeyCode>>>,
     mouse: Option<Res<ButtonInput<MouseButton>>>,
     cursor: Res<CursorWorld>,
-    args: Res<ClientArgs>,
-    time: Res<Time>,
     mut query: Query<(&mut ActionState<PlayerInput>, &Pos), With<InputMarker<PlayerInput>>>,
 ) {
     let Ok((mut action, pos)) = query.single_mut() else {
@@ -62,18 +58,7 @@ fn buffer_input(
     };
     let mut input = PlayerInput::default();
 
-    if args.autopilot {
-        // Wander in slow circles and spray: enough to exercise every network path.
-        let t = time.elapsed_secs();
-        let heading = Vec2::from_angle(t * 0.7);
-        input.move_x = (heading.x * 1.6).round().clamp(-1.0, 1.0) as i8;
-        input.move_y = (heading.y * 1.6).round().clamp(-1.0, 1.0) as i8;
-        input.aim = Vec2::from_angle(t * 2.3);
-        input.fire = true;
-        input.dash = (t % 3.0) < 0.05;
-        input.interact = (t % 2.0) < 0.1;
-        input.throw = (t % 7.0) < 0.05;
-    } else if let Some(keys) = keys {
+    if let Some(keys) = keys {
         use KeyCode::*;
         input.move_x = axis(&keys, [KeyA, ArrowLeft], [KeyD, ArrowRight]);
         input.move_y = axis(&keys, [KeyS, ArrowDown], [KeyW, ArrowUp]);

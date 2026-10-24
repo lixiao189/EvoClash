@@ -1,6 +1,7 @@
 //! Transport setup and the player session lifecycle: join, drop, reconnect.
 
 use std::net::{Ipv4Addr, SocketAddr};
+use std::time::Instant;
 
 use bevy::prelude::*;
 use evoclash_game::net::{self, CONNECTION_TIMEOUT_SECS, PROTOCOL_ID};
@@ -9,6 +10,8 @@ use lightyear::connection::client::Connected;
 use lightyear::netcode::{NetcodeServer, TokenUserData};
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
+use lightyear::webtransport::prelude::Identity;
+use lightyear::webtransport::prelude::endpoint::WebTransportEndpoint;
 
 use crate::config::ServerConfig;
 use crate::gameplay::{Outbox, SimSet, spawn_combatant};
@@ -30,6 +33,36 @@ impl Human {
     }
 }
 
+/// TLS identity of the WebTransport endpoint. Browsers accept a self-signed certificate only
+/// when told its SHA-256 hash up front (the matchmaker passes it on from our heartbeats), and
+/// only if it is valid for at most 14 days, so the server retires itself before it expires.
+#[derive(Resource)]
+pub struct TlsIdentity {
+    identity: Identity,
+    /// Lowercase hex SHA-256 of the certificate.
+    pub digest: String,
+    pub created: Instant,
+}
+
+impl TlsIdentity {
+    pub fn self_signed(config: &ServerConfig) -> Self {
+        let public_ip = config.public_addr.ip().to_string();
+        let identity = Identity::self_signed(["localhost", "127.0.0.1", "::1", &public_ip])
+            .expect("valid subject alt names");
+        let digest = identity.certificate_chain().as_slice()[0]
+            .hash()
+            .as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        Self {
+            identity,
+            digest,
+            created: Instant::now(),
+        }
+    }
+}
+
 pub struct ConnectionsPlugin;
 
 impl Plugin for ConnectionsPlugin {
@@ -41,7 +74,7 @@ impl Plugin for ConnectionsPlugin {
     }
 }
 
-fn start_server(mut commands: Commands, config: Res<ServerConfig>) {
+fn start_server(mut commands: Commands, config: Res<ServerConfig>, tls: Res<TlsIdentity>) {
     let (private_key, dev_key) = net::private_key_from_env();
     if dev_key {
         warn!(
@@ -64,13 +97,15 @@ fn start_server(mut commands: Commands, config: Res<ServerConfig>) {
             Name::new("Server"),
             NetcodeServer::new(netcode),
             LocalAddr(bind),
-            ServerUdpIo,
+            WebTransportEndpoint {
+                certificate: tls.identity.clone_identity(),
+            },
         ))
         .id();
     commands.trigger(Start { entity: server });
     info!(
-        "match {} listening on udp://{bind} (public {}), max {} players",
-        config.match_id, config.public_addr, config.max_players
+        "match {} listening on WebTransport https://{bind} (public {}), max {} players, cert {}",
+        config.match_id, config.public_addr, config.max_players, tls.digest
     );
 }
 

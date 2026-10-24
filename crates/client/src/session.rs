@@ -1,12 +1,13 @@
 //! Getting into a match and staying there: matchmaker join, netcode connect, auto-reconnect.
 
-use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
-use std::time::{Duration, Instant};
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use base64::Engine;
 use bevy::prelude::*;
 use evoclash_game::api::{JoinRequest, JoinResponse, RejoinRequest};
-use evoclash_game::net::{self, CONNECTION_TIMEOUT_SECS, PROTOCOL_ID, TOKEN_EXPIRE_SECS};
+use evoclash_game::net::{CONNECTION_TIMEOUT_SECS, TOKEN_EXPIRE_SECS};
 use evoclash_game::protocol::{MatchState, Monster, Pickup, Player, Projectile};
 use lightyear::connection::client::{Connected, Disconnected};
 use lightyear::link::prelude::{LinkConditionerConfig, RecvLinkConditioner};
@@ -14,216 +15,117 @@ use lightyear::netcode::client_plugin::NetcodeConfig;
 use lightyear::netcode::{ConnectToken, NetcodeClient};
 use lightyear::prelude::client::*;
 use lightyear::prelude::*;
+use lightyear::webtransport::prelude::client::WebTransportClientIo;
 use serde::Serialize;
 
 use crate::ClientArgs;
 
 const MAX_RECONNECT_ATTEMPTS: u32 = 12;
 
-#[derive(Clone)]
-enum Credentials {
-    /// Local development: build our own token from the shared dev key.
-    Dev { private_key: [u8; 32] },
-    /// Production: a token signed by the matchmaker.
-    Token {
-        /// Matchmaker replicas / regions, nearest first. Any of them can reissue tokens.
-        matchmakers: Vec<String>,
-        name: String,
-        token: Vec<u8>,
-        match_id: String,
-        reconnect_key: String,
-    },
-}
-
-#[derive(Resource, Clone)]
-pub struct Session {
-    pub server_addr: SocketAddr,
-    pub client_id: u64,
-    credentials: Credentials,
-}
-
-fn http_agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(5)))
-        .build()
-        .into()
-}
-
-/// Order matchmakers by `/healthz` round trip, unreachable ones last. Matchmakers are deployed
-/// next to their match servers, so the fastest one is also the region with the lowest ping.
-fn rank_by_latency(matchmakers: &[String]) -> Vec<String> {
-    if matchmakers.len() < 2 {
-        return matchmakers.to_vec();
-    }
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(1)))
-        .build()
-        .into();
-    let mut ranked: Vec<(Option<Duration>, String)> = std::thread::scope(|scope| {
-        let probes: Vec<_> = matchmakers
-            .iter()
-            .map(|url| {
-                let agent = agent.clone();
-                scope.spawn(move || {
-                    let started = Instant::now();
-                    let healthz = format!("{}/healthz", url.trim_end_matches('/'));
-                    let rtt = agent.get(&healthz).call().ok().map(|_| started.elapsed());
-                    (rtt, url.clone())
-                })
-            })
-            .collect();
-        probes
-            .into_iter()
-            .map(|probe| probe.join().expect("probe thread"))
-            .collect()
-    });
-    ranked.sort_by_key(|(rtt, _)| rtt.unwrap_or(Duration::MAX));
-    for (rtt, url) in &ranked {
-        info!("matchmaker {url}: {rtt:?}");
-    }
-    ranked.into_iter().map(|(_, url)| url).collect()
-}
-
 enum CallError {
-    /// A matchmaker answered that the match is over or unknown: find a new one.
+    /// The matchmaker answered that the match is over or unknown: find a new one.
     Gone,
     Failed(String),
 }
 
-/// POST to each matchmaker in turn until one hands out a token.
-fn post_any<T: Serialize>(
-    matchmakers: &[String],
-    path: &str,
-    request: &T,
-) -> Result<JoinResponse, CallError> {
-    let agent = http_agent();
-    let mut gone = false;
-    let mut errors = Vec::new();
-    for matchmaker in matchmakers {
-        let url = format!("{}{path}", matchmaker.trim_end_matches('/'));
-        match agent.post(&url).send_json(request) {
-            Ok(mut response) => match response.body_mut().read_json() {
-                Ok(reply) => return Ok(reply),
-                Err(e) => errors.push(format!("{url}: bad reply: {e}")),
-            },
-            Err(ureq::Error::StatusCode(403 | 410)) => gone = true,
-            Err(e) => errors.push(format!("{url}: {e}")),
+/// A matchmaker request in flight. Browsers can't block on HTTP, so the reply lands here and
+/// `watch_connection` picks it up on a later frame.
+type PendingCall = Arc<Mutex<Option<Result<JoinResponse, CallError>>>>;
+
+fn post<T: Serialize>(matchmaker: &str, path: &str, request: &T) -> PendingCall {
+    let pending = PendingCall::default();
+    let url = format!("{}{path}", matchmaker.trim_end_matches('/'));
+    let mut http = ehttp::Request::post(
+        &url,
+        serde_json::to_vec(request).expect("requests serialize"),
+    );
+    http.headers.insert("Content-Type", "application/json");
+    let slot = pending.clone();
+    ehttp::fetch(http, move |result| {
+        let reply = match result {
+            Ok(response) if response.ok => serde_json::from_slice(&response.bytes)
+                .map_err(|e| CallError::Failed(format!("{url}: bad reply: {e}"))),
+            Ok(response) if matches!(response.status, 403 | 410) => Err(CallError::Gone),
+            Ok(response) => Err(CallError::Failed(format!(
+                "{url}: {} {}",
+                response.status,
+                String::from_utf8_lossy(&response.bytes)
+            ))),
+            Err(e) => Err(CallError::Failed(format!("{url}: {e}"))),
+        };
+        if let Ok(mut slot) = slot.lock() {
+            *slot = Some(reply);
         }
-    }
-    if gone {
-        Err(CallError::Gone)
-    } else {
-        Err(CallError::Failed(errors.join("; ")))
-    }
+    });
+    pending
 }
 
-fn join_any(matchmakers: &[String], name: &str) -> Result<JoinResponse, String> {
-    let request = JoinRequest {
-        name: name.to_owned(),
-        region: None,
-    };
-    post_any(matchmakers, "/v1/join", &request).map_err(|e| match e {
-        CallError::Gone => "matchmaker refused the join".to_string(),
-        CallError::Failed(e) => e,
-    })
+/// The match we hold a seat in.
+#[derive(Clone)]
+struct Seat {
+    match_id: String,
+    server_addr: SocketAddr,
+    cert_digest: String,
+    client_id: u64,
+    token: Vec<u8>,
+    reconnect_key: String,
 }
 
-fn resolve(addr: &str) -> Result<SocketAddr, String> {
-    addr.to_socket_addrs()
-        .map_err(|e| format!("bad address {addr}: {e}"))?
-        .next()
-        .ok_or_else(|| format!("bad address {addr}"))
-}
-
-impl Session {
-    pub fn establish(args: &ClientArgs) -> Result<Self, String> {
-        if !args.matchmakers.is_empty() {
-            let matchmakers = rank_by_latency(&args.matchmakers);
-            let response = join_any(&matchmakers, &args.name)?;
-            info!(
-                "matched into {} at {}",
-                response.match_id, response.server_addr
-            );
-            return Self::from_response(matchmakers, args.name.clone(), response);
-        }
-        let server = args.server.as_deref().unwrap_or("127.0.0.1:7000");
-        let (private_key, _) = net::private_key_from_env();
-        Ok(Self {
-            server_addr: resolve(server)?,
-            client_id: args.client_id,
-            credentials: Credentials::Dev { private_key },
-        })
-    }
-
-    fn from_response(
-        matchmakers: Vec<String>,
-        name: String,
-        response: JoinResponse,
-    ) -> Result<Self, String> {
+impl Seat {
+    fn from_response(response: JoinResponse) -> Result<Self, String> {
         let token = base64::engine::general_purpose::STANDARD
             .decode(&response.connect_token)
             .map_err(|e| format!("bad token: {e}"))?;
         Ok(Self {
-            server_addr: resolve(&response.server_addr)?,
+            server_addr: response
+                .server_addr
+                .parse()
+                .map_err(|e| format!("bad address {}: {e}", response.server_addr))?,
+            match_id: response.match_id,
+            cert_digest: response.cert_digest,
             client_id: response.client_id,
-            credentials: Credentials::Token {
-                matchmakers,
-                name,
-                token,
-                match_id: response.match_id,
-                reconnect_key: response.reconnect_key,
-            },
+            token,
+            reconnect_key: response.reconnect_key,
         })
     }
+}
 
-    /// Fetch a fresh token for the same match (tokens are single-use and short-lived) from
-    /// whichever matchmaker replica is up. If the match is gone (its server crashed or it
-    /// ended), or `new_match` is set because this one never let us in, join another one.
-    fn refresh(&mut self, new_match: bool) -> Result<(), String> {
-        let Credentials::Token {
-            matchmakers,
-            name,
-            match_id,
-            reconnect_key,
-            ..
-        } = &self.credentials
-        else {
-            return Ok(());
+#[derive(Resource, Default)]
+pub struct Session {
+    seat: Option<Seat>,
+    pending: Option<PendingCall>,
+}
+
+impl Session {
+    fn join(&mut self, args: &ClientArgs) {
+        let request = JoinRequest {
+            name: args.name.clone(),
+            region: None,
         };
-        let rejoined = if new_match {
-            Err(CallError::Gone)
-        } else {
-            let request = RejoinRequest {
-                match_id: match_id.clone(),
-                client_id: self.client_id,
-                reconnect_key: reconnect_key.clone(),
-            };
-            post_any(matchmakers, "/v1/rejoin", &request)
-        };
-        let response = match rejoined {
-            Ok(response) => response,
-            Err(CallError::Gone) => {
-                warn!("match {match_id} is gone, joining another one");
-                join_any(matchmakers, name)?
+        self.pending = Some(post(&args.matchmaker, "/v1/join", &request));
+    }
+
+    /// Ask for a fresh token for the same match (tokens are single-use and short-lived). If the
+    /// match is gone, or `new_match` is set because this one never let us in, join another one.
+    fn refresh(&mut self, args: &ClientArgs, new_match: bool) {
+        match &self.seat {
+            Some(seat) if !new_match => {
+                let request = RejoinRequest {
+                    match_id: seat.match_id.clone(),
+                    client_id: seat.client_id,
+                    reconnect_key: seat.reconnect_key.clone(),
+                };
+                self.pending = Some(post(&args.matchmaker, "/v1/rejoin", &request));
             }
-            Err(CallError::Failed(e)) => return Err(e),
-        };
-        *self = Self::from_response(matchmakers.clone(), name.clone(), response)?;
-        Ok(())
+            _ => self.join(args),
+        }
     }
 
-    fn authentication(&self) -> Result<Authentication, String> {
-        Ok(match &self.credentials {
-            Credentials::Dev { private_key } => Authentication::Manual {
-                server_addr: self.server_addr,
-                client_id: self.client_id,
-                private_key: *private_key,
-                protocol_id: PROTOCOL_ID,
-            },
-            Credentials::Token { token, .. } => Authentication::Token(
-                ConnectToken::try_from_bytes(token).map_err(|e| format!("bad token: {e:?}"))?,
-            ),
-        })
+    /// The reply to the call in flight, once it has arrived.
+    fn poll(&mut self) -> Option<Result<JoinResponse, CallError>> {
+        let reply = self.pending.as_ref()?.lock().ok()?.take()?;
+        self.pending = None;
+        Some(reply)
     }
 }
 
@@ -243,6 +145,7 @@ pub struct SessionPlugin;
 
 impl Plugin for SessionPlugin {
     fn build(&self, app: &mut App) {
+        app.init_resource::<Session>();
         app.insert_resource(LinkState {
             entity: None,
             since_change: 0.0,
@@ -261,11 +164,7 @@ impl Plugin for SessionPlugin {
     }
 }
 
-fn spawn_client(
-    commands: &mut Commands,
-    session: &Session,
-    args: &ClientArgs,
-) -> Result<Entity, String> {
+fn spawn_client(commands: &mut Commands, seat: &Seat, args: &ClientArgs) -> Result<Entity, String> {
     let conditioner = (args.fake_latency_ms > 0).then(|| {
         RecvLinkConditioner::new(LinkConditionerConfig {
             incoming_latency: Duration::from_millis(args.fake_latency_ms),
@@ -273,8 +172,10 @@ fn spawn_client(
             ..default()
         })
     });
+    let token =
+        ConnectToken::try_from_bytes(&seat.token).map_err(|e| format!("bad token: {e:?}"))?;
     let netcode = NetcodeClient::new(
-        session.authentication()?,
+        Authentication::Token(token),
         NetcodeConfig {
             client_timeout_secs: CONNECTION_TIMEOUT_SECS,
             token_expire_secs: TOKEN_EXPIRE_SECS,
@@ -288,32 +189,24 @@ fn spawn_client(
             Client,
             ReplicationReceiver,
             Link::default().with_conditioner(conditioner),
-            LocalAddr(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)),
-            PeerAddr(session.server_addr),
+            PeerAddr(seat.server_addr),
             netcode,
-            UdpIo::default(),
+            WebTransportClientIo {
+                certificate_digest: seat.cert_digest.clone(),
+                target: None,
+            },
         ))
         .id();
     commands.trigger(Connect { entity });
+    info!(
+        "connecting to {} ({}) as client {}",
+        seat.server_addr, seat.match_id, seat.client_id
+    );
     Ok(entity)
 }
 
-fn connect(
-    mut commands: Commands,
-    session: Res<Session>,
-    args: Res<ClientArgs>,
-    mut link: ResMut<LinkState>,
-) {
-    match spawn_client(&mut commands, &session, &args) {
-        Ok(entity) => {
-            info!(
-                "connecting to {} as client {}",
-                session.server_addr, session.client_id
-            );
-            link.entity = Some(entity);
-        }
-        Err(e) => error!("cannot connect: {e}"),
-    }
+fn connect(mut session: ResMut<Session>, args: Res<ClientArgs>) {
+    session.join(&args);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -336,7 +229,33 @@ fn watch_connection(
     >,
     mut exit: MessageWriter<AppExit>,
 ) {
-    // No live client entity (a previous retry failed half-way) counts as disconnected.
+    if let Some(reply) = session.poll() {
+        let seat = match reply {
+            Ok(response) => Seat::from_response(response),
+            Err(CallError::Gone) => {
+                warn!("match is gone, joining another one");
+                session.seat = None;
+                session.join(&args);
+                return;
+            }
+            Err(CallError::Failed(e)) => Err(e),
+        };
+        match seat.and_then(|seat| {
+            let entity = spawn_client(&mut commands, &seat, &args)?;
+            session.seat = Some(seat);
+            Ok(entity)
+        }) {
+            Ok(entity) => link.entity = Some(entity),
+            Err(e) => warn!("could not get into a match: {e}"),
+        }
+        link.since_change = 0.0;
+        return;
+    }
+    if session.pending.is_some() {
+        return;
+    }
+
+    // No live client entity (a previous attempt failed half-way) counts as disconnected.
     let (connected, disconnected) = link
         .entity
         .and_then(|e| clients.get(e).ok())
@@ -373,12 +292,5 @@ fn watch_connection(
         commands.entity(e).despawn();
     }
     let new_match = !link.ever_connected && link.attempts > NEW_MATCH_AFTER_ATTEMPTS;
-    if let Err(e) = session.refresh(new_match) {
-        warn!("could not refresh token: {e}");
-        return;
-    }
-    match spawn_client(&mut commands, &session, &args) {
-        Ok(new_entity) => link.entity = Some(new_entity),
-        Err(e) => warn!("reconnect failed: {e}"),
-    }
+    session.refresh(&args, new_match);
 }

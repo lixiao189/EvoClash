@@ -56,6 +56,7 @@ fn main() {
     });
     app.insert_resource(ReplicationMetadata::new(REPLICATION_INTERVAL));
     app.add_plugins(evoclash_game::SharedPlugin);
+    app.insert_resource(connections::TlsIdentity::self_signed(&config));
     app.insert_resource(config);
     app.add_plugins((
         connections::ConnectionsPlugin,

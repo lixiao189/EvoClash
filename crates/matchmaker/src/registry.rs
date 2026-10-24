@@ -21,6 +21,8 @@ pub const OVERLOADED_TICK_US: u32 = 9_400;
 pub struct MatchInfo {
     pub id: String,
     pub addr: SocketAddr,
+    /// WebTransport certificate hash; unknown until the server's first heartbeat.
+    pub cert_digest: Option<String>,
     pub players: u32,
     pub max_players: u32,
     pub accepting: bool,
@@ -50,6 +52,7 @@ impl MatchInfo {
         Self {
             id,
             addr,
+            cert_digest: None,
             players: 0,
             max_players,
             accepting: true,
@@ -140,6 +143,7 @@ impl Registry {
         let arrived = beat.players.saturating_sub(entry.players) as usize;
         let drop = arrived.min(entry.reservations.len());
         entry.reservations.drain(..drop);
+        entry.cert_digest = Some(beat.cert_digest.clone());
         entry.players = beat.players;
         entry.max_players = beat.max_players;
         entry.accepting = beat.accepting;
@@ -209,6 +213,7 @@ mod tests {
         Heartbeat {
             match_id: id.into(),
             public_addr: "127.0.0.1:7000".into(),
+            cert_digest: "00".repeat(32),
             players,
             max_players: 2,
             accepting: true,
