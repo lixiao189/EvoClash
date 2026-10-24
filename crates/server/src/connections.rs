@@ -70,6 +70,7 @@ impl Plugin for ConnectionsPlugin {
         app.add_systems(Startup, start_server);
         app.add_observer(on_new_link);
         app.add_observer(on_connected);
+        app.add_observer(hide_orphaned_control);
         app.add_systems(FixedUpdate, track_presence.in_set(SimSet::Input));
     }
 }
@@ -174,6 +175,16 @@ fn on_connected(
     ));
 }
 
+/// When a dropped player's link is despawned, Bevy strips the `ControlledBy` relationship from
+/// their body but leaves its `ControlledSend` marker behind. That marker is only filtered by
+/// `ControlledBy`, so without it every client would be told it controls the body (and claim it
+/// as its local player). `on_connected` puts both back if the player returns.
+fn hide_orphaned_control(trigger: On<Remove<ControlledBy>>, mut commands: Commands) {
+    if let Ok(mut entity) = commands.get_entity(trigger.entity) {
+        entity.try_remove::<ControlledSend>();
+    }
+}
+
 pub fn color_for(id: u64) -> [f32; 3] {
     let hue = (id.wrapping_mul(2654435761) % 360) as f32;
     let c = Color::hsl(hue, 0.75, 0.55).to_srgba();
@@ -202,5 +213,33 @@ fn track_presence(
             outbox.announce(format!("{} 离开了废土", player.name));
             commands.entity(entity).despawn();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Despawning a dropped player's link must not leave their body marked as controlled for
+    /// everyone else.
+    #[test]
+    fn dropped_link_leaves_no_control_marker() {
+        let mut app = App::new();
+        app.add_observer(hide_orphaned_control);
+        let link = app.world_mut().spawn_empty().id();
+        let body = app
+            .world_mut()
+            .spawn(ControlledBy {
+                owner: link,
+                lifetime: Lifetime::Persistent,
+            })
+            .id();
+        assert!(app.world().entity(body).contains::<ControlledSend>());
+
+        app.world_mut().despawn(link);
+        app.update();
+        let body = app.world().entity(body);
+        assert!(!body.contains::<ControlledBy>());
+        assert!(!body.contains::<ControlledSend>());
     }
 }
