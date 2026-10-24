@@ -2,6 +2,7 @@
 
 use bevy::prelude::*;
 
+use crate::evolution::{Evolution, SkillState, evolution_speed_mult};
 use crate::map::ArenaMap;
 use crate::net::TICK_HZ;
 use crate::protocol::{Dash, PlayerInput, Vitals};
@@ -45,13 +46,14 @@ pub struct Arena(pub ArenaMap);
 #[derive(Resource, Default)]
 pub struct Obstacles(pub Vec<(Vec2, f32)>);
 
-pub fn speed_mult(vitals: &Vitals) -> f32 {
+/// Armor × EMP × evolution (perks/skills, capped at ×1.3).
+pub fn speed_mult(vitals: &Vitals, evo: &Evolution, skills: &SkillState) -> f32 {
     let emp = if vitals.emp_slow > 0 {
         EMP_SLOW_MULT
     } else {
         1.0
     };
-    vitals.armor.speed_mult() * emp
+    vitals.armor.speed_mult() * emp * evolution_speed_mult(evo, skills)
 }
 
 /// Advance one player by one tick. Writes through `Mut` only when values change, so
@@ -62,6 +64,8 @@ pub fn step_movement(
     mut dash: Mut<Dash>,
     input: &PlayerInput,
     vitals: &Vitals,
+    evo: &Evolution,
+    skills: &SkillState,
     map: &ArenaMap,
     obstacles: &[(Vec2, f32)],
 ) {
@@ -89,7 +93,7 @@ pub fn step_movement(
         d.active -= 1;
         d.dir * DASH_SPEED
     } else {
-        move_dir * PLAYER_SPEED * speed_mult(vitals)
+        move_dir * PLAYER_SPEED * speed_mult(vitals, evo, skills)
     };
 
     if d != *dash {
@@ -113,5 +117,44 @@ mod tests {
         assert_eq!(underdog_mult(3, 1), 1.0);
         assert!((underdog_mult(0, 2) - 1.4).abs() < 1e-6);
         assert_eq!(underdog_mult(0, 4), UNDERDOG_BONUS_MAX);
+    }
+
+    /// Perk/skill speed is capped at ×1.3 inside the shared step, on top of armor.
+    #[test]
+    fn evolution_speed_is_capped_in_step_movement() {
+        use crate::evolution::{MOVE_MULT_CAP, Perk, Skill};
+        use crate::items::ArmorKind;
+        use crate::protocol::Pos;
+
+        let mut evo = Evolution::default();
+        evo.ranks[Perk::LightFoot.index()] = 3;
+        let skills = SkillState {
+            skill_b: Some(Skill::Berserk),
+            active_b: Skill::Berserk.duration(),
+            ..default()
+        };
+        let vitals = Vitals {
+            armor: ArmorKind::PowerArmor,
+            armor_points: 100.0,
+            ..default()
+        };
+        let expected = PLAYER_SPEED * ArmorKind::PowerArmor.speed_mult() * MOVE_MULT_CAP * DT;
+
+        let map = ArenaMap::default();
+        let mut world = World::new();
+        world.spawn((Pos(Vec2::ZERO), Dash::default()));
+        let mut query = world.query::<(&mut Pos, &mut Dash)>();
+        let (pos, dash) = query.single_mut(&mut world).unwrap();
+        let input = PlayerInput {
+            move_x: 1,
+            ..default()
+        };
+        step_movement(pos, dash, &input, &vitals, &evo, &skills, &map, &[]);
+        let (pos, _) = query.single(&world).unwrap();
+        assert!(
+            (pos.0.x - expected).abs() < 1e-3,
+            "{} vs {expected}",
+            pos.0.x
+        );
     }
 }
