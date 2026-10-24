@@ -150,14 +150,14 @@ CI 的镜像冒烟测试会确认匹配服务能提供网页客户端，并拉�
 
 ## CI / CD
 
-- **CI**（`.github/workflows/ci.yml`）：每次 push 到 `main` 和每个 PR 运行 rustfmt、clippy（`-D warnings`）、三平台 `cargo test`、cargo-deny（漏洞 / 许可证 / 来源）、`helm lint`，并构建服务端 Docker 镜像（不推送）后实际运行：匹配服务拉起一局，等它发回心跳才算通过。这样 `Dockerfile` 写坏了，或者二进制在 distroless 基础镜像里起不来，PR 阶段就能发现。分支保护只需要勾选 `CI success` 这一项。
+- **CI**（`.github/workflows/ci.yml`）：每次 push 到 `main` 和每个 PR 运行 rustfmt、clippy（`-D warnings`，含 wasm 客户端）、`cargo test`、cargo-deny（漏洞 / 许可证 / 来源）、`helm lint`，并构建服务端 Docker 镜像（不推送）后实际运行：匹配服务拉起一局，等它发回心跳才算通过。这样 `Dockerfile` 写坏了，或者二进制在 distroless 基础镜像里起不来，PR 阶段就能发现。分支保护只需要勾选 `CI success` 这一项。
 - **发布**（`.github/workflows/release.yml`）：先把 `Cargo.toml` 的 `workspace.package.version` 和 `deploy/helm/evoclash/Chart.yaml` 的 `version` / `appVersion` 改成新版本并合入，然后推送同名 tag：
 
   ```bash
   git tag v0.2.0 && git push origin v0.2.0
   ```
 
-  会构建 Linux x86_64/arm64、macOS arm64、Windows x86_64 的服务端二进制（每个压缩包里都带 `web/` 网页客户端，匹配服务默认就会托管它），附 `SHA256SUMS` 和构建来源证明发布到 GitHub Releases，把服务端镜像推到 `ghcr.io/lixiao189/evoclash-server`（amd64 + arm64），镜像推完后再把 Helm chart 作为 OCI 包推到 `oci://ghcr.io/lixiao189/charts/evoclash`，同样附构建来源证明。带 `-` 的 tag（如 `v0.2.0-rc.1`）标记为预发布，不更新 `latest`。
+  会构建 wasm 网页客户端，打包成 `evoclash-web-vX.Y.Z.tar.gz`，附 `SHA256SUMS` 和构建来源证明发布到 GitHub Releases（不再提供各平台的二进制）；再把服务端镜像（对局服务器 + 匹配服务 + 网页客户端，amd64 + arm64）推到 `ghcr.io/lixiao189/evoclash-server`，镜像推完后再把 Helm chart 作为 OCI 包推到 `oci://ghcr.io/lixiao189/charts/evoclash`，同样附构建来源证明。带 `-` 的 tag（如 `v0.2.0-rc.1`）标记为预发布，不更新 `latest`。
 
   ```bash
   docker run --network host ghcr.io/lixiao189/evoclash-server --listen 0.0.0.0:8080 --public-host <公网 IP>

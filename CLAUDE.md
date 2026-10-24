@@ -13,7 +13,7 @@ Never commit or push directly to `main`. For every change:
 3. Open a PR against `main`.
 4. Enable auto-fix and auto-merge on the PR.
 
-Branch protection requires the single `CI success` check (it aggregates fmt, clippy, the 3-OS test matrix, cargo-deny, helm lint, and a Docker image build that runs the image and waits for a launched match to heartbeat).
+Branch protection requires the single `CI success` check (it aggregates fmt, clippy (native + wasm), tests, cargo-deny, helm lint, and a Docker image build that runs the image and waits for a launched match to heartbeat).
 
 ## Commands
 
@@ -59,4 +59,4 @@ Workspace lints allow clippy `type_complexity` and `too_many_arguments` (normal 
 
 ## Releases
 
-Bump `workspace.package.version` in `Cargo.toml` and `version`/`appVersion` in `deploy/helm/evoclash/Chart.yaml`, merge it, then push a matching tag `vX.Y.Z` (tags containing `-` are pre-releases). `release.yml` checks that the tag matches both versions, builds the web client once and the server/matchmaker binaries for each platform (each archive and the image bundle `web/`), pushes `ghcr.io/lixiao189/evoclash-server`, then pushes the chart to `oci://ghcr.io/lixiao189/charts/evoclash`.
+Bump `workspace.package.version` in `Cargo.toml` and `version`/`appVersion` in `deploy/helm/evoclash/Chart.yaml`, merge it, then push a matching tag `vX.Y.Z` (tags containing `-` are pre-releases). `release.yml` checks that the tag matches both versions, builds the web client (the only release asset, `evoclash-web-vX.Y.Z.tar.gz`) and the Linux server/matchmaker binaries that only go into the image (with `web/` bundled), pushes `ghcr.io/lixiao189/evoclash-server`, then pushes the chart to `oci://ghcr.io/lixiao189/charts/evoclash`.
