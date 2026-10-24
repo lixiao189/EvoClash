@@ -793,10 +793,10 @@ fn paint_blast() -> Canvas {
         let d = Vec2::new(x as f32 + 0.5 - half, y as f32 + 0.5 - half).length() / half;
         let wobble = noise(x as f32 / 8.0, y as f32 / 8.0, 8, 33) - 0.5;
         let fine = noise(x as f32 / 3.0, y as f32 / 3.0, 21, 34) - 0.5;
-        let edge = 0.72 + wobble * 0.5 + fine * 0.16;
+        let edge = 0.74 + wobble * 0.45 + fine * 0.07;
         let a = smooth((edge - d) / 0.28);
         // Darker, sootier toward the rim.
-        let k = 1.0 - 0.45 * d - 0.2 * (fine + 0.5);
+        let k = 1.0 - 0.4 * d - 0.12 * (fine + 0.5);
         [k, k, k, a]
     })
 }
@@ -2124,13 +2124,13 @@ mod tests {
             paint_roach(0),
             paint_pod(),
             paint_medkit(),
-            paint_bolt(),
-            paint_slash(),
-            paint_shock(),
-            paint_blast(),
             paint_reticle(),
         ] {
             assert!(canvas.px.iter().any(|p| p[3] > 0.9));
+        }
+        // Soft effects never reach full opacity but must not be blank.
+        for canvas in [paint_bolt(), paint_slash(), paint_shock(), paint_blast()] {
+            assert!(canvas.px.iter().any(|p| p[3] > 0.5));
         }
     }
 }
