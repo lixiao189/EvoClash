@@ -58,6 +58,26 @@ Key cross-cutting points:
 
 Workspace lints allow clippy `type_complexity` and `too_many_arguments` (normal for Bevy systems).
 
+## Sub-agent team
+
+Four project agents live in `.claude/agents/`. The main session is the lead: it talks to the user, splits the work, briefs agents, merges their results, and alone does git (branch/commit/PR).
+
+| Agent | Model | Owns | Use for |
+|---|---|---|---|
+| `game-designer` | sonnet | README `## 玩法` (no code) | rules, numbers, balance → short spec |
+| `server-dev` | sonnet | `crates/server`, `crates/matchmaker`, `crates/game`, `deploy/` | authoritative rules, protocol, bots, monsters, matchmaking |
+| `client-dev` | sonnet | `crates/client` | rendering, sprites, effects, HUD, input, prediction |
+| `game-tester` | haiku | `#[cfg(test)]` code only | fmt/clippy/tests, missing tests, failure triage |
+
+Keep it cheap:
+
+- Don't spawn for small things. One-file fixes, questions and quick reads stay in the main session; agents are for multi-file features or a long noisy step (a full CI run).
+- Pipeline only as far as needed: `game-designer` only when rules/numbers are undecided → `server-dev` (shared `crates/game` first, since the client builds on it) → `client-dev` → `game-tester`. Server and client may run in parallel only when the protocol is already settled and they touch no shared file.
+- Briefs are short and self-contained: goal, exact files/symbols, acceptance check, and the spec lines that matter — not the whole conversation. Agents already get this file, so don't repeat it.
+- Follow up with `SendMessage` to the agent that has the context instead of spawning a fresh one.
+- Agents run scoped, quiet checks (`-p <crate>`, `-q`, `--message-format=short`); the full `make check` runs once, in `game-tester`, before the PR.
+- Reports are capped (≈15 lines, file:line refs, no code dumps); relay only what the user needs.
+
 ## Releases
 
 Bump `workspace.package.version` in `Cargo.toml` and `version`/`appVersion` in `deploy/helm/evoclash/Chart.yaml`, merge it, then push a matching tag `vX.Y.Z` (tags containing `-` are pre-releases). `release.yml` checks that the tag matches both versions, builds the web client (the only release asset, `evoclash-web-vX.Y.Z.tar.gz`) and the Linux server/matchmaker binaries that only go into the image (with `web/` bundled), pushes `ghcr.io/lixiao189/evoclash-server`, then pushes the chart to `oci://ghcr.io/lixiao189/charts/evoclash`.
