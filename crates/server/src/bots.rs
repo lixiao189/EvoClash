@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
+use evoclash_game::evolution::{EvoPath, Evolution, Skill, SkillState};
 use evoclash_game::items::{ArmorKind, WeaponKind};
 use evoclash_game::map::ARENA_HALF;
 use evoclash_game::nav::{NavGrid, next_waypoint};
@@ -14,6 +15,10 @@ use crate::combat::auto_wants;
 use crate::config::ServerConfig;
 use crate::connections::Human;
 use crate::gameplay::{CurrentInput, SimSet, spawn_combatant};
+use evoclash_game::evolution::seen_from;
+
+/// Bots fire their skills at enemies this close.
+const SKILL_RANGE: f32 = 500.0;
 
 const SIGHT: f32 = 820.0;
 const THINK_EVERY: u16 = 4;
@@ -51,6 +56,8 @@ pub struct Bot {
     target: Option<Entity>,
     /// Think cycles spent on the current target.
     locked_for: u16,
+    /// Evolution path this bot favours when picking perks.
+    pub path: EvoPath,
 }
 
 /// Walkable grid for the current arena; raiders path with it too.
@@ -134,6 +141,7 @@ fn balance_bots(
             aim_error: rand::rng().random_range(-0.12..0.12),
             target: None,
             locked_for: 0,
+            path: EvoPath::ALL[rand::rng().random_range(0..EvoPath::ALL.len())],
         });
     } else if bot_count > wanted
         && let Some((entity, player)) = bots.iter().next()
@@ -163,7 +171,16 @@ fn steer(input: &mut PlayerInput, dir: Vec2) {
 fn think(
     arena: Res<Arena>,
     nav: Option<Res<Nav>>,
-    mut bots: Query<(Entity, &mut Bot, &mut CurrentInput, &Pos, &Vitals, &Loadout)>,
+    mut bots: Query<(
+        Entity,
+        &mut Bot,
+        &mut CurrentInput,
+        &Pos,
+        &Vitals,
+        &Loadout,
+        &Evolution,
+        &SkillState,
+    )>,
     others: Query<
         (Entity, &Pos, &Vitals, Option<&Monster>, Has<Human>),
         Or<(With<Player>, With<Monster>)>,
@@ -180,7 +197,7 @@ fn think(
             *claims.entry(target).or_default() += 1;
         }
     }
-    for (entity, mut bot, mut current, pos, vitals, loadout) in &mut bots {
+    for (entity, mut bot, mut current, pos, vitals, loadout, evo, skills) in &mut bots {
         if !vitals.alive {
             current.0 = PlayerInput::default();
             bot.target = None;
@@ -210,7 +227,13 @@ fn think(
         let previous = bot.target;
         let enemy = others
             .iter()
-            .filter(|(e, _, v, ..)| *e != entity && v.alive && v.shield == 0)
+            .filter(|(e, p, v, ..)| {
+                *e != entity
+                    && v.alive
+                    && v.shield == 0
+                    // Stealthed enemies are only noticed up close.
+                    && seen_from(v, p.0, pos.0)
+            })
             .map(|(e, p, v, monster, human)| {
                 let dist = p.0.distance(pos.0);
                 let others_on_it =
@@ -258,11 +281,18 @@ fn think(
             input.dash = dist < 260.0 && rng.random_bool(0.04);
             input.throw =
                 loadout.emps > 0 && enemy_armor >= 50.0 && dist < 420.0 && rng.random_bool(0.1);
+            // Hurt and hidden: slip away instead of giving yourself up.
+            if vitals.stealth > 0 && vitals.hp < 0.5 * vitals.max_hp {
+                input.fire = false;
+                input.throw = false;
+                steer(&mut input, -to_enemy);
+            }
+            input.skill_b = skills.skill_b.is_some() && skills.cd_b == 0 && dist < SKILL_RANGE;
         } else {
             // Scavenge: head for the closest upgrade in sight, otherwise roam.
             let upgrade = items
                 .iter()
-                .filter(|(_, pickup)| auto_wants(&pickup.item, vitals, loadout))
+                .filter(|(_, pickup)| auto_wants(&pickup.item, vitals, loadout, evo))
                 .map(|(p, _)| p.0)
                 .filter(|p| p.distance(pos.0) < SIGHT * 1.3 && (safe(*p) || vitals.hp > 70.0))
                 .min_by(|a, b| a.distance(pos.0).total_cmp(&b.distance(pos.0)));
@@ -288,6 +318,13 @@ fn think(
             steer(&mut input, dir);
             input.aim = dir.normalize_or(Vec2::X);
         }
+        // Skill A: on a nearby target, or to save yourself (shield, stealth) when hurt.
+        let near = enemy.is_some_and(|(.., dist, _)| dist < SKILL_RANGE);
+        let hurt = vitals.hp < 0.5 * vitals.max_hp;
+        input.skill_a = skills.cd_a == 0
+            && skills.skill_a.is_some_and(|skill| {
+                near || (hurt && matches!(skill, Skill::EnergyShield | Skill::Stealth))
+            });
         current.0 = input;
     }
 }

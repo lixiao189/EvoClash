@@ -1,5 +1,5 @@
 //! Minimap in the top-left corner: the layout painted once per match, with live markers for
-//! you, bounty targets and the vault.
+//! you, bounty targets (and anyone a trap gave away) and the vault.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::ImageSampler;
@@ -176,7 +176,7 @@ fn place_markers(
     };
     let bounties: Vec<Vec2> = players
         .iter()
-        .filter(|(_, v, s)| v.alive && s.has_bounty())
+        .filter(|(_, v, s)| v.alive && (s.has_bounty() || v.revealed > 0))
         .map(|(p, ..)| p.0)
         .take(BOUNTY_MARKERS)
         .collect();

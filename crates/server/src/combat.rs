@@ -4,10 +4,11 @@
 use std::collections::HashSet;
 
 use bevy::prelude::*;
+use evoclash_game::evolution::{Evolution, SkillState};
 use evoclash_game::items::{ArmorKind, Item, WeaponKind};
 use evoclash_game::map::segment_circle;
 use evoclash_game::protocol::*;
-use evoclash_game::sim::{Arena, DT, MAX_HP, PLAYER_RADIUS};
+use evoclash_game::sim::{Arena, DT, PLAYER_RADIUS};
 use lightyear::prelude::*;
 
 use crate::connections::Human;
@@ -16,6 +17,7 @@ use crate::gameplay::{
     spawn_pickup,
 };
 use crate::monsters::spawn_puddle;
+use crate::skills::TurretBrain;
 
 const PICKUP_RADIUS: f32 = 46.0;
 const MAX_EMPS: u8 = 3;
@@ -50,8 +52,10 @@ pub struct Flight {
     already_hit: Vec<Entity>,
     /// Fired by a monster: passes through other monsters and props.
     fauna: bool,
-    /// Kill-feed cause when it isn't a weapon.
+    /// Kill-feed name when it isn't the weapon's (e.g. "自动炮塔", "酸液").
     cause: Option<&'static str>,
+    /// EMP blast radius.
+    radius: f32,
 }
 
 impl Flight {
@@ -67,6 +71,7 @@ impl Flight {
             already_hit: Vec::new(),
             fauna: true,
             cause: Some(cause),
+            radius: 0.0,
         }
     }
 
@@ -83,6 +88,23 @@ impl Flight {
             already_hit: Vec::new(),
             fauna: true,
             cause: None,
+            radius: 0.0,
+        }
+    }
+
+    /// A shot fired on someone's behalf (a turret): hits are credited to `owner`.
+    pub fn turret_shot(owner: Entity, ttl: u16, damage: f32, cause: &'static str) -> Self {
+        Self {
+            owner,
+            rewind: 0,
+            ttl,
+            damage,
+            armor_mult: 1.0,
+            piercing: false,
+            already_hit: Vec::new(),
+            fauna: false,
+            cause: Some(cause),
+            radius: 0.0,
         }
     }
 }
@@ -136,6 +158,8 @@ fn fire_weapons(
         &mut Cooldowns,
         &Rewind,
         Option<&Human>,
+        &Evolution,
+        &SkillState,
     )>,
     targets: Query<(
         Entity,
@@ -152,21 +176,28 @@ fn fire_weapons(
         return;
     }
     let mut rng = rand::rng();
-    for (entity, pos, input, vitals, mut loadout, mut cd, rewind, human) in &mut shooters {
+    for (entity, pos, input, vitals, mut loadout, mut cd, rewind, human, evo, skills) in
+        &mut shooters
+    {
         let input = &input.0;
         if !vitals.alive || !input.fire || cd.fire > 0 {
             continue;
         }
         let aim = input.aim.normalize_or(Vec2::X);
         let stats = loadout.weapon.stats();
-        cd.fire = stats.cooldown;
+        cd.fire = evo.fire_cooldown(stats.cooldown);
+        // Perks (利爪, 能量聚焦) and 狂暴.
+        let damage_amount =
+            stats.damage * evo.weapon_damage_mult(loadout.weapon) * skills.damage_mult();
+        let armor_mult = stats.armor_mult + evo.armor_mult_bonus(loadout.weapon);
 
         if stats.melee {
             for (target, target_pos, target_vitals, history, monster, prop) in &targets {
                 if target == entity || !target_vitals.alive {
                     continue;
                 }
-                let reach = stats.range_or_speed + body_radius(monster, prop);
+                let reach =
+                    stats.range_or_speed + evo.melee_reach_bonus() + body_radius(monster, prop);
                 let seen_at = rewound(history, tick.0, rewind.0, target_pos.0);
                 let offset = seen_at - pos.0;
                 let dist = offset.length();
@@ -179,8 +210,8 @@ fn fire_weapons(
                 damage.0.push(Damage {
                     target,
                     attacker: Some(entity),
-                    amount: stats.damage,
-                    armor_mult: stats.armor_mult,
+                    amount: damage_amount,
+                    armor_mult,
                     weapon: Some(loadout.weapon),
                     emp: false,
                     cause: None,
@@ -218,12 +249,13 @@ fn fire_weapons(
                     owner: entity,
                     rewind: rewind.0,
                     ttl: stats.lifetime,
-                    damage: stats.damage,
-                    armor_mult: stats.armor_mult,
+                    damage: damage_amount,
+                    armor_mult,
                     piercing: stats.piercing,
                     already_hit: Vec::new(),
                     fauna: false,
                     cause: None,
+                    radius: 0.0,
                 },
                 projectile_replication(human),
             ));
@@ -247,12 +279,13 @@ fn throw_emps(
         &mut Loadout,
         &mut Cooldowns,
         Option<&Human>,
+        &Evolution,
     )>,
 ) {
     if !combat_allowed(&state) {
         return;
     }
-    for (entity, pos, input, vitals, mut loadout, mut cd, human) in &mut throwers {
+    for (entity, pos, input, vitals, mut loadout, mut cd, human, evo) in &mut throwers {
         if !vitals.alive || !input.0.throw || cd.throw > 0 || loadout.emps == 0 {
             continue;
         }
@@ -276,13 +309,14 @@ fn throw_emps(
                 already_hit: Vec::new(),
                 fauna: false,
                 cause: None,
+                radius: EMP_RADIUS * evo.emp_radius_mult(),
             },
             projectile_replication(human),
         ));
     }
 }
 
-fn step_projectiles(
+pub(crate) fn step_projectiles(
     mut commands: Commands,
     tick: Res<SimTick>,
     arena: Res<Arena>,
@@ -295,6 +329,7 @@ fn step_projectiles(
             &PosHistory,
             Option<&Monster>,
             Option<&Prop>,
+            Option<&TurretBrain>,
         ),
         Without<Projectile>,
     >,
@@ -319,7 +354,7 @@ fn step_projectiles(
                         if target == flight.owner || !vitals.alive {
                             continue;
                         }
-                        if target_pos.0.distance(at) <= EMP_RADIUS
+                        if target_pos.0.distance(at) <= flight.radius
                             && arena.line_of_sight(at, target_pos.0)
                         {
                             damage.0.push(Damage {
@@ -335,7 +370,7 @@ fn step_projectiles(
                     }
                     outbox.fast.push(GameEvent::Boom {
                         pos: at,
-                        radius: EMP_RADIUS,
+                        radius: flight.radius,
                         fire: false,
                     });
                     commands.entity(entity).despawn();
@@ -355,14 +390,16 @@ fn step_projectiles(
                 let limit = wall_t.unwrap_or(1.0);
                 let mut hits: Vec<(f32, Entity)> = targets
                     .iter()
-                    .filter(|(target, _, vitals, _, monster, prop)| {
+                    .filter(|(target, _, vitals, _, monster, prop, turret)| {
                         *target != flight.owner
                             && vitals.alive
+                            // Your own turret doesn't soak up your shots.
+                            && turret.is_none_or(|t| t.owner() != flight.owner)
                             // Monsters don't hurt each other, or set off the scenery.
                             && !(fauna && (monster.is_some() || prop.is_some()))
                             && !flight.already_hit.contains(target)
                     })
-                    .filter_map(|(target, target_pos, _, history, monster, prop)| {
+                    .filter_map(|(target, target_pos, _, history, monster, prop, _)| {
                         let seen_at = rewound(history, tick.0, flight.rewind, target_pos.0);
                         segment_circle(from, to, seen_at, body_radius(monster, prop) + 3.0)
                             .filter(|t| *t <= limit)
@@ -403,26 +440,26 @@ fn step_projectiles(
 }
 
 /// Would a player grab this automatically just by walking over it?
-pub fn auto_wants(item: &Item, vitals: &Vitals, loadout: &Loadout) -> bool {
+pub fn auto_wants(item: &Item, vitals: &Vitals, loadout: &Loadout, evo: &Evolution) -> bool {
     match *item {
         Item::Weapon { kind, .. } => {
             kind.stats().tier > loadout.weapon.stats().tier
                 || (kind == loadout.weapon
                     && kind != WeaponKind::Stick
-                    && loadout.ammo < kind.stats().max_ammo)
+                    && loadout.ammo < evo.max_ammo(kind))
         }
         Item::Armor { points, .. } => points > vitals.armor_points,
-        Item::Emp => loadout.emps < MAX_EMPS,
-        Item::Medkit => vitals.hp < MAX_HP,
+        Item::Emp => loadout.emps < evo.emp_cap(MAX_EMPS),
+        Item::Medkit => vitals.hp < vitals.max_hp,
     }
 }
 
 /// Equip `item`, returning whatever had to be put down to make room.
-fn take(item: Item, vitals: &mut Vitals, loadout: &mut Loadout) -> Option<Item> {
+fn take(item: Item, vitals: &mut Vitals, loadout: &mut Loadout, evo: &Evolution) -> Option<Item> {
     match item {
         Item::Weapon { kind, ammo } => {
             if kind == loadout.weapon {
-                loadout.ammo = (loadout.ammo + ammo).min(kind.stats().max_ammo);
+                loadout.ammo = (loadout.ammo + ammo).min(evo.max_ammo(kind));
                 return None;
             }
             let old =
@@ -442,15 +479,17 @@ fn take(item: Item, vitals: &mut Vitals, loadout: &mut Loadout) -> Option<Item> 
                 },
             );
             vitals.armor = kind;
-            vitals.armor_points = points;
+            // 复合装甲 raises the cap and tops fresh armor up to it.
+            let bonus = evo.armor_cap(kind) - kind.max_points();
+            vitals.armor_points = (points + bonus).min(evo.armor_cap(kind)).max(points);
             old
         }
         Item::Emp => {
-            loadout.emps = (loadout.emps + 1).min(MAX_EMPS);
+            loadout.emps = (loadout.emps + 1).min(evo.emp_cap(MAX_EMPS));
             None
         }
         Item::Medkit => {
-            vitals.hp = (vitals.hp + 50.0).min(MAX_HP);
+            vitals.hp = (vitals.hp + 50.0).min(vitals.max_hp);
             None
         }
     }
@@ -464,11 +503,12 @@ fn pickups(
         &mut Vitals,
         &mut Loadout,
         &mut Cooldowns,
+        &Evolution,
     )>,
     items: Query<(Entity, &Pos, &Pickup)>,
 ) {
     let mut taken = HashSet::new();
-    for (pos, input, mut vitals, mut loadout, mut cd) in &mut players {
+    for (pos, input, mut vitals, mut loadout, mut cd, evo) in &mut players {
         if !vitals.alive {
             continue;
         }
@@ -484,12 +524,12 @@ fn pickups(
         near.sort_by(|a, b| a.0.total_cmp(&b.0));
         let forced = input.0.interact && cd.interact == 0;
         for (_, entity, item) in near {
-            if !forced && !auto_wants(&item, &vitals, &loadout) {
+            if !forced && !auto_wants(&item, &vitals, &loadout, evo) {
                 continue;
             }
             taken.insert(entity);
             commands.entity(entity).despawn();
-            if let Some(dropped) = take(item, &mut vitals, &mut loadout) {
+            if let Some(dropped) = take(item, &mut vitals, &mut loadout, evo) {
                 spawn_pickup(
                     &mut commands,
                     dropped,

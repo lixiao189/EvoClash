@@ -8,8 +8,8 @@
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::{PI, TAU};
 
-use bevy::ecs::message::Message;
 use bevy::prelude::*;
+use evoclash_game::evolution::{STEALTH_SIGHT, seen_from};
 use evoclash_game::items::{ArmorKind, Item, WeaponKind, roll_loot};
 use evoclash_game::map::{ARENA_HALF, Biome, Block, MARGIN, VAULT_CENTER};
 use evoclash_game::nav::next_waypoint;
@@ -22,6 +22,7 @@ use crate::boss::{self, BossState};
 use crate::bots::{Nav, aim_toward, engage_range};
 use crate::combat::{Flight, projectile_replication};
 use crate::config::ServerConfig;
+use crate::evolution::{Dealt, Hit, XpAward, XpQueue};
 use crate::gameplay::{
     Damage, DamageQueue, Outbox, PosHistory, ResetRequested, SimSet, SimTick, TICKS_PER_SEC,
     match_flow, reset_match, resolve_damage, spawn_pickup,
@@ -168,14 +169,6 @@ fn kind_index(kind: MonsterKind) -> usize {
         .iter()
         .position(|k| *k == kind)
         .unwrap_or(0)
-}
-
-/// Experience earned by a player. There is no XP system yet: this is its hook. Every
-/// monster kill sends the killer `Monster::xp()`; the behemoth splits its XP by damage share.
-#[derive(Message, Debug, Clone, Copy, PartialEq)]
-pub struct XpEarned {
-    pub player: Entity,
-    pub amount: u32,
 }
 
 /// Server-only monster state.
@@ -341,8 +334,7 @@ pub struct MonstersPlugin;
 impl Plugin for MonstersPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Spawner>()
-            .init_resource::<GhoulBlasts>()
-            .add_message::<XpEarned>();
+            .init_resource::<GhoulBlasts>();
         app.add_systems(
             FixedUpdate,
             (
@@ -572,10 +564,30 @@ pub fn shoot(
 // ---------------------------------------------------------------- movement
 
 /// Nearest living combatant, if any.
-pub fn nearest(players: &[(Entity, Vec2)], from: Vec2) -> Option<(Entity, Vec2, f32)> {
+/// A living player a monster might go after: entity, position, and whether they are cloaked
+/// (stealthed and not revealed).
+pub type Prey = (Entity, Vec2, bool);
+
+/// Every living player as [`Prey`].
+pub fn prey<'a>(players: impl Iterator<Item = (Entity, &'a Pos, &'a Vitals)>) -> Vec<Prey> {
+    players
+        .filter(|(_, _, v)| v.alive)
+        .map(|(e, p, v)| (e, p.0, !seen_from(v, p.0, Vec2::splat(f32::INFINITY))))
+        .collect()
+}
+
+/// Like bots, monsters lose track of a cloaked player beyond `STEALTH_SIGHT`.
+pub fn noticed(cloaked: bool, distance: f32) -> bool {
+    !cloaked || distance <= STEALTH_SIGHT
+}
+
+/// The closest player this monster can notice.
+pub fn nearest(players: &[Prey], from: Vec2) -> Option<(Entity, Vec2, f32)> {
     players
         .iter()
-        .map(|(e, p)| (*e, *p, p.distance(from)))
+        .map(|(e, p, c)| (*e, *p, p.distance(from), *c))
+        .filter(|(.., d, c)| noticed(*c, *d))
+        .map(|(e, p, d, _)| (e, p, d))
         .min_by(|a, b| a.2.total_cmp(&b.2))
 }
 
@@ -617,11 +629,7 @@ fn roam(
     )>,
     players: Query<(Entity, &Pos, &Vitals), (With<Player>, Without<Monster>)>,
 ) {
-    let alive: Vec<(Entity, Vec2)> = players
-        .iter()
-        .filter(|(_, _, v)| v.alive)
-        .map(|(e, p, _)| (e, p.0))
-        .collect();
+    let alive = prey(players.iter());
     let mut rng = rand::rng();
 
     // Each dog pack follows its lowest-slot member: (slot, position, heading).
@@ -810,7 +818,7 @@ fn roam(
 fn raider_think(
     brain: &mut Brain,
     at: Vec2,
-    alive: &[(Entity, Vec2)],
+    alive: &[Prey],
     arena: &Arena,
     nav: Option<&Nav>,
     rng: &mut impl Rng,
@@ -826,10 +834,14 @@ fn raider_think(
     let provoked = brain.provoked > 0;
     let enemy = alive
         .iter()
-        .map(|(e, p)| (*e, *p, p.distance(at)))
-        .filter(|(_, p, d)| {
-            *d < RAIDER_SIGHT && (provoked || turf.contains(*p)) && arena.line_of_sight(at, *p)
+        .map(|(e, p, c)| (*e, *p, p.distance(at), *c))
+        .filter(|(_, p, d, c)| {
+            noticed(*c, *d)
+                && *d < RAIDER_SIGHT
+                && (provoked || turf.contains(*p))
+                && arena.line_of_sight(at, *p)
         })
+        .map(|(e, p, d, _)| (e, p, d))
         .min_by(|a, b| a.2.total_cmp(&b.2));
     let previous = brain.target;
     brain.target = enemy.map(|(e, ..)| e);
@@ -906,11 +918,7 @@ fn attack(
     if state.phase == Phase::Intermission {
         return;
     }
-    let alive: Vec<(Entity, Vec2)> = players
-        .iter()
-        .filter(|(_, _, v)| v.alive)
-        .map(|(e, p, _)| (e, p.0))
-        .collect();
+    let alive = prey(players.iter());
     let mut rng = rand::rng();
     for (entity, monster, pos, mut brain, mut mstate, mut vitals) in &mut monsters {
         let kind = monster.kind;
@@ -925,8 +933,8 @@ fn attack(
         let at = pos.0;
         let reach = kind.radius() + PLAYER_RADIUS + 4.0;
         let bite = |amount: f32, damage: &mut DamageQueue, cause| {
-            let victim = alive.iter().find(|(_, p)| p.distance(at) <= reach);
-            if let Some((target, _)) = victim {
+            let victim = alive.iter().find(|(_, p, _)| p.distance(at) <= reach);
+            if let Some((target, ..)) = victim {
                 damage.0.push(Damage {
                     target: *target,
                     attacker: Some(entity),
@@ -980,7 +988,7 @@ fn attack(
             }
             MonsterKind::Ghoul => {
                 let close = GHOUL_ARM_RANGE + kind.radius();
-                if alive.iter().any(|(_, p)| p.distance(at) <= close) {
+                if alive.iter().any(|(_, p, _)| p.distance(at) <= close) {
                     let new = MonsterState {
                         action: MonsterAction::Arming,
                         fuse: GHOUL_FUSE,
@@ -1192,6 +1200,8 @@ fn drops(monster: Monster, brain: &Brain, rng: &mut impl Rng) -> Vec<Item> {
 #[allow(clippy::type_complexity)]
 fn resolve_monster_damage(
     mut commands: Commands,
+    mut xp: ResMut<XpQueue>,
+    mut dealt: ResMut<Dealt>,
     mut queue: ResMut<DamageQueue>,
     mut outbox: ResMut<Outbox>,
     mut monsters: Query<(&Monster, &Pos, &mut Vitals, &mut Brain, &MonsterState)>,
@@ -1199,7 +1209,6 @@ fn resolve_monster_damage(
     positions: Query<&Pos>,
     mut blasts: ResMut<GhoulBlasts>,
     mut boss: ResMut<BossState>,
-    mut xp: MessageWriter<XpEarned>,
 ) {
     let mut rng = rand::rng();
     queue.0.retain(|dmg| {
@@ -1248,6 +1257,14 @@ fn resolve_monster_damage(
                 .and_then(|a| players.get(a).ok())
                 .map_or(0, |(_, p, _)| p.client_id),
         });
+        if let Some(by) = dmg.attacker {
+            let melee = dmg.cause.is_none() && dmg.weapon.is_some_and(|w| w.stats().melee);
+            dealt.0.push(Hit {
+                attacker: by,
+                amount,
+                melee,
+            });
+        }
         if vitals.hp > 0.0 {
             return false;
         }
@@ -1276,13 +1293,18 @@ fn resolve_monster_damage(
             };
             spawn_pickup(&mut commands, item, pos.0 + offset, Some(LOOT_TTL));
         }
+        if let Some(by) = dmg.attacker {
+            // Non-players (raiders) are skipped by `grant_xp`.
+            xp.0.push(XpAward {
+                to: by,
+                base: monster.xp(),
+                pos: pos.0,
+                loot: false,
+            });
+        }
         if let Some(killer) = player_attacker
             && let Ok((_, player, mut stats)) = players.get_mut(killer)
         {
-            xp.write(XpEarned {
-                player: killer,
-                amount: monster.xp(),
-            });
             let points = monster.score();
             if points > 0 {
                 stats.score += points;

@@ -9,7 +9,7 @@
 //! Reward: 3 points to the top damage dealer only, by damage credit that halves every 8 s,
 //! so a last-second steal doesn't pay. Whoever leads the scoreboard by 5+ deals less to it,
 //! and a trailing player (≤40% of the leader's score) with ≥15% of the damage gets +1.
-//! XP is split by total damage share through `XpEarned`.
+//! XP is split by total damage share through the evolution `XpQueue`.
 
 use std::collections::HashMap;
 use std::f32::consts::TAU;
@@ -23,13 +23,13 @@ use rand::Rng;
 
 use crate::combat::Flight;
 use crate::connections::Human;
+use crate::evolution::{XpAward, XpQueue, grant_xp};
 use crate::gameplay::{
     Damage, DamageQueue, MATCH_TICKS, Outbox, ResetRequested, SimSet, TICKS_PER_SEC, match_flow,
     reset_match, resolve_damage, spawn_pickup,
 };
 use crate::monsters::{
-    Brain, MAX_LIVE, XpEarned, nearest, over_building, set_state, shoot, spawn_monster,
-    spawn_puddle,
+    Brain, MAX_LIVE, nearest, over_building, prey, set_state, shoot, spawn_monster, spawn_puddle,
 };
 
 pub const ANNOUNCE_AT: u32 = 180 * TICKS_PER_SEC;
@@ -317,7 +317,10 @@ impl Plugin for BossPlugin {
             FixedUpdate,
             (
                 behemoth.in_set(SimSet::Combat),
-                reward.in_set(SimSet::Resolve).after(resolve_damage),
+                reward
+                    .in_set(SimSet::Resolve)
+                    .after(resolve_damage)
+                    .before(grant_xp),
                 boss_flow
                     .in_set(SimSet::Flow)
                     .after(match_flow)
@@ -415,7 +418,7 @@ fn reward(
     mut boss: ResMut<BossState>,
     mut players: Query<(Entity, &Player, &mut Stats)>,
     mut outbox: ResMut<Outbox>,
-    mut xp: MessageWriter<XpEarned>,
+    mut xp: ResMut<XpQueue>,
 ) {
     let Some(at) = boss.slain_at.take() else {
         return;
@@ -440,9 +443,11 @@ fn reward(
             continue;
         };
         if award.xp > 0 {
-            xp.write(XpEarned {
-                player: award.entity,
-                amount: award.xp,
+            xp.0.push(XpAward {
+                to: award.entity,
+                base: award.xp,
+                pos: at,
+                loot: false,
             });
         }
         if award.score == 0 {
@@ -487,11 +492,7 @@ fn behemoth(
     if state.phase == Phase::Intermission {
         return;
     }
-    let alive: Vec<(Entity, Vec2)> = players
-        .iter()
-        .filter(|(_, _, v)| v.alive)
-        .map(|(e, p, _)| (e, p.0))
-        .collect();
+    let alive = prey(players.iter());
     let mut live_monsters = monsters.iter().count();
     let mut rng = rand::rng();
     let radius = MonsterKind::Behemoth.radius();
@@ -542,7 +543,7 @@ fn behemoth(
         b.act = match b.act {
             Act::Slam(t) if t > 1 => Act::Slam(t - 1),
             Act::Slam(_) => {
-                for (victim, p) in &alive {
+                for (victim, p, _) in &alive {
                     if p.distance(at) <= BEHEMOTH_SLAM_RADIUS + PLAYER_RADIUS {
                         hit(&mut damage, *victim, SLAM_DAMAGE, "重踏");
                     }
@@ -562,7 +563,7 @@ fn behemoth(
             }
             Act::Charging(t) => {
                 velocity = b.charge_dir * CHARGE_SPEED;
-                for (victim, p) in &alive {
+                for (victim, p, _) in &alive {
                     if p.distance(at) <= radius + PLAYER_RADIUS && !b.charge_hit.contains(victim) {
                         b.charge_hit.push(*victim);
                         hit(&mut damage, *victim, CHARGE_DAMAGE, "冲撞");

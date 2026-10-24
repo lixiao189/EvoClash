@@ -3,13 +3,15 @@
 //! armor.
 
 use bevy::prelude::*;
+use evoclash_game::evolution::{Evolution, VAULT_SAFE_XP, crate_xp, safe_xp};
 use evoclash_game::items::{ArmorKind, Item, roll_loot};
-use evoclash_game::map::PropKind;
+use evoclash_game::map::{Biome, PropKind};
 use evoclash_game::protocol::*;
 use evoclash_game::sim::{Arena, Obstacles, PLAYER_RADIUS};
 use lightyear::prelude::*;
 use rand::Rng;
 
+use crate::evolution::{XpAward, XpQueue};
 use crate::gameplay::{
     CurrentInput, Damage, DamageQueue, Outbox, PosHistory, SimSet, SimTick, TICKS_PER_SEC,
     resolve_damage, spawn_pickup,
@@ -18,8 +20,6 @@ use crate::gameplay::{
 const CRATE_RESPAWN_TICKS: u32 = 40 * TICKS_PER_SEC;
 const BARREL_RESPAWN_TICKS: u32 = 45 * TICKS_PER_SEC;
 const LOOT_TTL: u32 = 30 * TICKS_PER_SEC;
-/// Holding interact this long next to a safe cracks it.
-const CRACK_TICKS: u32 = (2.5 * TICKS_PER_SEC as f32) as u32;
 const SAFE_REACH: f32 = 40.0;
 /// A cracked safe stays empty this long.
 const SAFE_RESEAL_TICKS: u32 = 90 * TICKS_PER_SEC;
@@ -86,6 +86,8 @@ impl Blasts {
 struct Cracking {
     by: Option<Entity>,
     ticks: u32,
+    /// Ticks the current cracker needs (撬锁专家 is faster).
+    need: u32,
     reseal: u32,
 }
 
@@ -221,8 +223,10 @@ fn detonate(
 /// Hold interact next to a safe, standing still, to crack it open.
 fn crack_safes(
     mut commands: Commands,
+    arena: Res<Arena>,
+    mut xp: ResMut<XpQueue>,
     mut safes: Query<(&mut Prop, &Pos, &mut Cracking)>,
-    players: Query<(Entity, &Pos, &Vitals, &CurrentInput), With<Player>>,
+    players: Query<(Entity, &Pos, &Vitals, &CurrentInput, &Evolution), With<Player>>,
 ) {
     let mut rng = rand::rng();
     for (mut prop, pos, mut cracking) in &mut safes {
@@ -234,7 +238,7 @@ fn crack_safes(
             continue;
         }
         let reach = prop.kind.radius() + PLAYER_RADIUS + SAFE_REACH;
-        let working = |(_, p, v, input): &(Entity, &Pos, &Vitals, &CurrentInput)| {
+        let working = |(_, p, v, input, _): &(Entity, &Pos, &Vitals, &CurrentInput, &Evolution)| {
             v.alive
                 && input.0.interact
                 && input.0.move_dir() == Vec2::ZERO
@@ -247,13 +251,27 @@ fn crack_safes(
             .find(|(e, ..)| Some(*e) == cracking.by)
             .or_else(|| players.iter().find(&working));
         match cracker {
-            Some((entity, cracker_pos, ..)) => {
+            Some((entity, cracker_pos, _, _, evo)) => {
                 if cracking.by != Some(entity) {
                     cracking.by = Some(entity);
                     cracking.ticks = 0;
                 }
+                cracking.need = evo.crack_ticks();
                 cracking.ticks += 1;
-                if cracking.ticks >= CRACK_TICKS {
+                if cracking.ticks >= cracking.need {
+                    let vault = arena
+                        .block_at(pos.0)
+                        .is_some_and(|b| b.biome == Biome::Vault);
+                    xp.0.push(XpAward {
+                        to: entity,
+                        base: if vault {
+                            VAULT_SAFE_XP
+                        } else {
+                            safe_xp(prop.tier)
+                        },
+                        pos: pos.0,
+                        loot: true,
+                    });
                     let toward = (cracker_pos.0 - pos.0).normalize_or(Vec2::NEG_Y);
                     let drop_at = pos.0 + toward * (prop.kind.radius() + 18.0);
                     let tier = (prop.tier + 1).min(4);
@@ -280,7 +298,7 @@ fn crack_safes(
                 cracking.ticks = 0;
             }
         }
-        let progress = (cracking.ticks * 100 / CRACK_TICKS) as u8;
+        let progress = (cracking.ticks * 100 / cracking.need.max(1)) as u8;
         if prop.progress != progress {
             prop.progress = progress;
         }
@@ -290,6 +308,7 @@ fn crack_safes(
 /// Props take damage here; everything aimed elsewhere is left for the other resolvers.
 fn resolve_prop_damage(
     mut commands: Commands,
+    mut xp: ResMut<XpQueue>,
     mut queue: ResMut<DamageQueue>,
     mut outbox: ResMut<Outbox>,
     mut blasts: ResMut<Blasts>,
@@ -323,6 +342,14 @@ fn resolve_prop_damage(
         commands.entity(dmg.target).despawn();
         match prop.kind {
             PropKind::Crate => {
+                if let Some(by) = dmg.attacker {
+                    xp.0.push(XpAward {
+                        to: by,
+                        base: crate_xp(prop.tier),
+                        pos: pos.0,
+                        loot: true,
+                    });
+                }
                 let item = if rng.random_bool(0.75) {
                     Some(roll_loot(prop.tier, &mut rng))
                 } else if rng.random_bool(0.5) {

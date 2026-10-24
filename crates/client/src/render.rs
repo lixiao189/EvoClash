@@ -7,12 +7,14 @@
 use bevy::prelude::*;
 use bevy::sprite::{Anchor, SpriteImageMode};
 use bevy::window::PrimaryWindow;
+use evoclash_game::evolution::{ACID_HALF_ANGLE, ACID_RANGE, Evolution, SHIELD_HP, SkillState};
 use evoclash_game::items::{WeaponKind, tier_color};
 use evoclash_game::map::{
     ARENA_HALF, ArenaMap, BLOCK, Biome, MARGIN, PropKind, VAULT_CENTER, WallStyle,
 };
 use evoclash_game::protocol::*;
-use evoclash_game::sim::{Arena, MAX_HP, PLAYER_RADIUS};
+use evoclash_game::sim::{Arena, PLAYER_RADIUS};
+use lightyear::prelude::input::native::ActionState;
 use rand::Rng;
 
 use crate::input::{CursorWorld, GUN_HEIGHT, LocalPlayer};
@@ -38,6 +40,10 @@ const Z_STEP: f32 = 0.00001;
 /// Feet of the survivor sprite sit this far above its texture's bottom edge (world pixels).
 const FOOT_INSET: f32 = 2.0;
 const SURVIVOR_HEIGHT: f32 = SURVIVOR.y as f32 * PIXEL;
+/// Others under 隐身 are drawn this faint (when the server lets us see them at all).
+const STEALTH_ALPHA: f32 = 0.15;
+/// You see yourself half-faded while hidden.
+const STEALTH_SELF_ALPHA: f32 = 0.45;
 /// Distance walked per animation frame.
 const STRIDE_PX: f32 = 22.0;
 /// World pixels per screen pixel; below 1 zooms in.
@@ -135,6 +141,10 @@ struct RoofOf {
 #[derive(Component)]
 struct PropBody(Entity);
 
+/// The swivelling gun of a 自动炮塔.
+#[derive(Component)]
+struct TurretHead(Entity);
+
 /// The building the local player is standing in, if any. Anyone inside a different building
 /// is hidden under its roof.
 #[derive(Resource, Default)]
@@ -194,6 +204,8 @@ impl Plugin for RenderPlugin {
         app.add_observer(dress_monster);
         app.add_observer(dress_prop);
         app.add_observer(dress_projectile);
+        app.add_observer(dress_turret);
+        app.add_observer(dress_trap);
         app.add_observer(splat_monster);
         app.add_systems(
             Update,
@@ -203,7 +215,10 @@ impl Plugin for RenderPlugin {
                 update_roofs,
                 sync_players,
                 pose_players,
+                tint_players,
                 sync_props,
+                sync_turrets,
+                sync_traps,
                 sync_pickups,
                 bob_pickups,
                 sync_monsters,
@@ -906,6 +921,157 @@ fn pose_players(
     }
 }
 
+/// 狂暴 glows red, its aftermath looks drained, and 隐身 fades the whole figure.
+#[allow(clippy::type_complexity)]
+fn tint_players(
+    time: Res<Time>,
+    players: Query<(
+        &Player,
+        &Vitals,
+        Option<&SkillState>,
+        &PlayerParts,
+        &Children,
+        Has<LocalPlayer>,
+    )>,
+    mut sprites: Query<(&mut Sprite, Has<GroundShadow>), Without<Player>>,
+    mut labels: Query<&mut TextColor, With<NameLabel>>,
+) {
+    let t = time.elapsed_secs();
+    for (player, vitals, skills, parts, children, local) in &players {
+        let skills = skills.copied().unwrap_or_default();
+        let alpha = if vitals.stealth > 0 && vitals.revealed == 0 {
+            if local {
+                STEALTH_SELF_ALPHA
+            } else {
+                STEALTH_ALPHA
+            }
+        } else {
+            1.0
+        };
+        let (tint, amount) = if skills.berserk() {
+            (Color::srgb(1.0, 0.2, 0.15), 0.4 + 0.15 * (t * 10.0).sin())
+        } else if skills.exhausted() {
+            (Color::srgb(0.45, 0.42, 0.4), 0.45)
+        } else {
+            (Color::WHITE, 0.0)
+        };
+        for child in children.iter() {
+            let Ok((mut sprite, is_shadow)) = sprites.get_mut(child) else {
+                continue;
+            };
+            let color = if is_shadow {
+                Color::WHITE.with_alpha(0.6 * alpha)
+            } else {
+                let base = if child == parts.jacket || child == parts.arm {
+                    player_color(player)
+                } else {
+                    Color::WHITE
+                };
+                base.mix(&tint, amount).with_alpha(alpha)
+            };
+            if sprite.color != color {
+                sprite.color = color;
+            }
+        }
+        for child in children.iter() {
+            if let Ok(mut label) = labels.get_mut(child) {
+                label.0 = label.0.with_alpha(0.85 * alpha);
+            }
+        }
+    }
+}
+
+fn dress_turret(
+    trigger: On<Add<Turret>>,
+    turrets: Query<Option<&Pos>>,
+    mut commands: Commands,
+    textures: Res<Textures>,
+) {
+    let pos = turrets
+        .get(trigger.entity)
+        .ok()
+        .flatten()
+        .map_or(Vec2::ZERO, |p| p.0);
+    let (sprite, transform) = pixel_sprite(textures.turret_base.clone());
+    let base = commands
+        .spawn((
+            sprite,
+            Anchor::BOTTOM_CENTER,
+            transform.with_translation(Vec3::Y * -FOOT_INSET),
+        ))
+        .id();
+    let (sprite, transform) = pixel_sprite(textures.turret_head.clone());
+    let head = commands
+        .spawn((
+            sprite,
+            transform.with_translation(Vec3::new(0.0, 30.0, Z_STEP)),
+        ))
+        .id();
+    let shadow = commands
+        .spawn(shadow(&textures, Vec2::new(44.0, 20.0)))
+        .id();
+    commands
+        .entity(trigger.entity)
+        .insert((
+            Transform::from_translation(pos.extend(depth(pos.y))),
+            Visibility::Hidden,
+            TurretHead(head),
+        ))
+        .add_children(&[shadow, base, head]);
+}
+
+fn sync_turrets(
+    arena: Res<Arena>,
+    indoors: Res<Indoors>,
+    mut turrets: Query<(&Pos, &Aim, &TurretHead, &mut Transform, &mut Visibility), With<Turret>>,
+    mut heads: Query<(&mut Sprite, &mut Transform), Without<Turret>>,
+) {
+    for (pos, aim, head, mut transform, mut visibility) in &mut turrets {
+        transform.translation = pos.0.extend(depth(pos.0.y));
+        visibility.set_if_neq(if indoors.conceals(&arena, pos.0) {
+            Visibility::Hidden
+        } else {
+            Visibility::Visible
+        });
+        if let Ok((mut sprite, mut head)) = heads.get_mut(head.0) {
+            sprite.flip_y = aim.0.x < 0.0;
+            head.rotation = Quat::from_rotation_z(aim.0.to_angle());
+        }
+    }
+}
+
+fn dress_trap(trigger: On<Add<Trap>>, mut commands: Commands, textures: Res<Textures>) {
+    let (sprite, transform) = pixel_sprite(textures.trap.clone());
+    commands
+        .entity(trigger.entity)
+        .insert((sprite, transform, Visibility::Hidden));
+}
+
+/// Traps only ever reach their owner, but never draw someone else's anyway.
+fn sync_traps(
+    time: Res<Time>,
+    me: Query<&Player, With<LocalPlayer>>,
+    mut traps: Query<(
+        &Trap,
+        Option<&Pos>,
+        &mut Sprite,
+        &mut Transform,
+        &mut Visibility,
+    )>,
+) {
+    let me = me.single().ok().map(|p| p.client_id);
+    let pulse = 0.6 + 0.2 * (time.elapsed_secs() * 3.0).sin();
+    for (trap, pos, mut sprite, mut transform, mut visibility) in &mut traps {
+        let Some(pos) = pos.filter(|_| Some(trap.owner) == me) else {
+            visibility.set_if_neq(Visibility::Hidden);
+            continue;
+        };
+        transform.translation = pos.0.extend(Z_DECAL + 1.0);
+        sprite.color = Color::WHITE.with_alpha(pulse);
+        visibility.set_if_neq(Visibility::Visible);
+    }
+}
+
 fn sync_pickups(mut pickups: Query<(&Pos, &mut Transform), (With<Pickup>, Changed<Pos>)>) {
     for (pos, mut transform) in &mut pickups {
         transform.translation = pos.0.extend(Z_PICKUP);
@@ -1470,6 +1636,20 @@ impl Painter<'_, '_, '_> {
         ));
     }
 
+    /// A soft blob of light (acid spray, sparks).
+    fn glow(&mut self, at: Vec2, size: f32, color: Color) {
+        self.commands.spawn((
+            Overlay,
+            Sprite {
+                image: self.textures.glow.clone(),
+                color,
+                custom_size: Some(Vec2::splat(size)),
+                ..default()
+            },
+            Transform::from_translation(at.extend(Z_OVERLAY - 0.1)),
+        ));
+    }
+
     fn gauge(&mut self, left: Vec2, width: f32, height: f32, frac: f32, color: Color) {
         self.bar(left, width, height, Color::srgba(0.0, 0.0, 0.0, 0.6));
         self.bar(left, width * frac.clamp(0.0, 1.0), height, color);
@@ -1487,10 +1667,18 @@ fn draw_overlays(
         Option<&TickSamples>,
         &Vitals,
         &Stats,
+        (
+            &Aim,
+            Option<&Evolution>,
+            Option<&SkillState>,
+            Option<&ActionState<PlayerInput>>,
+        ),
         Has<LocalPlayer>,
     )>,
     monsters: Query<(&Pos, &Vitals, &Monster, Option<&MonsterState>)>,
     puddles: Query<(&Pos, &Puddle, &PuddleAge)>,
+    owners: Query<&Player>,
+    turrets: Query<(&Pos, &Vitals, &Turret)>,
     props: Query<(&Pos, &Vitals, &Prop)>,
     pickups: Query<&Pos, With<Pickup>>,
     textures: Res<Textures>,
@@ -1626,13 +1814,71 @@ fn draw_overlays(
         paint.gauge(left, w, 4.0, frac, color);
     }
 
-    for (pos, samples, vitals, stats, local) in &players {
+    // Turrets: the owner's color at the foot and a health bar.
+    for (pos, vitals, turret) in &turrets {
+        if indoors.conceals(&arena, pos.0) {
+            continue;
+        }
+        if let Some(owner) = owners.iter().find(|p| p.client_id == turret.owner) {
+            paint.ring(pos.0, 20.0, player_color(owner).with_alpha(0.7));
+        }
+        let w = 36.0;
+        let frac = vitals.hp / vitals.max_hp.max(1.0);
+        paint.gauge(
+            pos.0 + Vec2::new(-w / 2.0, 46.0),
+            w,
+            4.0,
+            frac,
+            Color::srgb(0.5, 0.85, 1.0),
+        );
+    }
+
+    for (pos, samples, vitals, stats, (aim, evo, skills, action), local) in &players {
         if !vitals.alive {
             continue;
         }
         let p = visual_pos(pos, samples, &fixed);
         if !local && indoors.conceals(&arena, p) {
             continue;
+        }
+        let skills = skills.copied().unwrap_or_default();
+        // Someone else under 隐身 shows nothing but their faint figure.
+        if !local && vitals.stealth > 0 && vitals.revealed == 0 {
+            continue;
+        }
+        if vitals.revealed > 0 {
+            // Caught in a trap: marked for everyone.
+            let pulse = 0.5 + 0.4 * (t * 9.0).sin();
+            paint.ring(
+                p,
+                PLAYER_RADIUS + 18.0,
+                Color::srgb(1.0, 0.25, 0.2).with_alpha(pulse),
+            );
+        }
+        if skills.breathing_acid() {
+            let dir = match action {
+                Some(a) if local => a.0.aim,
+                _ => aim.0,
+            }
+            .normalize_or(Vec2::X);
+            let mouth = p + Vec2::Y * GUN_HEIGHT;
+            for i in 0..22 {
+                let seed = (i as f32 * 12.9898).sin() * 43758.547;
+                let spread = 2.0 * (seed - seed.floor()) - 1.0;
+                let f = (t * 1.7 + i as f32 * 0.618).fract();
+                let d = 24.0 + f * (ACID_RANGE - 24.0);
+                let side = dir.perp() * spread * ACID_HALF_ANGLE.tan() * d * 0.85;
+                let color = Color::srgb(0.6, 1.0, 0.2).with_alpha(0.55 * (1.0 - f * f));
+                paint.glow(mouth + dir * d + side, 14.0 + 46.0 * f, color);
+            }
+        }
+        if skills.shielded() {
+            let left = (skills.shield_hp / SHIELD_HP).clamp(0.0, 1.0);
+            let shimmer = 0.35 + 0.35 * left + 0.1 * (t * 7.0).sin();
+            let bubble = Color::srgb(0.7, 0.55, 1.0).with_alpha(shimmer);
+            let center = p + Vec2::Y * (SURVIVOR_HEIGHT / 2.0 - FOOT_INSET);
+            paint.oval(center, Vec2::new(34.0, SURVIVOR_HEIGHT / 2.0 + 8.0), bubble);
+            paint.ring(p, PLAYER_RADIUS + 9.0, bubble);
         }
 
         // Armor shell: thicker and brighter the better the tech.
@@ -1668,11 +1914,13 @@ fn draw_overlays(
         // Health and armor bars.
         let bar_w = 44.0;
         let left = p + Vec2::new(-bar_w / 2.0, SURVIVOR_HEIGHT + 4.0);
-        let hp = (vitals.hp / MAX_HP).clamp(0.0, 1.0);
+        let hp = (vitals.hp / vitals.max_hp.max(1.0)).clamp(0.0, 1.0);
         let hp_color = Color::srgb(1.0 - hp, 0.25 + 0.7 * hp, 0.25);
         paint.gauge(left, bar_w, 5.0, hp, hp_color);
         if vitals.armor_points > 0.0 {
-            let ap = (vitals.armor_points / vitals.armor.max_points().max(1.0)).clamp(0.0, 1.0);
+            // 复合装甲 raises the cap.
+            let cap = evo.map_or(vitals.armor.max_points(), |e| e.armor_cap(vitals.armor));
+            let ap = (vitals.armor_points / cap.max(1.0)).clamp(0.0, 1.0);
             let left = left + Vec2::Y * 4.0;
             paint.bar(left, bar_w * ap, 3.0, tier_color(vitals.armor.tier()));
         }

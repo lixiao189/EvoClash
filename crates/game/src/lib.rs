@@ -1,5 +1,6 @@
 //! Shared core of EvoClash: protocol, arena and the rules both server and client simulate.
 
+pub mod evolution;
 pub mod items;
 pub mod map;
 pub mod nav;

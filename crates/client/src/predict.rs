@@ -1,6 +1,7 @@
 //! Client-side prediction of the local player, plus smoothing between fixed ticks for rendering.
 
 use bevy::prelude::*;
+use evoclash_game::evolution::{Evolution, SkillState};
 use evoclash_game::protocol::{Dash, PlayerInput, Pos, Prop, Vitals};
 use evoclash_game::sim::{self, Arena, Obstacles};
 use lightyear::prelude::input::native::ActionState;
@@ -46,10 +47,32 @@ fn track_obstacles(
 fn predicted_movement(
     arena: Res<Arena>,
     obstacles: Res<Obstacles>,
-    mut players: Query<(&mut Pos, &mut Dash, &ActionState<PlayerInput>, &Vitals), With<Predicted>>,
+    mut players: Query<
+        (
+            &mut Pos,
+            &mut Dash,
+            &ActionState<PlayerInput>,
+            &Vitals,
+            Option<&Evolution>,
+            Option<&SkillState>,
+        ),
+        With<Predicted>,
+    >,
 ) {
-    for (pos, dash, action, vitals) in &mut players {
-        sim::step_movement(pos, dash, &action.0, vitals, &arena, &obstacles.0);
+    // Perks and skills change speed; use the server's numbers or a speed perk would rubber-band.
+    for (pos, dash, action, vitals, evo, skills) in &mut players {
+        let evo = evo.cloned().unwrap_or_default();
+        let skills = skills.copied().unwrap_or_default();
+        sim::step_movement(
+            pos,
+            dash,
+            &action.0,
+            vitals,
+            &evo,
+            &skills,
+            &arena,
+            &obstacles.0,
+        );
     }
 }
 

@@ -7,6 +7,7 @@ use lightyear::prelude::input::native::InputPlugin;
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::evolution::{Evolution, Skill, SkillState};
 use crate::items::{ArmorKind, Item, WeaponKind};
 use crate::map::PropKind;
 
@@ -24,6 +25,12 @@ pub struct PlayerInput {
     pub dash: bool,
     pub interact: bool,
     pub throw: bool,
+    /// Perk pick: 1..=3 chooses that slot of the current offer while held, 0 = none.
+    /// The server acts on the change, so holding a key picks once.
+    pub pick: u8,
+    /// Skill A (R) / skill B (T) held.
+    pub skill_a: bool,
+    pub skill_b: bool,
 }
 
 impl PlayerInput {
@@ -109,6 +116,8 @@ pub struct Dash {
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Reflect)]
 pub struct Vitals {
     pub hp: f32,
+    /// Grows with 强化体质; use instead of `sim::MAX_HP` for combatants.
+    pub max_hp: f32,
     pub armor: ArmorKind,
     pub armor_points: f32,
     pub alive: bool,
@@ -118,18 +127,25 @@ pub struct Vitals {
     pub emp_slow: u16,
     /// Ticks of spawn protection left; ends early when you fire.
     pub shield: u16,
+    /// Ticks of 隐身 left: enemies only see you up close.
+    pub stealth: u16,
+    /// Ticks this combatant is revealed to everyone (sprung a trap).
+    pub revealed: u16,
 }
 
 impl Default for Vitals {
     fn default() -> Self {
         Self {
             hp: crate::sim::MAX_HP,
+            max_hp: crate::sim::MAX_HP,
             armor: ArmorKind::None,
             armor_points: 0.0,
             alive: true,
             respawn_in: 0,
             emp_slow: 0,
             shield: 0,
+            stealth: 0,
+            revealed: 0,
         }
     }
 }
@@ -141,12 +157,26 @@ pub struct Loadout {
     pub emps: u8,
 }
 
-#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Reflect, Default)]
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Reflect)]
 pub struct Stats {
     pub score: u32,
     pub kills: u32,
     pub deaths: u32,
     pub streak: u32,
+    /// Evolution level, mirrored here for the scoreboard.
+    pub level: u8,
+}
+
+impl Default for Stats {
+    fn default() -> Self {
+        Self {
+            score: 0,
+            kills: 0,
+            deaths: 0,
+            streak: 0,
+            level: 1,
+        }
+    }
 }
 
 impl Stats {
@@ -378,6 +408,19 @@ pub struct Prop {
     pub open: bool,
 }
 
+/// 自动炮塔: a damageable sentry (hit points in `Vitals`, facing in `Aim`).
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Reflect)]
+pub struct Turret {
+    /// Client id of the combatant who deployed it.
+    pub owner: u64,
+}
+
+/// 陷阱: replicated only to its owner (enemies never learn where it is).
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Reflect)]
+pub struct Trap {
+    pub owner: u64,
+}
+
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Reflect)]
 pub struct Projectile {
     pub kind: ProjectileKind,
@@ -451,6 +494,25 @@ pub enum GameEvent {
     BossDown {
         killer: Option<String>,
     },
+    /// Sent only to the combatant who earned it.
+    XpGain {
+        amount: u32,
+        pos: Vec2,
+    },
+    LevelUp {
+        client: u64,
+        level: u8,
+    },
+    SkillUsed {
+        client: u64,
+        skill: Skill,
+        pos: Vec2,
+        dir: Vec2,
+    },
+    /// A trap went off (shown to everyone, since the victim now knows).
+    TrapSprung {
+        pos: Vec2,
+    },
 }
 
 /// Kill feed and announcements: must arrive.
@@ -486,6 +548,10 @@ impl Plugin for ProtocolPlugin {
         app.component::<Vitals>().replicate();
         app.component::<Loadout>().replicate();
         app.component::<Stats>().replicate();
+        app.component::<Evolution>().replicate();
+        app.component::<SkillState>().replicate();
+        app.component::<Turret>().replicate();
+        app.component::<Trap>().replicate();
         app.component::<Projectile>().replicate();
         app.component::<Pickup>().replicate();
         app.component::<Monster>().replicate();
