@@ -9,6 +9,7 @@ mod input;
 mod predict;
 mod render;
 mod session;
+mod textures;
 
 use std::time::Duration;
 

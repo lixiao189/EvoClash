@@ -16,6 +16,26 @@ pub const DASH_TICKS: u16 = 9;
 pub const DASH_COOLDOWN: u16 = 70;
 pub const EMP_SLOW_MULT: f32 = 0.55;
 pub const BOUNTY_STREAK: u32 = 3;
+/// How much more damage you deal per tier your target's gear is above your weapon.
+pub const UNDERDOG_BONUS_PER_TIER: f32 = 0.2;
+pub const UNDERDOG_BONUS_MAX: f32 = 1.8;
+
+/// How advanced someone's kit is: the better of their weapon and armor tiers.
+pub fn gear_tier(vitals: &Vitals, loadout: &crate::protocol::Loadout) -> u8 {
+    let armor = if vitals.armor_points > 0.0 {
+        vitals.armor.tier()
+    } else {
+        0
+    };
+    loadout.weapon.stats().tier.max(armor)
+}
+
+/// Damage multiplier when a weaker weapon hits better-equipped gear: the stone age can
+/// still bring down a power-armored railgunner, it just takes guts instead of luck.
+pub fn underdog_mult(attacker_weapon_tier: u8, target_gear_tier: u8) -> f32 {
+    let gap = target_gear_tier.saturating_sub(attacker_weapon_tier) as f32;
+    (1.0 + UNDERDOG_BONUS_PER_TIER * gap).min(UNDERDOG_BONUS_MAX)
+}
 
 #[derive(Resource, Deref, Default)]
 pub struct Arena(pub ArenaMap);
@@ -73,5 +93,18 @@ pub fn step_movement(
         if next != pos.0 {
             pos.0 = next;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn underdog_bonus_scales_with_gap_and_caps() {
+        assert_eq!(underdog_mult(2, 2), 1.0);
+        assert_eq!(underdog_mult(3, 1), 1.0);
+        assert!((underdog_mult(0, 2) - 1.4).abs() < 1e-6);
+        assert_eq!(underdog_mult(0, 4), UNDERDOG_BONUS_MAX);
     }
 }

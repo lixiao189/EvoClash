@@ -12,6 +12,10 @@ use crate::ClientArgs;
 #[derive(Resource, Default)]
 pub struct CursorWorld(pub Option<Vec2>);
 
+/// How far above the feet guns are held and shots are drawn, in world pixels. Aim is measured
+/// from here so that pointing at someone's chest on screen fires along the ground toward their feet.
+pub const GUN_HEIGHT: f32 = 26.0;
+
 /// The combatant this client controls.
 #[derive(Component)]
 pub struct LocalPlayer;
@@ -83,7 +87,7 @@ fn buffer_input(
             keys.pressed(KeyJ) || mouse.as_ref().is_some_and(|m| m.pressed(MouseButton::Left));
         input.aim = cursor
             .0
-            .map(|c| (c - pos.0).normalize_or(Vec2::X))
+            .map(|c| (c - (pos.0 + Vec2::Y * GUN_HEIGHT)).normalize_or(Vec2::X))
             .unwrap_or(Vec2::X);
     }
     // Always write a value: an absent input means "packet lost", not "standing still".

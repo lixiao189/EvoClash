@@ -49,6 +49,26 @@ pub struct Flight {
     already_hit: Vec<Entity>,
 }
 
+impl Flight {
+    /// A plain, non-rewound projectile, e.g. a monster's spore.
+    pub fn simple(owner: Entity, ttl: u16, damage: f32) -> Self {
+        Self {
+            owner,
+            rewind: 0,
+            ttl,
+            damage,
+            armor_mult: 1.0,
+            piercing: false,
+            already_hit: Vec::new(),
+        }
+    }
+}
+
+/// Hit radius of a combatant or monster.
+fn body_radius(monster: Option<&Monster>) -> f32 {
+    monster.map_or(PLAYER_RADIUS, |m| m.kind.radius())
+}
+
 fn combat_allowed(state: &MatchState) -> bool {
     state.phase != Phase::Intermission
 }
@@ -61,7 +81,7 @@ fn rewound(history: &PosHistory, now: u32, rewind: u32, fallback: Vec2) -> Vec2 
     history.at(now.wrapping_sub(rewind)).unwrap_or(fallback)
 }
 
-fn projectile_replication(human: Option<&Human>) -> (Replicate, InterpolationTarget) {
+pub fn projectile_replication(human: Option<&Human>) -> (Replicate, InterpolationTarget) {
     // The shooter already drew this projectile locally the instant they clicked,
     // so only everyone else needs the server copy.
     let target = match human {
@@ -90,7 +110,7 @@ fn fire_weapons(
         &Rewind,
         Option<&Human>,
     )>,
-    targets: Query<(Entity, &Pos, &Vitals, &PosHistory)>,
+    targets: Query<(Entity, &Pos, &Vitals, &PosHistory, Option<&Monster>)>,
     mut damage: ResMut<DamageQueue>,
     mut outbox: ResMut<Outbox>,
 ) {
@@ -108,11 +128,11 @@ fn fire_weapons(
         cd.fire = stats.cooldown;
 
         if stats.melee {
-            let reach = stats.range_or_speed + PLAYER_RADIUS;
-            for (target, target_pos, target_vitals, history) in &targets {
+            for (target, target_pos, target_vitals, history, monster) in &targets {
                 if target == entity || !target_vitals.alive {
                     continue;
                 }
+                let reach = stats.range_or_speed + body_radius(monster);
                 let seen_at = rewound(history, tick.0, rewind.0, target_pos.0);
                 let offset = seen_at - pos.0;
                 let dist = offset.length();
@@ -127,7 +147,7 @@ fn fire_weapons(
                     attacker: Some(entity),
                     amount: stats.damage,
                     armor_mult: stats.armor_mult,
-                    weapon: loadout.weapon,
+                    weapon: Some(loadout.weapon),
                     emp: false,
                 });
             }
@@ -228,7 +248,7 @@ fn step_projectiles(
     tick: Res<SimTick>,
     arena: Res<Arena>,
     mut projectiles: Query<(Entity, &mut Pos, &Projectile, &mut Flight)>,
-    targets: Query<(Entity, &Pos, &Vitals, &PosHistory), Without<Projectile>>,
+    targets: Query<(Entity, &Pos, &Vitals, &PosHistory, Option<&Monster>), Without<Projectile>>,
     mut damage: ResMut<DamageQueue>,
     mut outbox: ResMut<Outbox>,
 ) {
@@ -246,7 +266,7 @@ fn step_projectiles(
             ProjectileKind::Emp => {
                 if wall_t.is_some() || flight.ttl == 0 {
                     let at = from + (to - from) * wall_t.unwrap_or(1.0) * 0.95;
-                    for (target, target_pos, vitals, _) in &targets {
+                    for (target, target_pos, vitals, ..) in &targets {
                         if target == flight.owner || !vitals.alive {
                             continue;
                         }
@@ -258,7 +278,7 @@ fn step_projectiles(
                                 attacker: Some(flight.owner),
                                 amount: flight.damage,
                                 armor_mult: 1.0,
-                                weapon: WeaponKind::Stick,
+                                weapon: Some(WeaponKind::Stick),
                                 emp: true,
                             });
                         }
@@ -272,18 +292,24 @@ fn step_projectiles(
                     pos.0 = to;
                 }
             }
-            ProjectileKind::Shot(weapon) => {
+            ProjectileKind::Shot(_) | ProjectileKind::Spore => {
+                let (weapon, spore) = match projectile.kind {
+                    ProjectileKind::Shot(weapon) => (Some(weapon), false),
+                    _ => (None, true),
+                };
                 let limit = wall_t.unwrap_or(1.0);
                 let mut hits: Vec<(f32, Entity)> = targets
                     .iter()
-                    .filter(|(target, _, vitals, _)| {
+                    .filter(|(target, _, vitals, _, monster)| {
                         *target != flight.owner
                             && vitals.alive
+                            // Monsters don't hurt each other.
+                            && !(spore && monster.is_some())
                             && !flight.already_hit.contains(target)
                     })
-                    .filter_map(|(target, target_pos, _, history)| {
+                    .filter_map(|(target, target_pos, _, history, monster)| {
                         let seen_at = rewound(history, tick.0, flight.rewind, target_pos.0);
-                        segment_circle(from, to, seen_at, PLAYER_RADIUS + 3.0)
+                        segment_circle(from, to, seen_at, body_radius(monster) + 3.0)
                             .filter(|t| *t <= limit)
                             .map(|t| (t, target))
                     })

@@ -43,20 +43,23 @@ impl ArenaMap {
         let gap = 110.0;
         let seg = v - gap / 2.0;
         let th = 36.0;
+        // Side walls run out past the corner by half a thickness so the corner block is solid.
+        let side = seg + th / 2.0;
         for sign in [-1.0, 1.0] {
             // Horizontal walls (top/bottom), split by the doorway.
             walls.push(wall(-(gap / 2.0 + seg / 2.0), sign * v, seg, th));
             walls.push(wall(gap / 2.0 + seg / 2.0, sign * v, seg, th));
             // Vertical walls (left/right).
-            walls.push(wall(sign * v, -(gap / 2.0 + seg / 2.0), th, seg));
-            walls.push(wall(sign * v, gap / 2.0 + seg / 2.0, th, seg));
+            walls.push(wall(sign * v, -(gap / 2.0 + side / 2.0), th, side));
+            walls.push(wall(sign * v, gap / 2.0 + side / 2.0, th, side));
         }
 
         // Ruined buildings, mirrored into all four quadrants so no spawn side is favored.
         let ruins = [
             // (center, size)
+            // An L: the upright arm reaches down to the bar so the corner is closed.
             (Vec2::new(620.0, 420.0), Vec2::new(260.0, 40.0)),
-            (Vec2::new(470.0, 560.0), Vec2::new(40.0, 240.0)),
+            (Vec2::new(470.0, 540.0), Vec2::new(40.0, 280.0)),
             (Vec2::new(1050.0, 300.0), Vec2::new(40.0, 320.0)),
             (Vec2::new(1200.0, 760.0), Vec2::new(300.0, 40.0)),
             (Vec2::new(760.0, 860.0), Vec2::new(40.0, 220.0)),
@@ -238,6 +241,33 @@ mod tests {
             .chain(map.loot_spots.iter().map(|s| s.pos))
         {
             assert_eq!(map.resolve_circle(p, 20.0), p, "{p} overlaps a wall");
+        }
+    }
+
+    /// Where a horizontal and a vertical wall meet, the square where the vertical wall's
+    /// column crosses the horizontal wall's row must be solid. A notch there shows as a hole
+    /// in the rendered wall and snags players on its inner edges.
+    #[test]
+    fn wall_corners_have_no_notches() {
+        let map = ArenaMap::new();
+        let solid = |p: Vec2| map.walls.iter().any(|w| w.contains(p));
+        let touch = |a: &Rect, b: &Rect| {
+            a.min.x <= b.max.x + 0.5
+                && b.min.x <= a.max.x + 0.5
+                && a.min.y <= b.max.y + 0.5
+                && b.min.y <= a.max.y + 0.5
+        };
+        for h in map.walls.iter().filter(|w| w.width() > w.height()) {
+            for v in map.walls.iter().filter(|w| w.height() > w.width()) {
+                if !touch(h, v) {
+                    continue;
+                }
+                let corner = Rect::new(v.min.x, h.min.y, v.max.x, h.max.y);
+                for (fx, fy) in [(0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9), (0.5, 0.5)] {
+                    let p = corner.min + corner.size() * Vec2::new(fx, fy);
+                    assert!(solid(p), "notch at {p} where {h:?} meets {v:?}");
+                }
+            }
         }
     }
 

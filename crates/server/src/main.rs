@@ -9,6 +9,7 @@ mod combat;
 mod config;
 mod connections;
 mod gameplay;
+mod monsters;
 mod ops;
 
 use std::time::Duration;
@@ -44,6 +45,7 @@ fn main() {
         gameplay::GameplayPlugin,
         combat::CombatPlugin,
         bots::BotsPlugin,
+        monsters::MonstersPlugin,
         ops::OpsPlugin,
     ));
     app.run();

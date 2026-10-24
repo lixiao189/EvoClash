@@ -11,7 +11,7 @@ use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::*;
 use rand::Rng;
 
-use crate::input::LocalPlayer;
+use crate::input::{GUN_HEIGHT, LocalPlayer};
 use crate::render::{CameraShake, UiFont, tracer_length};
 
 pub struct EffectsPlugin;
@@ -142,7 +142,7 @@ fn step_tracers(
     time: Res<Time>,
     arena: Res<Arena>,
     mut tracers: Query<(Entity, &mut Tracer)>,
-    others: Query<(&Pos, &Vitals), (With<Player>, Without<LocalPlayer>)>,
+    others: Query<(&Pos, &Vitals), (Or<(With<Player>, With<Monster>)>, Without<LocalPlayer>)>,
 ) {
     let dt = time.delta_secs();
     for (entity, mut tracer) in &mut tracers {
@@ -189,10 +189,9 @@ fn receive_events(
                     bounty,
                 } => {
                     let tag = if bounty { " ★悬赏" } else { "" };
-                    feed.0.push((
-                        format!("{killer} [{}] {victim}{tag}", weapon.stats().name),
-                        now,
-                    ));
+                    let how = weapon.map_or("变异", |w| w.stats().name);
+                    feed.0
+                        .push((format!("{killer} [{how}] {victim}{tag}"), now));
                     if feed.0.len() > 6 {
                         feed.0.remove(0);
                     }
@@ -218,7 +217,7 @@ fn receive_events(
                         Text2d::new(format!("{amount:.0}")),
                         font.sized(16.0),
                         TextColor(color),
-                        Transform::from_translation((pos + jitter + Vec2::Y * 30.0).extend(8.0)),
+                        Transform::from_translation((pos + jitter + Vec2::Y * 64.0).extend(8.0)),
                     ));
                 }
                 GameEvent::Melee { pos, dir } => {
@@ -300,9 +299,10 @@ fn draw_effects(
     marker: Res<HitMarker>,
     cursor: Res<crate::input::CursorWorld>,
 ) {
+    let lift = Vec2::Y * GUN_HEIGHT;
     for tracer in &tracers {
         let tail = tracer.pos - tracer.vel.normalize_or_zero() * tracer_length(tracer.weapon);
-        gizmos.line_2d(tail, tracer.pos, tracer.weapon.stats().color);
+        gizmos.line_2d(tail + lift, tracer.pos + lift, tracer.weapon.stats().color);
     }
     for fx in &fx {
         let t = fx.age / fx.life;
@@ -313,8 +313,8 @@ fn draw_effects(
                 let sweep = -1.0 + 2.0 * t;
                 let a = Vec2::from_angle(base + sweep * 1.0);
                 gizmos.line_2d(
-                    pos + a * PLAYER_RADIUS,
-                    pos + a * reach,
+                    pos + lift + a * PLAYER_RADIUS,
+                    pos + lift + a * reach,
                     Color::srgba(1.0, 0.9, 0.7, 1.0 - t),
                 );
             }

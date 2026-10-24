@@ -7,7 +7,7 @@ use base64::Engine;
 use bevy::prelude::*;
 use evoclash_game::api::{JoinRequest, JoinResponse, RejoinRequest};
 use evoclash_game::net::{self, CONNECTION_TIMEOUT_SECS, PROTOCOL_ID, TOKEN_EXPIRE_SECS};
-use evoclash_game::protocol::{MatchState, Pickup, Player, Projectile};
+use evoclash_game::protocol::{MatchState, Monster, Pickup, Player, Projectile};
 use lightyear::connection::client::{Connected, Disconnected};
 use lightyear::link::prelude::{LinkConditionerConfig, RecvLinkConditioner};
 use lightyear::netcode::client_plugin::NetcodeConfig;
@@ -239,6 +239,7 @@ fn watch_connection(
             With<Player>,
             With<Pickup>,
             With<Projectile>,
+            With<Monster>,
             With<MatchState>,
         )>,
     >,

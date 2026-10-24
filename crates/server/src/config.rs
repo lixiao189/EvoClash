@@ -17,6 +17,8 @@ pub struct ServerConfig {
     pub matchmaker: Option<String>,
     /// Exit after one match ends (orchestrated mode: the fleet starts a fresh process).
     pub single_match: bool,
+    /// Spawn wandering monsters and spore pods.
+    pub monsters: bool,
 }
 
 impl ServerConfig {
@@ -28,6 +30,7 @@ impl ServerConfig {
         let mut min_combatants = 4;
         let mut matchmaker = None;
         let mut single_match = false;
+        let mut monsters = true;
 
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -53,10 +56,12 @@ impl ServerConfig {
                 "--bots" => min_combatants = value("--bots").parse().expect("invalid --bots"),
                 "--matchmaker" => matchmaker = Some(value("--matchmaker")),
                 "--single-match" => single_match = true,
+                "--no-monsters" => monsters = false,
                 "-h" | "--help" => {
                     println!(
                         "evoclash-server [--port 7000] [--public-addr 127.0.0.1:7000] [--match-id ID]\n\
-                         \x20               [--max-players 6] [--bots 4] [--matchmaker http://host:8080] [--single-match]\n\n\
+                         \x20               [--max-players 6] [--bots 4] [--matchmaker http://host:8080] [--single-match]\n\
+                         \x20               [--no-monsters]\n\n\
                          --bots N   keep at least N combatants in the arena by adding bots (0 disables)"
                     );
                     std::process::exit(0);
@@ -73,6 +78,7 @@ impl ServerConfig {
             min_combatants,
             matchmaker,
             single_match,
+            monsters,
         }
     }
 }

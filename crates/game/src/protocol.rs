@@ -115,6 +115,8 @@ pub struct Vitals {
     pub respawn_in: u16,
     /// Ticks of EMP-induced slowdown left.
     pub emp_slow: u16,
+    /// Ticks of spawn protection left; ends early when you fire.
+    pub shield: u16,
 }
 
 impl Default for Vitals {
@@ -126,6 +128,7 @@ impl Default for Vitals {
             alive: true,
             respawn_in: 0,
             emp_slow: 0,
+            shield: 0,
         }
     }
 }
@@ -156,6 +159,46 @@ impl Stats {
 pub enum ProjectileKind {
     Shot(WeaponKind),
     Emp,
+    /// Slow glob from a spore pod; part of a bullet-hell ring.
+    Spore,
+}
+
+/// Mindless wasteland fauna. They hurt whoever is closest — humans and bots alike —
+/// and drop loot when killed, giving everyone something else to shoot at.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, Reflect)]
+pub enum MonsterKind {
+    /// Skittering mutant roach: wanders, charges anyone nearby, bites on contact.
+    Roach,
+    /// Rooted spore pod: never moves, sprays rings of slow globs in a spiral.
+    SporePod,
+}
+
+impl MonsterKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            MonsterKind::Roach => "辐射蟑螂",
+            MonsterKind::SporePod => "孢子囊",
+        }
+    }
+
+    pub fn max_hp(self) -> f32 {
+        match self {
+            MonsterKind::Roach => 45.0,
+            MonsterKind::SporePod => 110.0,
+        }
+    }
+
+    pub fn radius(self) -> f32 {
+        match self {
+            MonsterKind::Roach => 18.0,
+            MonsterKind::SporePod => 28.0,
+        }
+    }
+}
+
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Reflect)]
+pub struct Monster {
+    pub kind: MonsterKind,
 }
 
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Reflect)]
@@ -195,7 +238,8 @@ pub enum GameEvent {
     Kill {
         killer: String,
         victim: String,
-        weapon: WeaponKind,
+        /// `None` when a monster did it.
+        weapon: Option<WeaponKind>,
         bounty: bool,
     },
     Hit {
@@ -251,6 +295,7 @@ impl Plugin for ProtocolPlugin {
         app.component::<Stats>().replicate();
         app.component::<Projectile>().replicate();
         app.component::<Pickup>().replicate();
+        app.component::<Monster>().replicate();
         app.component::<MatchState>().replicate();
 
         app.register_message::<GameEvent>()

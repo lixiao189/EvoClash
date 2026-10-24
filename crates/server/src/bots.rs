@@ -1,5 +1,7 @@
 //! Scavenger bots keep small lobbies lively and step aside as humans join.
 
+use std::collections::HashMap;
+
 use bevy::prelude::*;
 use evoclash_game::map::ARENA_HALF;
 use evoclash_game::nav::{NavGrid, next_waypoint};
@@ -14,6 +16,17 @@ use crate::gameplay::{CurrentInput, SimSet, spawn_combatant};
 
 const SIGHT: f32 = 820.0;
 const THINK_EVERY: u16 = 4;
+/// Think cycles a bot must keep a target before it opens fire (~0.3 s): a reaction time.
+const REACTION_THINKS: u16 = 3;
+// Target choice is "closest, weighted": below 1 is more attractive, above 1 less.
+/// Monsters are easy loot, so bots go for them first.
+const MONSTER_WEIGHT: f32 = 0.75;
+/// Humans are slightly less attractive so bots spend more time fighting each other.
+const HUMAN_WEIGHT: f32 = 1.3;
+/// Each other bot already on a target makes it this much less attractive (no dogpiles).
+const PILE_ON_WEIGHT: f32 = 0.8;
+/// Bots stick with whoever they're already fighting rather than flicking between targets.
+const STICKY_WEIGHT: f32 = 0.7;
 const NAMES: [&str; 8] = [
     "拾荒者",
     "锈牙",
@@ -34,6 +47,9 @@ pub struct Bot {
     think_in: u16,
     /// Small per-bot aim error so they don't laser-beam you.
     aim_error: f32,
+    target: Option<Entity>,
+    /// Think cycles spent on the current target.
+    locked_for: u16,
 }
 
 #[derive(Resource)]
@@ -90,7 +106,9 @@ fn balance_bots(
             stuck: 0,
             strafe: 1.0,
             think_in: 0,
-            aim_error: rand::rng().random_range(-0.08..0.08),
+            aim_error: rand::rng().random_range(-0.12..0.12),
+            target: None,
+            locked_for: 0,
         });
     } else if bot_count > wanted
         && let Some((entity, player)) = bots.iter().next()
@@ -121,13 +139,20 @@ fn think(
     arena: Res<Arena>,
     nav: Res<Nav>,
     mut bots: Query<(Entity, &mut Bot, &mut CurrentInput, &Pos, &Vitals, &Loadout)>,
-    others: Query<(Entity, &Pos, &Vitals)>,
+    others: Query<(Entity, &Pos, &Vitals, Option<&Monster>, Has<Human>)>,
     items: Query<(&Pos, &Pickup)>,
 ) {
     let mut rng = rand::rng();
+    let mut claims: HashMap<Entity, u32> = HashMap::new();
+    for (_, bot, ..) in &bots {
+        if let Some(target) = bot.target {
+            *claims.entry(target).or_default() += 1;
+        }
+    }
     for (entity, mut bot, mut current, pos, vitals, loadout) in &mut bots {
         if !vitals.alive {
             current.0 = PlayerInput::default();
+            bot.target = None;
             continue;
         }
         // Stuck on a wall: pick somewhere else.
@@ -148,16 +173,39 @@ fn think(
         bot.think_in = THINK_EVERY;
         let mut input = PlayerInput::default();
 
+        let previous = bot.target;
         let enemy = others
             .iter()
-            .filter(|(e, _, v)| *e != entity && v.alive)
-            .map(|(_, p, v)| (p.0, v.armor_points, p.0.distance(pos.0)))
-            .filter(|(p, _, d)| *d < SIGHT && arena.line_of_sight(pos.0, *p))
-            .min_by(|a, b| a.2.total_cmp(&b.2));
+            .filter(|(e, _, v, ..)| *e != entity && v.alive && v.shield == 0)
+            .map(|(e, p, v, monster, human)| {
+                let dist = p.0.distance(pos.0);
+                let others_on_it =
+                    claims.get(&e).copied().unwrap_or(0) - u32::from(previous == Some(e));
+                let mut weight = 1.0 + PILE_ON_WEIGHT * others_on_it as f32;
+                if monster.is_some() {
+                    weight *= MONSTER_WEIGHT;
+                }
+                if human {
+                    weight *= HUMAN_WEIGHT;
+                }
+                if previous == Some(e) {
+                    weight *= STICKY_WEIGHT;
+                }
+                (e, p.0, v.armor_points, dist, dist * weight)
+            })
+            .filter(|(_, p, _, d, _)| *d < SIGHT && arena.line_of_sight(pos.0, *p))
+            .min_by(|a, b| a.4.total_cmp(&b.4));
 
-        if let Some((enemy_pos, enemy_armor, dist)) = enemy {
+        bot.target = enemy.map(|(e, ..)| e);
+        if bot.target != previous {
+            bot.locked_for = 0;
+        }
+        bot.locked_for = bot.locked_for.saturating_add(1);
+
+        if let Some((_, enemy_pos, enemy_armor, dist, _)) = enemy {
             let to_enemy = (enemy_pos - pos.0).normalize_or(Vec2::X);
-            input.aim = Vec2::from_angle(to_enemy.to_angle() + bot.aim_error);
+            let wobble = rng.random_range(-0.05..0.05);
+            input.aim = Vec2::from_angle(to_enemy.to_angle() + bot.aim_error + wobble);
             let stats = loadout.weapon.stats();
             let range = if stats.melee {
                 stats.range_or_speed + 20.0
@@ -177,7 +225,7 @@ fn think(
                 strafe
             };
             steer(&mut input, dir);
-            input.fire = dist < range && rng.random_bool(0.85);
+            input.fire = bot.locked_for > REACTION_THINKS && dist < range && rng.random_bool(0.85);
             input.dash = dist < 260.0 && rng.random_bool(0.04);
             input.throw =
                 loadout.emps > 0 && enemy_armor >= 50.0 && dist < 420.0 && rng.random_bool(0.1);
