@@ -91,6 +91,32 @@ impl Painter<'_, '_, '_> {
         ));
     }
 
+    /// A one-pixel square outline around `center` with its corners cut off.
+    pub(super) fn frame(&mut self, center: Vec2, size: Vec2, color: Color) {
+        let u = PIXEL;
+        let (lo, hi) = (center - size / 2.0, center + size / 2.0);
+        let run = size - Vec2::splat(6.0 * u);
+        let mut solid = |at: Vec2, size: Vec2| {
+            self.commands.spawn((
+                Overlay,
+                Sprite::from_color(color, size),
+                Transform::from_translation(at.extend(Z_OVERLAY)),
+            ));
+        };
+        solid(Vec2::new(center.x, lo.y + u / 2.0), Vec2::new(run.x, u));
+        solid(Vec2::new(center.x, hi.y - u / 2.0), Vec2::new(run.x, u));
+        solid(Vec2::new(lo.x + u / 2.0, center.y), Vec2::new(u, run.y));
+        solid(Vec2::new(hi.x - u / 2.0, center.y), Vec2::new(u, run.y));
+        // Two-step diagonal at each corner.
+        for (right, top) in [(false, false), (true, false), (false, true), (true, true)] {
+            for (dx, dy) in [(1.5 * u, 2.5 * u), (2.5 * u, 1.5 * u)] {
+                let x = if right { hi.x - dx } else { lo.x + dx };
+                let y = if top { hi.y - dy } else { lo.y + dy };
+                solid(Vec2::new(x, y), Vec2::splat(u));
+            }
+        }
+    }
+
     pub(super) fn gauge(&mut self, left: Vec2, width: f32, height: f32, frac: f32, color: Color) {
         self.bar(left, width, height, Color::srgba(0.0, 0.0, 0.0, 0.6));
         self.bar(left, width * frac.clamp(0.0, 1.0), height, color);
@@ -318,8 +344,8 @@ pub(super) fn draw_overlays(
             let shimmer = 0.35 + 0.35 * left + 0.1 * (t * 7.0).sin();
             let bubble = Color::srgb(0.7, 0.55, 1.0).with_alpha(shimmer);
             let center = p + Vec2::Y * (SURVIVOR_HEIGHT / 2.0 - FOOT_INSET);
-            paint.oval(center, Vec2::new(34.0, SURVIVOR_HEIGHT / 2.0 + 8.0), bubble);
-            paint.ring(p, PLAYER_RADIUS + 9.0, bubble);
+            // A size up from spawn protection, so the two nest if both are up.
+            paint.frame(center, Vec2::new(80.0, SURVIVOR_HEIGHT + 24.0), bubble);
         }
 
         // Armor shell: thicker and brighter the better the tech.
@@ -335,13 +361,12 @@ pub(super) fn draw_overlays(
             paint.ring(p, r, Color::srgb(0.4, 0.8, 1.0).with_alpha(0.7));
         }
         if vitals.shield > 0 {
-            // Spawn protection: a shimmering bubble that flickers faster as it runs out.
+            // Spawn protection: a shimmering frame that flickers faster as it runs out.
             let left = vitals.shield as f32 / 160.0;
             let flicker = 0.45 + 0.35 * (t * (8.0 + 16.0 * (1.0 - left))).sin();
             let bubble = Color::srgb(0.55, 0.85, 1.0).with_alpha(flicker);
             let center = p + Vec2::Y * (SURVIVOR_HEIGHT / 2.0 - FOOT_INSET);
-            paint.oval(center, Vec2::new(30.0, SURVIVOR_HEIGHT / 2.0 + 4.0), bubble);
-            paint.ring(p, PLAYER_RADIUS + 6.0, bubble);
+            paint.frame(center, Vec2::new(72.0, SURVIVOR_HEIGHT + 16.0), bubble);
         }
         if stats.has_bounty() {
             let pulse = 0.6 + 0.4 * (t * 6.0).sin();
