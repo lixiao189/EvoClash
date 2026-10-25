@@ -15,6 +15,11 @@ const SWING_THROUGH: f32 = 1.1;
 const SWING_LUNGE: f32 = 6.0;
 /// Guns are drawn at one texture pixel per world pixel, like the LPC characters holding them.
 const GUN_SCALE: f32 = 1.0;
+/// The off hand steadying a gun: a glove-colored square this big, this far (as a share of the
+/// gun's length) ahead of the rear grip.
+const HAND_SIZE: f32 = 4.0;
+const HAND_COLOR: Color = Color::srgb(0.24, 0.22, 0.21);
+const HAND_REACH: f32 = 0.36;
 /// Muzzle flash lifetime and its size for a rifle, in world pixels.
 const FLASH_SECS: f32 = 0.06;
 const FLASH_SIZE: Vec2 = Vec2::new(22.0, 14.0);
@@ -73,6 +78,13 @@ pub(super) fn dress_player(
             Visibility::Hidden,
         ))
         .id();
+    let hand = commands
+        .spawn((
+            Sprite::from_color(HAND_COLOR, Vec2::splat(HAND_SIZE)),
+            Transform::default(),
+            Visibility::Hidden,
+        ))
+        .id();
     let flash = commands
         .spawn((
             Sprite::from_image(textures.muzzle.clone()),
@@ -95,6 +107,7 @@ pub(super) fn dress_player(
                 club,
                 club_behind,
                 weapon,
+                hand,
                 flash,
                 shown: None,
                 last: Vec2::ZERO,
@@ -102,7 +115,7 @@ pub(super) fn dress_player(
                 died: None,
             },
         ))
-        .add_children(&[shadow, body, team, club, club_behind, weapon, flash])
+        .add_children(&[shadow, body, team, club, club_behind, weapon, hand, flash])
         .with_child((
             NameLabel,
             Text2d::new(player.name.clone()),
@@ -408,6 +421,8 @@ pub(super) fn pose_players(
         // body, out of sight.
         let gun = !melee && parts.died.is_none();
         show(parts.weapon, gun);
+        // Facing away, both hands are hidden in front of the body.
+        show(parts.hand, gun && row != 0);
         let attack = attack_pose(loadout.weapon, aim, since);
         let lit = gun && attack.flash_alpha > 0.0;
         show(parts.flash, lit);
@@ -440,6 +455,13 @@ pub(super) fn pose_players(
             transform.translation = center.extend(z);
             transform.rotation = Quat::from_rotation_z(held.to_angle());
             transform.scale = Vec3::new(GUN_SCALE, GUN_SCALE, 1.0);
+        }
+        if row != 0
+            && let Ok((_, mut transform)) = parts_q.get_mut(parts.hand)
+        {
+            let reach = sprite_info.size.x * GUN_SCALE * HAND_REACH;
+            transform.translation = (grip + held * reach).extend(3.5 * Z_STEP);
+            transform.rotation = Quat::from_rotation_z(held.to_angle());
         }
         parts.shown = Some(loadout.weapon);
         // Drawn over everything, even a gun held behind the body.
@@ -505,6 +527,8 @@ pub(super) fn tint_players(
             } else {
                 let base = if child == parts.team {
                     player_color(player)
+                } else if child == parts.hand {
+                    HAND_COLOR
                 } else {
                     Color::WHITE
                 };

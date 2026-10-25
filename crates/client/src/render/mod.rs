@@ -124,6 +124,8 @@ struct PlayerParts {
     club_behind: Entity,
     /// A gun, held at the hip.
     weapon: Entity,
+    /// The other hand, on the gun's fore end.
+    hand: Entity,
     /// Muzzle flash at the barrel, shown for a moment after each shot.
     flash: Entity,
     shown: Option<WeaponKind>,
