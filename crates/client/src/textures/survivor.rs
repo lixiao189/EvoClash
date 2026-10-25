@@ -205,14 +205,23 @@ pub(super) fn paint_head_side(c: &mut Canvas, y0: i32) {
     c.rect(6, 12 + y0, 7, 13 + y0, shade(SCARF, 0.8));
 }
 
-/// Forearm sleeve, pointing +X, cuff at the right where the fist takes over.
-pub(super) fn paint_arm() -> Canvas {
-    let mut c = Canvas::new(7, 5);
+/// Sleeve lengths in texture pixels: a gun's stock hides most of the arm, while a melee weapon
+/// held out at [`MELEE_REACH`] shows all of it.
+pub const ARM: u32 = 7;
+pub const LONG_ARM: u32 = 10;
+/// How far out from the shoulder a melee weapon's fist sits, in texture pixels, so it swings at
+/// arm's length instead of hugging the chin.
+pub const MELEE_REACH: f32 = 5.0;
+
+/// Forearm sleeve `len` pixels long, pointing +X, cuff at the right where the fist takes over.
+pub(super) fn paint_arm(len: u32) -> Canvas {
+    let mut c = Canvas::new(len, 5);
     let cloth = rgb(0.93, 0.93, 0.93);
-    c.rect(1, 1, 5, 3, cloth);
-    c.rect(1, 1, 4, 1, shade(cloth, 1.08));
-    c.rect(1, 3, 5, 3, shade(cloth, 0.72));
-    c.rect(5, 1, 5, 3, shade(cloth, 0.8));
+    let cuff = len as i32 - 2;
+    c.rect(1, 1, cuff, 3, cloth);
+    c.rect(1, 1, cuff - 1, 1, shade(cloth, 1.08));
+    c.rect(1, 3, cuff, 3, shade(cloth, 0.72));
+    c.rect(cuff, 1, cuff, 3, shade(cloth, 0.8));
     c.outline(OUTLINE);
     c
 }

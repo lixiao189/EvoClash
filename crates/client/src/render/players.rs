@@ -47,7 +47,7 @@ pub(super) fn dress_player(
         .id();
     let (weapon, transform) = pixel_sprite(textures.weapon(WeaponKind::Stick).held.clone());
     let weapon = commands.spawn((weapon, transform)).id();
-    let (mut arm, transform) = pixel_sprite(textures.arm.clone());
+    let (mut arm, transform) = pixel_sprite(textures.long_arm.clone());
     arm.color = player_color(player);
     let arm = commands.spawn((arm, transform)).id();
     let flash = commands
@@ -340,21 +340,35 @@ pub(super) fn pose_players(
         // The weapon pivots at the hands; when you face away it's held in front of you, out of sight.
         let behind = facing == Facing::Up;
         let sprite_info = tex.weapon(loadout.weapon);
-        let pivot = Vec2::new(
+        // A melee weapon has no stock to hide the arm, so it's held out at arm's length.
+        let melee = loadout.weapon.melee().is_some();
+        let (reach, arm_len) = if melee {
+            (textures::MELEE_REACH, textures::LONG_ARM)
+        } else {
+            (0.0, textures::ARM)
+        };
+        let shoulder = Vec2::new(
             if facing == Facing::Side {
                 if flip { -4.0 } else { 4.0 }
             } else {
                 0.0
             },
             GUN_HEIGHT,
-        ) + attack.push;
-        let (center, arm_at) =
-            textures::held_layout(pivot, held, sprite_info.size, sprite_info.grip, left);
+        );
+        let pivot = shoulder + held * reach * PIXEL + attack.push;
+        let (center, arm_at) = textures::held_layout(
+            pivot,
+            held,
+            sprite_info.size,
+            sprite_info.grip,
+            left,
+            arm_len,
+        );
         let z = if behind { -2.0 * Z_STEP } else { 3.0 * Z_STEP };
+        let new_weapon = parts.shown != Some(loadout.weapon);
         if let Ok((mut sprite, mut transform)) = parts_q.get_mut(parts.weapon) {
-            if parts.shown != Some(loadout.weapon) {
+            if new_weapon {
                 sprite.image = sprite_info.held.clone();
-                parts.shown = Some(loadout.weapon);
             }
             // Keep the gun upright when it points left.
             sprite.flip_y = left;
@@ -363,10 +377,14 @@ pub(super) fn pose_players(
         }
         // Under the weapon, so the fist closes over the cuff.
         if let Ok((mut sprite, mut transform)) = parts_q.get_mut(parts.arm) {
+            if new_weapon {
+                sprite.image = if melee { &tex.long_arm } else { &tex.arm }.clone();
+            }
             sprite.flip_y = left;
             transform.translation = arm_at.extend(z - Z_STEP);
             transform.rotation = Quat::from_rotation_z(held.to_angle());
         }
+        parts.shown = Some(loadout.weapon);
         // Drawn over everything, even a gun raised behind the head.
         let lit = attack.flash_alpha > 0.0;
         if let Ok(mut visibility) = shown.get_mut(parts.flash) {
