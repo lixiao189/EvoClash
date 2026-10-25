@@ -102,6 +102,11 @@ pub struct CameraShake(pub f32);
 #[derive(Component)]
 struct NameLabel;
 
+/// When (`Time::elapsed_secs`) a combatant last fired or swung; drives recoil, the muzzle flash
+/// and the swing arc. Set locally on click for us, and from server traffic for everyone else.
+#[derive(Component, Clone, Copy)]
+pub struct Strike(pub f32);
+
 /// The sprites making up a combatant, animated each frame.
 #[derive(Component)]
 struct PlayerParts {
@@ -110,6 +115,8 @@ struct PlayerParts {
     weapon: Entity,
     /// Sleeve from the shoulder to the grip, tinted like the jacket.
     arm: Entity,
+    /// Muzzle flash at the barrel, shown for a moment after each shot.
+    flash: Entity,
     shown: Option<WeaponKind>,
     last: Vec2,
     /// Distance walked, in animation frames.
@@ -235,9 +242,7 @@ impl Plugin for RenderPlugin {
                 adopt_layout,
                 build_scenery,
                 update_roofs,
-                sync_players,
-                pose_players,
-                tint_players,
+                (sync_players, strike_on_shot, pose_players, tint_players).chain(),
                 sync_props,
                 sync_turrets,
                 sync_traps,

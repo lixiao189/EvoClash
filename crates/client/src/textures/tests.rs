@@ -96,6 +96,144 @@ fn preview_survivor() {
     write_bmp(&sheet, zoom, &path);
 }
 
+/// Draw `src` at `scale` world pixels per texel, centered at world `at` (y up), rotated by `angle`.
+/// One sheet pixel is one world pixel.
+fn draw_sprite(
+    sheet: &mut Canvas,
+    src: &Canvas,
+    at: Vec2,
+    angle: f32,
+    flip: (bool, bool),
+    scale: Vec2,
+    tint: [f32; 4],
+) {
+    let (sin, cos) = angle.sin_cos();
+    let half = Vec2::new(src.w as f32, src.h as f32) * scale / 2.0;
+    let r = half.length().ceil() as i32 + 1;
+    for dy in -r..=r {
+        for dx in -r..=r {
+            let d = Vec2::new(dx as f32 + 0.5, dy as f32 + 0.5);
+            // World offset is (d.x, -d.y); undo rotation.
+            let w = Vec2::new(d.x, -d.y);
+            let l = Vec2::new(w.x * cos + w.y * sin, -w.x * sin + w.y * cos);
+            let mut u = (l.x + half.x) / scale.x;
+            let mut v = (half.y - l.y) / scale.y;
+            if flip.0 {
+                u = src.w as f32 - u;
+            }
+            if flip.1 {
+                v = src.h as f32 - v;
+            }
+            if u < 0.0 || v < 0.0 {
+                continue;
+            }
+            let p = src.get(u as i32, v as i32);
+            if p[3] > 0.0 {
+                sheet.put(
+                    (at.x + dx as f32) as i32,
+                    (-at.y + dy as f32) as i32,
+                    [
+                        p[0] * tint[0],
+                        p[1] * tint[1],
+                        p[2] * tint[2],
+                        p[3] * tint[3],
+                    ],
+                );
+            }
+        }
+    }
+}
+
+/// A survivor standing at `feet`, holding `kind` along `aim`, `since` seconds after attacking,
+/// posed the way render/players.rs does it.
+fn draw_armed(sheet: &mut Canvas, kind: WeaponKind, feet: Vec2, aim: Vec2, since: f32) {
+    const GUN_HEIGHT: f32 = 26.0;
+    const FOOT_INSET: f32 = 2.0;
+    let tint = [0.35, 0.6, 0.95, 1.0];
+    let px = Vec2::splat(PIXEL);
+    let (_, weapon, grip) = paint_weapon(kind);
+    let size = Vec2::new(weapon.w as f32, weapon.h as f32);
+    let (facing, flip) = Facing::from_aim(aim);
+    let (jacket, gear) = paint_survivor(facing, 0);
+    let body = feet + Vec2::Y * (SURVIVOR.y as f32 * PIXEL / 2.0 - FOOT_INSET);
+    let attack = crate::render::attack_pose(kind, aim, since);
+    let held = Vec2::from_angle(aim.to_angle() + attack.swing);
+    let left = aim.x < 0.0;
+    let pivot =
+        feet + Vec2::new(
+            if facing == Facing::Side {
+                if flip { -4.0 } else { 4.0 }
+            } else {
+                0.0
+            },
+            GUN_HEIGHT,
+        ) + attack.push;
+    let (center, arm_at) = held_layout(pivot, held, size, grip, left);
+    let behind = facing == Facing::Up;
+    let gun = |sheet: &mut Canvas| {
+        draw_sprite(
+            sheet,
+            &paint_arm(),
+            arm_at,
+            held.to_angle(),
+            (false, left),
+            px,
+            tint,
+        );
+        draw_sprite(
+            sheet,
+            &weapon,
+            center,
+            held.to_angle(),
+            (false, left),
+            px,
+            [1.0; 4],
+        );
+    };
+    if behind {
+        gun(sheet);
+    }
+    draw_sprite(sheet, &jacket, body, 0.0, (flip, false), px, tint);
+    draw_sprite(sheet, &gear, body, 0.0, (flip, false), px, [1.0; 4]);
+    if !behind {
+        gun(sheet);
+    }
+    if attack.flash_alpha > 0.0 {
+        let muzzle = center + held * (size.x / 2.0 - 1.0) * PIXEL;
+        let flash = paint_muzzle();
+        let scale = attack.flash / Vec2::new(flash.w as f32, flash.h as f32);
+        let c = kind.stats().color.mix(&Color::WHITE, 0.45).to_srgba();
+        draw_sprite(
+            sheet,
+            &flash,
+            muzzle + held * attack.flash.x / 2.0,
+            held.to_angle(),
+            (false, false),
+            scale,
+            [c.red, c.green, c.blue, attack.flash_alpha],
+        );
+    }
+}
+
+fn checker(w: u32, h: u32) -> Canvas {
+    Canvas::filled(w, h, |x, y| {
+        if (x / 8 + y / 8) % 2 == 0 {
+            rgb(0.78, 0.62, 0.36)
+        } else {
+            rgb(0.74, 0.58, 0.33)
+        }
+    })
+}
+
+const ALL_WEAPONS: [WeaponKind; 6] = [
+    WeaponKind::Stick,
+    WeaponKind::Bow,
+    WeaponKind::PipeShotgun,
+    WeaponKind::Rifle,
+    WeaponKind::Laser,
+    WeaponKind::Railgun,
+];
+
 /// Dev aid: `EVOCLASH_ARMED_PREVIEW=out.bmp cargo test -p evoclash -- --ignored preview_armed`
 /// poses a survivor holding every weapon at several aim angles, the way the renderer does.
 #[test]
@@ -104,118 +242,50 @@ fn preview_armed() {
     let Ok(path) = std::env::var("EVOCLASH_ARMED_PREVIEW") else {
         return;
     };
-    // Mirrors render/: one sheet pixel is one world pixel.
-    const GUN_HEIGHT: f32 = 26.0;
-    const FOOT_INSET: f32 = 2.0;
-    let tint = [0.35, 0.6, 0.95];
     let angles = [0.0f32, 35.0, 80.0, 145.0, 180.0, -45.0, -90.0, -140.0];
-    let kinds = [
-        WeaponKind::Stick,
-        WeaponKind::Bow,
-        WeaponKind::PipeShotgun,
-        WeaponKind::Rifle,
-        WeaponKind::Laser,
-        WeaponKind::Railgun,
-    ];
     let (cw, ch) = (96, 96);
-    let mut sheet = Canvas::filled(cw * angles.len() as u32, ch * kinds.len() as u32, |x, y| {
-        if (x / 8 + y / 8) % 2 == 0 {
-            rgb(0.78, 0.62, 0.36)
-        } else {
-            rgb(0.74, 0.58, 0.33)
-        }
-    });
-    let arm = paint_arm();
-    // Draw `src` scaled by PIXEL, centered at world `at` (y up), rotated by `angle`.
-    let draw = |sheet: &mut Canvas,
-                src: &Canvas,
-                at: Vec2,
-                angle: f32,
-                flip: (bool, bool),
-                tint: [f32; 3]| {
-        let (sin, cos) = angle.sin_cos();
-        let half = Vec2::new(src.w as f32, src.h as f32) * PIXEL / 2.0;
-        let r = half.length().ceil() as i32 + 1;
-        for dy in -r..=r {
-            for dx in -r..=r {
-                let d = Vec2::new(dx as f32 + 0.5, dy as f32 + 0.5);
-                // World offset is (d.x, -d.y); undo rotation.
-                let w = Vec2::new(d.x, -d.y);
-                let l = Vec2::new(w.x * cos + w.y * sin, -w.x * sin + w.y * cos);
-                let mut u = (l.x + half.x) / PIXEL;
-                let mut v = (half.y - l.y) / PIXEL;
-                if flip.0 {
-                    u = src.w as f32 - u;
-                }
-                if flip.1 {
-                    v = src.h as f32 - v;
-                }
-                if u < 0.0 || v < 0.0 {
-                    continue;
-                }
-                let p = src.get(u as i32, v as i32);
-                if p[3] > 0.0 {
-                    sheet.put(
-                        (at.x + dx as f32) as i32,
-                        (-at.y + dy as f32) as i32,
-                        [p[0] * tint[0], p[1] * tint[1], p[2] * tint[2], p[3]],
-                    );
-                }
-            }
-        }
-    };
-    for (row, kind) in kinds.iter().enumerate() {
-        let (_, weapon, grip) = paint_weapon(*kind);
-        let size = Vec2::new(weapon.w as f32, weapon.h as f32);
+    let mut sheet = checker(cw * angles.len() as u32, ch * ALL_WEAPONS.len() as u32);
+    for (row, kind) in ALL_WEAPONS.iter().enumerate() {
         for (col, deg) in angles.iter().enumerate() {
-            let aim = Vec2::from_angle(deg.to_radians());
             let feet = Vec2::new(
                 col as f32 * cw as f32 + 48.0,
                 -(row as f32 * ch as f32 + 84.0),
             );
-            let (facing, flip) = Facing::from_aim(aim);
-            let (jacket, gear) = paint_survivor(facing, 0);
-            let body = feet + Vec2::Y * (SURVIVOR.y as f32 * PIXEL / 2.0 - FOOT_INSET);
-            let pivot = feet
-                + Vec2::new(
-                    if facing == Facing::Side {
-                        if flip { -4.0 } else { 4.0 }
-                    } else {
-                        0.0
-                    },
-                    GUN_HEIGHT,
-                );
-            let (center, arm_at) = held_layout(pivot, aim, size, grip);
-            let behind = facing == Facing::Up;
-            let gun = |sheet: &mut Canvas| {
-                draw(
-                    sheet,
-                    &arm,
-                    arm_at,
-                    aim.to_angle(),
-                    (false, aim.x < 0.0),
-                    tint,
-                );
-                draw(
-                    sheet,
-                    &weapon,
-                    center,
-                    aim.to_angle(),
-                    (false, aim.x < 0.0),
-                    [1.0; 3],
-                );
-            };
-            if behind {
-                gun(&mut sheet);
-            }
-            draw(&mut sheet, &jacket, body, 0.0, (flip, false), tint);
-            draw(&mut sheet, &gear, body, 0.0, (flip, false), [1.0; 3]);
-            if !behind {
-                gun(&mut sheet);
-            }
+            let aim = Vec2::from_angle(deg.to_radians());
+            draw_armed(&mut sheet, *kind, feet, aim, f32::INFINITY);
         }
     }
     write_bmp(&sheet, 4, &path);
+}
+
+/// Dev aid: `EVOCLASH_ATTACK_PREVIEW=out.bmp cargo test -p evoclash -- --ignored preview_attacks`
+/// steps through a swing and every gun's recoil and muzzle flash, aiming right then left
+/// (one column per 1/30 s after the strike).
+#[test]
+#[ignore]
+fn preview_attacks() {
+    let Ok(path) = std::env::var("EVOCLASH_ATTACK_PREVIEW") else {
+        return;
+    };
+    let steps = 10;
+    let (cw, ch) = (96, 96);
+    let mut sheet = checker(cw * steps, ch * 2 * ALL_WEAPONS.len() as u32);
+    for (k, kind) in ALL_WEAPONS.iter().enumerate() {
+        for (side, aim) in [Vec2::X, Vec2::new(-1.0, 0.3).normalize()]
+            .iter()
+            .enumerate()
+        {
+            let row = k * 2 + side;
+            for col in 0..steps {
+                let feet = Vec2::new(
+                    col as f32 * cw as f32 + 48.0,
+                    -(row as f32 * ch as f32 + 80.0),
+                );
+                draw_armed(&mut sheet, *kind, feet, *aim, col as f32 / 30.0);
+            }
+        }
+    }
+    write_bmp(&sheet, 3, &path);
 }
 
 /// Dev aid: `EVOCLASH_CITY_PREVIEW=out.bmp cargo test -p evoclash -- --ignored preview_city`
@@ -281,16 +351,17 @@ fn preview_effects() {
     };
     let mut sheet = Canvas::filled(400, 120, |_, _| rgb(0.36, 0.22, 0.16));
     let tints = [
-        (paint_bolt(), rgb(1.0, 0.9, 0.4), 0),
-        (paint_slash(), rgb(1.0, 0.92, 0.75), 60),
-        (paint_shock(), rgb(1.0, 0.6, 0.2), 160),
-        (paint_blast(), rgb(1.0, 0.5, 0.12), 290),
+        (paint_bolt(), rgb(1.0, 0.9, 0.4), 0, 10),
+        (paint_muzzle(), rgb(1.0, 0.85, 0.55), 0, 40),
+        (paint_slash(), rgb(1.0, 0.92, 0.75), 60, 10),
+        (paint_shock(), rgb(1.0, 0.6, 0.2), 160, 10),
+        (paint_blast(), rgb(1.0, 0.5, 0.12), 290, 10),
     ];
-    for (c, tint, ox) in tints {
+    for (c, tint, ox, oy) in tints {
         for y in 0..c.h as i32 {
             for x in 0..c.w as i32 {
                 let p = c.get(x, y);
-                let (px, py) = (ox + x, 10 + y);
+                let (px, py) = (ox + x, oy + y);
                 if px >= 400 || py >= 120 {
                     continue;
                 }
@@ -419,7 +490,13 @@ fn sprites_have_opaque_pixels() {
         assert!(canvas.px.iter().any(|p| p[3] > 0.9));
     }
     // Soft effects never reach full opacity but must not be blank.
-    for canvas in [paint_bolt(), paint_slash(), paint_shock(), paint_blast()] {
+    for canvas in [
+        paint_bolt(),
+        paint_slash(),
+        paint_muzzle(),
+        paint_shock(),
+        paint_blast(),
+    ] {
         assert!(canvas.px.iter().any(|p| p[3] > 0.5));
     }
 }

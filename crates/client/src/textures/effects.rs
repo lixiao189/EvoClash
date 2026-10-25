@@ -35,6 +35,22 @@ pub(super) fn paint_slash() -> Canvas {
     })
 }
 
+pub(super) fn paint_muzzle() -> Canvas {
+    let (w, h) = (32u32, 20u32);
+    Canvas::filled(w, h, |x, y| {
+        let u = (x as f32 + 0.5) / w as f32;
+        let v = ((y as f32 + 0.5) / h as f32 - 0.5) * 2.0;
+        // Hot spot on the barrel, a tongue of flame ahead of it and two short side spikes.
+        let core = (1.0 - Vec2::new(u * 4.0, v * 1.4).length()).max(0.0);
+        let half = 0.8 * (1.0 - u).powf(0.7);
+        let tongue = (1.0 - v.abs() / half.max(1e-3)).max(0.0) * (1.0 - u).powf(0.5);
+        let spikes = (1.0 - (u - 0.2).abs() * 12.0 - v.abs() * 1.1).max(0.0);
+        let grain = 0.8 + 0.2 * noise(x as f32 / 3.0, y as f32 / 3.0, 7, 11);
+        let a = core.max(tongue * grain).max(spikes * 0.85);
+        [1.0, 1.0, 1.0, (a * 1.6).min(1.0)]
+    })
+}
+
 pub(super) fn paint_shock() -> Canvas {
     let n = 128u32;
     let half = n as f32 / 2.0;
