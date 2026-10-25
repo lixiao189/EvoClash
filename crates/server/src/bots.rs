@@ -6,9 +6,9 @@ use bevy::prelude::*;
 use evoclash_game::evolution::{EvoPath, Evolution, Skill, SkillState};
 use evoclash_game::items::{Arm, ArmorKind, WeaponKind};
 use evoclash_game::map::ARENA_HALF;
-use evoclash_game::nav::{NavGrid, next_waypoint};
+use evoclash_game::nav::{NavGrid, clear_ahead, next_waypoint};
 use evoclash_game::protocol::*;
-use evoclash_game::sim::{Arena, PLAYER_RADIUS};
+use evoclash_game::sim::{Arena, DT, Obstacles, PLAYER_RADIUS, PLAYER_SPEED};
 use rand::Rng;
 
 use crate::combat::auto_wants;
@@ -22,6 +22,8 @@ const SKILL_RANGE: f32 = 500.0;
 
 const SIGHT: f32 = 820.0;
 const THINK_EVERY: u16 = 4;
+/// How far ahead a bot checks its heading for walls: a bit more than it covers between thinks.
+const PROBE: f32 = PLAYER_SPEED * DT * (THINK_EVERY + 2) as f32;
 /// Think cycles a bot must keep a target before it opens fire (~0.3 s): a reaction time.
 const REACTION_THINKS: u16 = 3;
 // Target choice is "closest, weighted": below 1 is more attractive, above 1 less.
@@ -94,7 +96,7 @@ impl Plugin for BotsPlugin {
 /// Each match has a new layout, so the grid is rebuilt whenever the arena changes.
 fn rebuild_nav(mut commands: Commands, arena: Res<Arena>, nav: Option<Res<Nav>>) {
     if nav.is_none() || arena.is_changed() {
-        commands.insert_resource(Nav(NavGrid::new(&arena, PLAYER_RADIUS + 6.0)));
+        commands.insert_resource(Nav(NavGrid::new(&arena, PLAYER_RADIUS + 2.0)));
     }
 }
 
@@ -149,25 +151,39 @@ fn balance_bots(
     }
 }
 
-fn to_axis(v: f32) -> i8 {
-    if v > 0.38 {
-        1
-    } else if v < -0.38 {
-        -1
-    } else {
-        0
-    }
-}
-
-fn steer(input: &mut PlayerInput, dir: Vec2) {
+/// Inputs only move in 8 directions: take the one closest to `dir` whose next stretch is free
+/// of walls and props, so a bot slides around corners instead of grinding into them.
+fn steer(input: &mut PlayerInput, dir: Vec2, arena: &Arena, obstacles: &[(Vec2, f32)], at: Vec2) {
     let dir = dir.normalize_or_zero();
-    input.move_x = to_axis(dir.x);
-    input.move_y = to_axis(dir.y);
+    if dir == Vec2::ZERO {
+        input.move_x = 0;
+        input.move_y = 0;
+        return;
+    }
+    let mut axes: Vec<(i8, i8)> = (-1..=1)
+        .flat_map(|x| (-1..=1).map(move |y| (x, y)))
+        .filter(|&a| a != (0, 0))
+        .collect();
+    let along = |(x, y): (i8, i8)| Vec2::new(x as f32, y as f32).normalize().dot(dir);
+    axes.sort_by(|a, b| along(*b).total_cmp(&along(*a)));
+    // Never turn more than 135° away; if everything near is blocked, push on and slide.
+    let (x, y) = axes
+        .iter()
+        .take(7)
+        .copied()
+        .find(|&(x, y)| {
+            let d = Vec2::new(x as f32, y as f32);
+            clear_ahead(arena, obstacles, at, d, PLAYER_RADIUS, PROBE)
+        })
+        .unwrap_or(axes[0]);
+    input.move_x = x;
+    input.move_y = y;
 }
 
 #[allow(clippy::type_complexity)]
 fn think(
     arena: Res<Arena>,
+    obstacles: Res<Obstacles>,
     nav: Option<Res<Nav>>,
     mut bots: Query<(
         Entity,
@@ -273,7 +289,7 @@ fn think(
             } else {
                 strafe
             };
-            steer(&mut input, dir);
+            steer(&mut input, dir, &arena, &obstacles.0, pos.0);
             input.fire = bot.locked_for > REACTION_THINKS && dist < range && rng.random_bool(0.85);
             input.dash = dist < 260.0 && rng.random_bool(0.04);
             input.throw =
@@ -282,7 +298,7 @@ fn think(
             if vitals.stealth > 0 && vitals.hp < 0.5 * vitals.max_hp {
                 input.fire = false;
                 input.throw = false;
-                steer(&mut input, -to_enemy);
+                steer(&mut input, -to_enemy, &arena, &obstacles.0, pos.0);
             }
             input.skill_b = skills.skill_b.is_some() && skills.cd_b == 0 && dist < SKILL_RANGE;
         } else {
@@ -312,7 +328,7 @@ fn think(
             }
             let goal = upgrade.unwrap_or(bot.goal);
             let dir = next_waypoint(&nav.0, &arena, pos.0, goal, PLAYER_RADIUS) - pos.0;
-            steer(&mut input, dir);
+            steer(&mut input, dir, &arena, &obstacles.0, pos.0);
             input.aim = dir.normalize_or(Vec2::X);
         }
         // Skill A: on a nearby target, or to save yourself (shield, stealth) when hurt.

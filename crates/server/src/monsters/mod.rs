@@ -12,7 +12,7 @@ use bevy::prelude::*;
 use evoclash_game::evolution::{STEALTH_SIGHT, seen_from};
 use evoclash_game::items::{ArmorKind, Item, WeaponKind, roll_loot};
 use evoclash_game::map::{ARENA_HALF, Biome, Block, MARGIN, VAULT_CENTER};
-use evoclash_game::nav::next_waypoint;
+use evoclash_game::nav::{next_waypoint, steer_clear};
 use evoclash_game::protocol::*;
 use evoclash_game::sim::{Arena, DT, Obstacles, PLAYER_RADIUS};
 use lightyear::prelude::*;

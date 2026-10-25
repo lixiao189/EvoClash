@@ -215,6 +215,17 @@ pub(super) fn roam(
         };
 
         let radius = kind.radius();
+        // Look ahead and turn along walls rather than into them (crawlers turn on their own).
+        let velocity = if kind.flies() || kind == MonsterKind::Crawler {
+            velocity
+        } else {
+            let steered = steer_clear(&arena, &obstacles.0, at, velocity, radius, 2.0 * radius);
+            // A wanderer keeps the new heading instead of swinging back into the wall.
+            if steered != velocity && velocity.normalize_or_zero().dot(brain.heading) > 0.99 {
+                brain.heading = steered.normalize_or(brain.heading);
+            }
+            steered
+        };
         let want = at + velocity * dt;
         let next = if kind.flies() {
             // Flies over walls and props, but stays near home and never over a roof.
@@ -232,8 +243,10 @@ pub(super) fn roam(
         } else {
             let next = arena.resolve_with(want, radius, &obstacles.0);
             if next.distance_squared(want) > 1.0 {
-                // Bumped into something: pick a new direction next time.
-                brain.turn_in = 0;
+                // Bumped into something: head off away from it, not just anywhere.
+                let away = (next - want).normalize_or(-brain.heading);
+                brain.heading = Vec2::from_angle(rng.random_range(-1.2..1.2)).rotate(away);
+                brain.turn_in = rng.random_range(40..160);
             }
             next
         };
