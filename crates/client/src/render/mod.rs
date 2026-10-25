@@ -4,6 +4,7 @@
 //!
 //! Collision is unchanged: every position is still the point on the ground under the feet.
 
+use bevy::image::{ImageLoaderSettings, ImageSampler};
 use bevy::prelude::*;
 use bevy::sprite::{Anchor, SpriteImageMode};
 use bevy::window::PrimaryWindow;
@@ -17,9 +18,11 @@ use evoclash_game::sim::{Arena, PLAYER_RADIUS};
 use lightyear::prelude::input::native::ActionState;
 use rand::Rng;
 
+use crate::assets::PendingAssets;
 use crate::input::{CursorWorld, GUN_HEIGHT, LocalPlayer};
+use crate::lpc;
 use crate::predict::TickSamples;
-use crate::textures::{self, Facing, PIXEL, SURVIVOR, Textures, WallSprites};
+use crate::textures::{self, Facing, PIXEL, Textures, WallSprites};
 
 mod camera;
 mod monsters;
@@ -61,7 +64,8 @@ const ROOF_SEE_THROUGH: f32 = 0.12;
 const Z_STEP: f32 = 0.00001;
 /// Feet of the survivor sprite sit this far above its texture's bottom edge (world pixels).
 const FOOT_INSET: f32 = 2.0;
-const SURVIVOR_HEIGHT: f32 = SURVIVOR.y as f32 * PIXEL;
+/// Top of a player's head above the feet.
+const SURVIVOR_HEIGHT: f32 = lpc::HEIGHT;
 /// Others under 隐身 are drawn this faint (when the server lets us see them at all).
 const STEALTH_ALPHA: f32 = 0.15;
 /// You see yourself half-faded while hidden.
@@ -110,17 +114,33 @@ pub struct Strike(pub f32);
 /// The sprites making up a combatant, animated each frame.
 #[derive(Component)]
 struct PlayerParts {
-    jacket: Entity,
-    gear: Entity,
+    /// The outfit (it changes with the armor worn), and the bandana over it in the player's color.
+    body: Entity,
+    team: Entity,
+    /// A club in front of the body, and the parts of it that swing behind.
+    club: Entity,
+    club_behind: Entity,
+    /// A gun, held at the hip.
     weapon: Entity,
-    /// Sleeve from the shoulder to the grip, tinted like the jacket.
-    arm: Entity,
     /// Muzzle flash at the barrel, shown for a moment after each shot.
     flash: Entity,
     shown: Option<WeaponKind>,
     last: Vec2,
-    /// Distance walked, in animation frames.
+    /// Distance walked, in stride frames.
     stride: f32,
+    /// When the combatant died, while the fall plays.
+    died: Option<f32>,
+}
+
+/// The LPC sheets players are drawn with (see `crate::lpc`).
+#[derive(Resource)]
+struct LpcSprites {
+    bodies: [Handle<Image>; 4],
+    team: Handle<Image>,
+    club: Handle<Image>,
+    club_behind: Handle<Image>,
+    layout: Handle<TextureAtlasLayout>,
+    club_layout: Handle<TextureAtlasLayout>,
 }
 
 #[derive(Component)]
@@ -226,7 +246,7 @@ impl Plugin for RenderPlugin {
         app.insert_resource(ClearColor(Color::srgb(0.1, 0.06, 0.08)));
         app.init_resource::<CameraShake>()
             .init_resource::<Indoors>();
-        app.add_systems(PreStartup, (load_font, load_textures));
+        app.add_systems(PreStartup, (load_font, load_textures, load_lpc));
         app.add_systems(Startup, spawn_camera);
         app.add_observer(dress_player);
         app.add_observer(dress_pickup);
@@ -274,6 +294,46 @@ fn load_font(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
 
 fn load_textures(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     commands.insert_resource(textures::build(&mut images));
+}
+
+/// Start fetching the player sheets; the session waits for them (`PendingAssets`).
+fn load_lpc(
+    mut commands: Commands,
+    server: Res<AssetServer>,
+    mut layouts: ResMut<Assets<TextureAtlasLayout>>,
+    mut pending: ResMut<PendingAssets>,
+) {
+    let mut load = |path: &'static str| {
+        let handle: Handle<Image> = server
+            .load_builder()
+            .with_settings(|settings: &mut ImageLoaderSettings| {
+                settings.sampler = ImageSampler::nearest();
+            })
+            .load(path);
+        pending.add(handle.clone());
+        handle
+    };
+    let sprites = LpcSprites {
+        bodies: lpc::BODY_FILES.map(&mut load),
+        team: load(lpc::TEAM_FILE),
+        club: load(lpc::CLUB_FILE),
+        club_behind: load(lpc::CLUB_BEHIND_FILE),
+        layout: layouts.add(TextureAtlasLayout::from_grid(
+            UVec2::splat(lpc::CELL),
+            lpc::COLUMNS,
+            lpc::ROWS,
+            None,
+            None,
+        )),
+        club_layout: layouts.add(TextureAtlasLayout::from_grid(
+            UVec2::splat(lpc::CLUB_CELL),
+            lpc::CLUB_COLUMNS,
+            lpc::ROWS,
+            None,
+            None,
+        )),
+    };
+    commands.insert_resource(sprites);
 }
 
 fn spawn_camera(mut commands: Commands) {

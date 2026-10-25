@@ -12,7 +12,7 @@ pub struct CursorWorld(pub Option<Vec2>);
 
 /// How far above the feet guns are held and shots are drawn, in world pixels. Aim is measured
 /// from here so that pointing at someone's chest on screen fires along the ground toward their feet.
-pub const GUN_HEIGHT: f32 = 26.0;
+pub const GUN_HEIGHT: f32 = 19.0;
 
 /// The combatant this client controls.
 #[derive(Component)]

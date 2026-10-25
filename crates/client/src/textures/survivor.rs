@@ -1,4 +1,5 @@
-//! Player characters: bodies in four facings with walk frames, arms and fists.
+//! The procedural survivor body, now worn only by raiders (players are LPC sprites, see
+//! `crate::lpc`), the four facings, and the gloved fists painted onto held weapons.
 
 use super::*;
 
@@ -15,15 +16,8 @@ pub enum Facing {
 }
 
 impl Facing {
+    #[cfg(test)]
     pub(super) const ALL: [Facing; 3] = [Facing::Down, Facing::Up, Facing::Side];
-
-    pub(super) fn index(self) -> usize {
-        match self {
-            Facing::Down => 0,
-            Facing::Up => 1,
-            Facing::Side => 2,
-        }
-    }
 
     /// Pick a facing from an aim direction: mostly sideways reads as side-on.
     pub fn from_aim(aim: Vec2) -> (Facing, bool) {
@@ -36,13 +30,6 @@ impl Facing {
             (Facing::Down, flip)
         }
     }
-}
-
-/// One animation frame: the jacket (tinted with the player's color) and everything else on top.
-#[derive(Clone)]
-pub struct SurvivorFrame {
-    pub jacket: Handle<Image>,
-    pub gear: Handle<Image>,
 }
 
 pub(super) const SKIN: Rgba = [0.93, 0.73, 0.57, 1.0];
@@ -205,30 +192,11 @@ pub(super) fn paint_head_side(c: &mut Canvas, y0: i32) {
     c.rect(6, 12 + y0, 7, 13 + y0, shade(SCARF, 0.8));
 }
 
-/// Sleeve lengths in texture pixels: a gun's stock hides most of the arm, while a melee weapon
-/// held out at [`MELEE_REACH`] shows all of it.
-pub const ARM: u32 = 7;
-pub const LONG_ARM: u32 = 10;
-/// How far out from the shoulder a melee weapon's fist sits, in texture pixels, so it swings at
-/// arm's length instead of hugging the chin.
-pub const MELEE_REACH: f32 = 5.0;
-
-/// Forearm sleeve `len` pixels long, pointing +X, cuff at the right where the fist takes over.
-pub(super) fn paint_arm(len: u32) -> Canvas {
-    let mut c = Canvas::new(len, 5);
-    let cloth = rgb(0.93, 0.93, 0.93);
-    let cuff = len as i32 - 2;
-    c.rect(1, 1, cuff, 3, cloth);
-    c.rect(1, 1, cuff - 1, 1, shade(cloth, 1.08));
-    c.rect(1, 3, cuff, 3, shade(cloth, 0.72));
-    c.rect(cuff, 1, cuff, 3, shade(cloth, 0.8));
-    c.outline(OUTLINE);
-    c
-}
-
-/// A fist wrapped around something two pixels thick, seen side-on: 3x4 pixels from (x, y).
-/// It gets its own dark edge where it overlaps the weapon so it doesn't melt into it.
+/// A gloved fist wrapped around something two pixels thick, seen side-on: 3x4 pixels from
+/// (x, y). Dark like the LPC characters' gloves; it gets its own dark edge where it overlaps
+/// the weapon so it doesn't melt into it.
 pub(super) fn paint_fist(c: &mut Canvas, x: i32, y: i32) {
+    const GLOVE: Rgba = [0.24, 0.22, 0.21, 1.0];
     for (ex, ey) in (x - 1..=x + 3)
         .flat_map(|ex| [(ex, y - 1), (ex, y + 4)])
         .chain((y..=y + 3).flat_map(|ey| [(x - 1, ey), (x + 3, ey)]))
@@ -237,12 +205,13 @@ pub(super) fn paint_fist(c: &mut Canvas, x: i32, y: i32) {
             c.put(ex, ey, OUTLINE);
         }
     }
-    c.rect(x, y, x + 2, y + 3, SKIN);
-    c.rect(x, y, x + 1, y, shade(SKIN, 1.08));
-    c.rect(x, y + 3, x + 2, y + 3, SKIN_SHADE);
-    c.rect(x, y + 1, x, y + 3, SKIN_SHADE);
+    let dark = shade(GLOVE, 0.7);
+    c.rect(x, y, x + 2, y + 3, GLOVE);
+    c.rect(x, y, x + 1, y, shade(GLOVE, 1.4));
+    c.rect(x, y + 3, x + 2, y + 3, dark);
+    c.rect(x, y + 1, x, y + 3, dark);
     // Knuckle creases between the curled fingers.
-    c.put(x + 2, y + 1, shade(SKIN_SHADE, 0.88));
-    c.put(x + 2, y + 2, shade(SKIN_SHADE, 0.88));
-    c.put(x + 1, y + 2, SKIN_SHADE);
+    c.put(x + 2, y + 1, shade(dark, 0.88));
+    c.put(x + 2, y + 2, shade(dark, 0.88));
+    c.put(x + 1, y + 2, dark);
 }

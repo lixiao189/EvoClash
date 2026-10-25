@@ -3,7 +3,7 @@
 EvoClash's **code** is licensed MIT OR Apache-2.0 (see the workspace `Cargo.toml`). The
 **sprite art** in `lpc/` is a separate work by other artists and is not covered by that license.
 
-- Everything in `lpc/` is distributed under the
+- Everything in `lpc/` (and the layers in `lpc-src/` it is baked from) is distributed under the
   [Creative Commons Attribution-ShareAlike 3.0](https://creativecommons.org/licenses/by-sa/3.0/)
   license (CC-BY-SA 3.0), unless `CREDITS.md` names a different license for a file.
 - The sheets are built from [Liberated Pixel Cup](https://lpc.opengameart.org/) art. Each source
