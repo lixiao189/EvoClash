@@ -51,6 +51,8 @@ pub const BODY_FILES: [&str; 4] = [
     "lpc/survivor-kevlar.png",
     "lpc/survivor-power.png",
 ];
+/// Raiders: a fixed outfit with their red bandana baked in, laid out like the body sheets.
+pub const RAIDER_FILE: &str = "lpc/raider.png";
 /// The bandana alone, white, tinted with the player's color.
 pub const TEAM_FILE: &str = "lpc/survivor-team.png";
 /// The club in front of the body, and the part of it that swings behind.
@@ -59,8 +61,11 @@ pub const CLUB_BEHIND_FILE: &str = "lpc/club-behind.png";
 
 /// Map tiles, drawn at one texture pixel per world pixel and repeated over each area.
 pub const GROUND_DIRT: &str = "lpc/ground-dirt.png";
-pub const GROUND_GRAVEL: &str = "lpc/ground-gravel.png";
 pub const SIDEWALK: &str = "lpc/sidewalk.png";
+/// A gravel patch whose edges fray into the dirt, stretched over an area with its edges kept
+/// whole: `GROUND_EDGE` pixels on every side.
+pub const GRAVEL_PATCH: &str = "lpc/ground-gravel-patch.png";
+pub const GROUND_EDGE: f32 = 32.0;
 pub const ROAD: &str = "lpc/road.png";
 /// Wall faces for brick, metal and rock walls, repeated sideways; their heights in pixels.
 pub const WALL_FACES: [&str; 3] = [

@@ -11,7 +11,7 @@ fn png_size(file: &str) -> (u32, u32) {
 /// The baked files match the layout the renderer slices them with.
 #[test]
 fn sheets_match_the_layout() {
-    for file in BODY_FILES.iter().chain([&TEAM_FILE]) {
+    for file in BODY_FILES.iter().chain([&TEAM_FILE, &RAIDER_FILE]) {
         assert_eq!(png_size(file), (COLUMNS * CELL, ROWS * CELL), "{file}");
     }
     for file in [CLUB_FILE, CLUB_BEHIND_FILE] {
@@ -77,7 +77,9 @@ fn map_tiles_match_the_layout() {
             "{file}"
         );
     }
-    for file in [GROUND_DIRT, GROUND_GRAVEL, SIDEWALK, ROAD, WALL_TOP] {
+    let (w, h) = png_size(GRAVEL_PATCH);
+    assert!(w as f32 > 2.0 * GROUND_EDGE && h as f32 > 2.0 * GROUND_EDGE);
+    for file in [GROUND_DIRT, SIDEWALK, ROAD, WALL_TOP] {
         let (w, h) = png_size(file);
         assert!(w % 32 == 0 && h % 32 == 0, "{file}: {w}x{h}");
     }

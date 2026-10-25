@@ -47,53 +47,35 @@ fn write_bmp(sheet: &Canvas, zoom: i32, path: &str) {
     std::fs::write(path, out).unwrap();
 }
 
-/// Dev aid: `EVOCLASH_SPRITE_PREVIEW=out.bmp cargo test -p evoclash -- --ignored preview`
-/// writes every survivor walk frame (rows: down, up, side) plus the monsters, blown up 8x.
+/// Dev aid: `EVOCLASH_SPRITE_PREVIEW=out.bmp cargo test -p evoclash -- --ignored preview_small`
+/// writes the small monsters and the ground clutter, blown up 8x (characters are LPC sheets,
+/// see `preview_poses`).
 #[test]
 #[ignore]
-fn preview_survivor() {
+fn preview_small() {
     let Ok(path) = std::env::var("EVOCLASH_SPRITE_PREVIEW") else {
         return;
     };
-    let tint = [0.35, 0.6, 0.95];
-    let zoom = 8;
-    let (cw, ch) = (SURVIVOR.x as i32 + 8, 40);
-    let (w, h) = (cw * WALK_FRAMES as i32 + 44, ch * 3);
-    let mut sheet = Canvas::filled(w as u32, h as u32, |_, _| rgb(0.36, 0.22, 0.16));
-    let blit = |sheet: &mut Canvas, src: &Canvas, dx: i32, dy: i32, tint: [f32; 3]| {
+    let mut sheet = Canvas::filled(60, 120, |_, _| rgb(0.36, 0.22, 0.16));
+    let blit = |sheet: &mut Canvas, src: &Canvas, dx: i32, dy: i32| {
         for y in 0..src.h as i32 {
             for x in 0..src.w as i32 {
-                let p = src.get(x, y);
-                sheet.put(
-                    dx + x,
-                    dy + y,
-                    [p[0] * tint[0], p[1] * tint[1], p[2] * tint[2], p[3]],
-                );
+                sheet.put(dx + x, dy + y, src.get(x, y));
             }
         }
     };
-    for (row, facing) in Facing::ALL.iter().enumerate() {
-        for frame in 0..WALK_FRAMES {
-            let (jacket, gear) = paint_survivor(*facing, frame);
-            let (ox, oy) = (frame as i32 * cw + 4, row as i32 * ch + 4);
-            blit(&mut sheet, &jacket, ox, oy, tint);
-            blit(&mut sheet, &gear, ox, oy, [1.0; 3]);
-        }
-    }
-    let x = cw * WALK_FRAMES as i32 + 4;
-    blit(&mut sheet, &paint_roach(0), x, 6, [1.0; 3]);
-    blit(&mut sheet, &paint_roach(1), x, 24, [1.0; 3]);
-    blit(&mut sheet, &paint_pod(), x, 44, [1.0; 3]);
+    blit(&mut sheet, &paint_roach(0), 4, 6);
+    blit(&mut sheet, &paint_roach(1), 4, 24);
+    blit(&mut sheet, &paint_pod(), 4, 44);
     for v in 0..5 {
         blit(
             &mut sheet,
             &paint_decor(v),
-            x + 2 + (v % 2) * 18,
+            6 + (v % 2) * 18,
             84 + (v / 2) * 12,
-            [1.0; 3],
         );
     }
-    write_bmp(&sheet, zoom, &path);
+    write_bmp(&sheet, 8, &path);
 }
 
 /// Draw `src` at `scale` world pixels per texel, centered at world `at` (y up), rotated by `angle`.
@@ -522,9 +504,6 @@ fn preview_monsters() {
             }
         }
     };
-    let (jacket, gear) = paint_survivor(Facing::Side, 0);
-    draw(&mut sheet, &jacket, 4, 80, [0.35, 0.6, 0.95]);
-    draw(&mut sheet, &gear, 4, 80, [1.0; 3]);
     let gold = [1.35, 1.1, 0.5];
     let row1 = [
         paint_roach(0),
@@ -535,18 +514,12 @@ fn preview_monsters() {
         paint_spitter(),
         paint_crawler(),
     ];
-    let mut x = 50;
+    let mut x = 4;
     for (i, c) in row1.iter().enumerate() {
         draw(&mut sheet, c, x, 80, if i == 3 { gold } else { [1.0; 3] });
         x += c.w as i32 * 2 + 4;
     }
-    let row2 = [
-        paint_raider(0),
-        paint_raider(1),
-        paint_drone(0),
-        paint_drone(1),
-        paint_acid(),
-    ];
+    let row2 = [paint_drone(0), paint_drone(1), paint_acid()];
     let mut x = 4;
     for c in &row2 {
         draw(&mut sheet, c, x, 150, [1.0; 3]);
@@ -590,14 +563,12 @@ fn sprites_have_opaque_pixels() {
         paint_turret_base(),
         paint_turret_head(),
         paint_trap(),
-        paint_survivor(Facing::Side, 1).0,
         paint_roach(0),
         paint_pod(),
         paint_dog(1),
         paint_ghoul(0),
         paint_spitter(),
         paint_crawler(),
-        paint_raider(2),
         paint_drone(1),
         paint_behemoth(1),
         paint_acid(),

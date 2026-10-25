@@ -68,7 +68,6 @@ pub struct Textures {
     pub spitter: Handle<Image>,
     /// Seen from above, facing +X; rotated to its heading at draw time.
     pub crawler: Handle<Image>,
-    pub raider: [Handle<Image>; WALK_FRAMES],
     /// Two rotor phases.
     pub drone: [Handle<Image>; 2],
     pub behemoth: [Handle<Image>; 2],
@@ -232,7 +231,6 @@ pub fn build(images: &mut Assets<Image>) -> Textures {
         ghoul: [0, 1].map(|frame| add(paint_ghoul(frame), true)),
         spitter: add(paint_spitter(), true),
         crawler: add(paint_crawler(), true),
-        raider: [0, 1, 2, 3].map(|frame| add(paint_raider(frame), true)),
         drone: [0, 1].map(|frame| add(paint_drone(frame), true)),
         behemoth: [0, 1].map(|frame| add(paint_behemoth(frame), true)),
         acid: add(paint_acid(), true),
