@@ -1,6 +1,7 @@
-//! Builds the sheets in `assets/lpc/` from the generator layers vendored in `assets/lpc-src/`:
+//! Builds the sheets in `assets/lpc/` from the art vendored in `assets/lpc-src/` (character
+//! generator layers, and crops of the LPC wall, roof, terrain and street tilesets in `map/`):
 //! `cargo test -p evoclash -- --ignored bake_lpc_sheets`. Rerun it after changing a layer, a
-//! tint or the sheet layout, and keep `assets/CREDITS.md` in step.
+//! tint or a layout, and keep `assets/CREDITS.md` in step.
 
 use std::path::{Path, PathBuf};
 
@@ -264,6 +265,88 @@ fn club_sheet(src: &mut Layers, walk: &str, slash: &str, hurt: &str) -> Rgba {
     sheet
 }
 
+/// A 3x3 patch of a terrain's fill tiles. The source strip holds four 32 px variants: plain,
+/// speckled, plain, and a dark blotch that would look busy if it came up on every tile.
+fn ground(fill: &Rgba) -> Rgba {
+    const PATCH: [[i32; 3]; 3] = [[0, 1, 2], [2, 3, 0], [1, 0, 2]];
+    let mut out = Rgba::new(96, 96);
+    for (ty, row) in PATCH.iter().enumerate() {
+        for (tx, v) in row.iter().enumerate() {
+            out.blit(
+                fill,
+                v * 32,
+                0,
+                32,
+                32,
+                tx as i32 * 32,
+                ty as i32 * 32,
+                PLAIN,
+            );
+        }
+    }
+    out
+}
+
+/// A wall face `height` px tall from a 4x3 wall block: two middle columns, keeping the top
+/// trim and the baseboard and dropping the middle of the wall.
+fn wall_face(block: &Rgba, height: i32) -> Rgba {
+    let top = height * 3 / 10;
+    let bottom = height - top;
+    let mut out = Rgba::new(64, height as u32);
+    out.blit(block, 32, 0, 64, top, 0, 0, PLAIN);
+    out.blit(
+        block,
+        32,
+        block.h as i32 - bottom,
+        64,
+        bottom,
+        0,
+        top,
+        PLAIN,
+    );
+    out
+}
+
+fn crop(src: &Rgba, x: i32, y: i32, w: i32, h: i32) -> Rgba {
+    let mut out = Rgba::new(w as u32, h as u32);
+    out.blit(src, x, y, w, h, 0, 0, PLAIN);
+    out
+}
+
+fn bake_map(out: &Path) {
+    let src = |name: &str| read(&assets().join("lpc-src/map").join(name));
+    write(&ground(&src("ground-dirt.png")), &out.join(GROUND_DIRT));
+    write(&ground(&src("ground-gravel.png")), &out.join(GROUND_GRAVEL));
+    // The sidewalk's plain flagstones (2x2 tiles) from the Modern Streets terrain.
+    write(
+        &crop(&src("sidewalk_terrain.png"), 192, 160, 64, 64),
+        &out.join(SIDEWALK),
+    );
+    // Asphalt with a couple of cracks in a 4x4 patch.
+    let base = src("base_road_tile.png");
+    let cracks = src("cracks_transparent.png");
+    let mut road = Rgba::new(128, 128);
+    for y in (0..128).step_by(32) {
+        for x in (0..128).step_by(32) {
+            road.blit(&base, 0, 0, 32, 32, x, y, PLAIN);
+        }
+    }
+    road.blit(&cracks, 160, 0, 32, 32, 0, 32, PLAIN);
+    road.blit(&cracks, 160, 32, 32, 32, 64, 96, PLAIN);
+    write(&road, &out.join(ROAD));
+    for ((file, block), height) in WALL_FACES
+        .iter()
+        .zip(["wall-brick.png", "wall-corrugated.png", "wall-cobble.png"])
+        .zip(WALL_FACE_HEIGHTS)
+    {
+        write(&wall_face(&src(block), height as i32), &out.join(file));
+    }
+    let tar = src("roof-tar.png");
+    write(&crop(&tar, 48, 40, 32, 32), &out.join(WALL_TOP));
+    write(&tar, &out.join(ROOF_TAR));
+    write(&src("roof-concrete.png"), &out.join(ROOF_CONCRETE));
+}
+
 #[test]
 #[ignore]
 fn bake_lpc_sheets() {
@@ -292,4 +375,5 @@ fn bake_lpc_sheets() {
         &format!("{mace}/universal_behind/hurt/mace.png"),
     );
     write(&behind, &out.join(CLUB_BEHIND_FILE));
+    bake_map(&out);
 }

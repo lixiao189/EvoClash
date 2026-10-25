@@ -25,10 +25,36 @@ Baked from the sources below by `cargo test -p evoclash -- --ignored bake_lpc_sh
 | `lpc/club.png` | mace (walk, attack_slash, hurt) | OGA-BY 3.0 |
 | `lpc/club-behind.png` | mace, behind-the-body parts | OGA-BY 3.0 |
 
+| `lpc/ground-dirt.png`, `lpc/ground-gravel.png` | `lpc-src/map/ground-*.png` fill tiles | CC-BY-SA 3.0 |
+| `lpc/sidewalk.png`, `lpc/road.png` | `lpc-src/map/sidewalk_terrain.png`, `base_road_tile.png`, `cracks_transparent.png` | CC0 |
+| `lpc/wall-brick.png`, `lpc/wall-metal.png`, `lpc/wall-rock.png` | `lpc-src/map/wall-*.png`, top trim and baseboard | CC-BY-SA 3.0 |
+| `lpc/wall-top.png`, `lpc/roof-tar.png`, `lpc/roof-concrete.png` | `lpc-src/map/roof-*.png` | CC-BY-SA 3.0 |
+
 The survivor sheets are CC-BY-SA 3.0 because the backpack is only offered under CC-BY-SA
 3.0 / GPL 3.0; every other piece is used under the first license listed for it below.
 
-### Sources (`lpc-src/`, from the Universal LPC Spritesheet Character Generator)
+### Map sources (`lpc-src/map/`)
+
+Crops of the tilesets, so the repository doesn't carry the whole multi-megabyte sheets. Each
+pack's own credits file is vendored next to them and lists every author it requires.
+
+| File | Cropped from (x, y, w, h) | Pack and authors | License used (offered) |
+|---|---|---|---|
+| `lpc-src/map/wall-brick.png` | `walls.png` (128, 832, 128, 96) | [LPC] Walls, see `lpc-src/map/CREDITS-walls.txt` | CC-BY-SA 3.0 |
+| `lpc-src/map/wall-cobble.png` | `walls.png` (256, 928, 128, 96) | [LPC] Walls, see `lpc-src/map/CREDITS-walls.txt` | CC-BY-SA 3.0 |
+| `lpc-src/map/wall-corrugated.png` | `walls.png` (1152, 2464, 128, 96) | [LPC] Walls, see `lpc-src/map/CREDITS-walls.txt` | CC-BY-SA 3.0 |
+| `lpc-src/map/roof-tar.png` | `roofs.png` (1112, 672, 112, 96) | [LPC] Roofs v2, see `lpc-src/map/CREDITS-roofs.txt` | CC-BY-SA 3.0 (CC-BY-SA 3.0, GPL 3.0) |
+| `lpc-src/map/roof-concrete.png` | `roofs.png` (760, 672, 112, 96) | [LPC] Roofs v2, see `lpc-src/map/CREDITS-roofs.txt` | CC-BY-SA 3.0 (CC-BY-SA 3.0, GPL 3.0) |
+| `lpc-src/map/ground-dirt.png` | `terrain-v7.png` (32, 96), (32, 160), (64, 160), (0, 160), 32x32 each | [LPC] Terrains, see `lpc-src/map/CREDITS-terrain.txt` | CC-BY-SA 3.0 (CC-BY-SA 3.0, 4.0) |
+| `lpc-src/map/ground-gravel.png` | `terrain-v7.png` (416, 96), (416, 160), (448, 160), (384, 160), 32x32 each | [LPC] Terrains, see `lpc-src/map/CREDITS-terrain.txt` | CC-BY-SA 3.0 (CC-BY-SA 3.0, 4.0) |
+| `lpc-src/map/base_road_tile.png` | whole file | LPC Modern Streets by Faufilage | CC0 |
+| `lpc-src/map/cracks_transparent.png` | whole file | LPC Modern Streets by Faufilage | CC0 |
+| `lpc-src/map/sidewalk_terrain.png` | whole file | LPC Modern Streets by Faufilage | CC0 |
+| `lpc-src/map/CREDITS-walls.txt` | the pack's credits | [LPC] Walls | — |
+| `lpc-src/map/CREDITS-roofs.txt` | the pack's credits | [LPC] Roofs v2 | — |
+| `lpc-src/map/CREDITS-terrain.txt` | the pack's credits | [LPC] Terrains | — |
+
+### Character sources (`lpc-src/`, from the Universal LPC Spritesheet Character Generator)
 
 | File | Authors | License used (offered) | Sources |
 |---|---|---|---|

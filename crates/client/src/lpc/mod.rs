@@ -57,6 +57,26 @@ pub const TEAM_FILE: &str = "lpc/survivor-team.png";
 pub const CLUB_FILE: &str = "lpc/club.png";
 pub const CLUB_BEHIND_FILE: &str = "lpc/club-behind.png";
 
+/// Map tiles, drawn at one texture pixel per world pixel and repeated over each area.
+pub const GROUND_DIRT: &str = "lpc/ground-dirt.png";
+pub const GROUND_GRAVEL: &str = "lpc/ground-gravel.png";
+pub const SIDEWALK: &str = "lpc/sidewalk.png";
+pub const ROAD: &str = "lpc/road.png";
+/// Wall faces for brick, metal and rock walls, repeated sideways; their heights in pixels.
+pub const WALL_FACES: [&str; 3] = [
+    "lpc/wall-brick.png",
+    "lpc/wall-metal.png",
+    "lpc/wall-rock.png",
+];
+pub const WALL_FACE_HEIGHTS: [u32; 3] = [64, 64, 40];
+/// The top of a wall, seen from above.
+pub const WALL_TOP: &str = "lpc/wall-top.png";
+/// Flat roofs (dark planks, pale concrete), stretched over a building with their frame kept
+/// whole: `ROOF_BORDER` pixels on every side.
+pub const ROOF_TAR: &str = "lpc/roof-tar.png";
+pub const ROOF_CONCRETE: &str = "lpc/roof-concrete.png";
+pub const ROOF_BORDER: f32 = 16.0;
+
 /// Which body sheet a combatant wears.
 pub fn outfit(armor: ArmorKind, armor_points: f32) -> usize {
     if armor_points <= 0.0 {

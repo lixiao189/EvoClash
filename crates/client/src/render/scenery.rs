@@ -8,6 +8,7 @@ pub(super) fn build_scenery(
     arena: Res<Arena>,
     state: Query<(), With<MatchState>>,
     textures: Res<Textures>,
+    map: Res<LpcMap>,
     old: Query<Entity, With<Scenery>>,
     mut built: Local<Option<u64>>,
 ) {
@@ -20,24 +21,25 @@ pub(super) fn build_scenery(
         commands.entity(entity).despawn();
     }
     let arena = &arena.0;
+    // LPC tiles, one texture pixel per world pixel.
     let mut floor = |image: Handle<Image>, rect: Rect, z: f32| {
         commands.spawn((
             Scenery,
-            tiled(image, rect.size()),
+            tiled_at(image, rect.size(), 1.0),
             Transform::from_translation(rect.center().extend(z)),
         ));
     };
 
     // Dirt everywhere, running a little past the boundary walls.
     floor(
-        textures.ground.clone(),
+        map.dirt.clone(),
         Rect::from_center_size(Vec2::ZERO, ARENA_HALF * 2.0 + 240.0),
         Z_FLOOR,
     );
     for block in &arena.blocks {
         let cover = match block.biome {
-            Biome::Urban | Biome::Vault => Some(textures.pavement.clone()),
-            Biome::Industrial => Some(textures.oily_concrete.clone()),
+            Biome::Urban | Biome::Vault => Some(map.sidewalk.clone()),
+            Biome::Industrial => Some(map.gravel.clone()),
             Biome::Wasteland | Biome::Radiation => None,
         };
         if let Some(image) = cover {
@@ -57,15 +59,49 @@ pub(super) fn build_scenery(
         streets_y.push(y);
         y += BLOCK.y;
     }
+    let mut streets = Vec::new();
     for x in &streets_x {
-        let rect =
-            Rect::from_center_size(Vec2::new(*x, 0.0), Vec2::new(STREET, ARENA_HALF.y * 2.0));
-        floor(textures.asphalt.clone(), rect, Z_FLOOR + 0.3);
+        streets.push(Rect::from_center_size(
+            Vec2::new(*x, 0.0),
+            Vec2::new(STREET, ARENA_HALF.y * 2.0),
+        ));
     }
     for y in &streets_y {
-        let rect =
-            Rect::from_center_size(Vec2::new(0.0, *y), Vec2::new(ARENA_HALF.x * 2.0, STREET));
-        floor(textures.asphalt.clone(), rect, Z_FLOOR + 0.3);
+        streets.push(Rect::from_center_size(
+            Vec2::new(0.0, *y),
+            Vec2::new(ARENA_HALF.x * 2.0, STREET),
+        ));
+    }
+    for rect in &streets {
+        floor(map.road.clone(), *rect, Z_FLOOR + 0.3);
+    }
+    // Curbs: a pale stone lip with a shadow on the road side, along both edges of every street.
+    let lip = Color::srgb(0.58, 0.6, 0.6);
+    let gutter = Color::srgba(0.0, 0.0, 0.0, 0.35);
+    for rect in &streets {
+        let vertical = rect.height() > rect.width();
+        for side in [-1.0, 1.0] {
+            let (center, size) = if vertical {
+                let x = rect.center().x + side * (STREET / 2.0 - 2.0);
+                (Vec2::new(x, 0.0), Vec2::new(4.0, rect.height()))
+            } else {
+                let y = rect.center().y + side * (STREET / 2.0 - 2.0);
+                (Vec2::new(0.0, y), Vec2::new(rect.width(), 4.0))
+            };
+            let shadow = center - side * if vertical { Vec2::X } else { Vec2::Y } * 3.0;
+            let shadow_size = if vertical {
+                Vec2::new(2.0, size.y)
+            } else {
+                Vec2::new(size.x, 2.0)
+            };
+            for (color, at, size) in [(lip, center, size), (gutter, shadow, shadow_size)] {
+                commands.spawn((
+                    Scenery,
+                    Sprite::from_color(color, size),
+                    Transform::from_translation(at.extend(Z_FLOOR + 0.32)),
+                ));
+            }
+        }
     }
     let dash = Color::srgba(0.85, 0.75, 0.35, 0.5);
     let near = |v: f32, lines: &[f32]| lines.iter().any(|l| (v - l).abs() < STREET);
@@ -202,7 +238,25 @@ pub(super) fn build_scenery(
             .filter(|(_, s)| **s == style)
             .map(|(w, _)| *w)
             .collect();
-        spawn_walls(&mut commands, textures.wall(style), &rects, style);
+        let lpc_face = |i: usize| WallLook {
+            front: map.wall_faces[i].clone(),
+            top: map.wall_top.clone(),
+            scale: 1.0,
+            height: lpc::WALL_FACE_HEIGHTS[i] as f32,
+        };
+        let look = match style {
+            WallStyle::Brick => lpc_face(0),
+            WallStyle::Metal => lpc_face(1),
+            WallStyle::Rock => lpc_face(2),
+            // Low sandbag barricades keep their procedural look.
+            WallStyle::Sandbag => WallLook {
+                front: textures.sandbags.front.clone(),
+                top: textures.sandbags.top.clone(),
+                scale: PIXEL,
+                height: 22.0,
+            },
+        };
+        spawn_walls(&mut commands, &look, &rects, style);
     }
 
     // Roofs sit on the walls, so they're lifted by the wall height and sorted with the front wall:
@@ -211,13 +265,31 @@ pub(super) fn build_scenery(
         let r = building.rect;
         let z = depth(r.min.y) + 6.0 * Z_STEP;
         let size = Vec2::new(r.width() + 12.0, r.height() + 6.0);
+        // A flat LPC roof stretched over the building, its frame kept whole.
+        let (image, tint) = match building.roof {
+            Roof::Tar => (&map.roof_tar, Color::WHITE),
+            Roof::Tin => (&map.roof_tar, Color::srgb(0.78, 0.86, 0.95)),
+            Roof::Concrete => (&map.roof_concrete, Color::WHITE),
+        };
+        let slicer = TextureSlicer {
+            border: BorderRect::all(lpc::ROOF_BORDER),
+            center_scale_mode: SliceScaleMode::Tile { stretch_value: 1.0 },
+            sides_scale_mode: SliceScaleMode::Tile { stretch_value: 1.0 },
+            max_corner_scale: 1.0,
+        };
         commands.spawn((
             Scenery,
             RoofOf {
                 building: i,
                 alpha: 1.0,
             },
-            tiled(textures.roof(building.roof), size),
+            Sprite {
+                image: image.clone(),
+                custom_size: Some(size),
+                color: tint,
+                image_mode: SpriteImageMode::Sliced(slicer),
+                ..default()
+            },
             Transform::from_translation(Vec3::new(
                 r.center().x,
                 r.center().y + WALL_HEIGHT - 1.0,
@@ -346,20 +418,24 @@ pub(super) const METAL_TINTS: [Color; 5] = [
     Color::srgb(0.9, 0.74, 0.35),
 ];
 
+/// How a wall style is drawn: its face and top textures, at `scale` world pixels per texture
+/// pixel, with a face `height` world pixels tall.
+pub(super) struct WallLook {
+    pub(super) front: Handle<Image>,
+    pub(super) top: Handle<Image>,
+    pub(super) scale: f32,
+    pub(super) height: f32,
+}
+
 pub(super) fn spawn_walls(
     commands: &mut Commands,
-    sprites: &WallSprites,
+    look: &WallLook,
     walls: &[Rect],
     style: WallStyle,
 ) {
     let runs = wall_runs(walls);
     let dark = Color::srgb(0.08, 0.06, 0.07);
-    let wall_height = match style {
-        WallStyle::Brick => WALL_HEIGHT,
-        WallStyle::Metal => 46.0,
-        WallStyle::Rock => 30.0,
-        WallStyle::Sandbag => 22.0,
-    };
+    let wall_height = look.height;
     // Whether another run covers the strip just outside `x` somewhere within `y0..y1`.
     let neighbour = |x: f32, y0: f32, y1: f32| {
         runs.iter()
@@ -380,7 +456,7 @@ pub(super) fn spawn_walls(
             _ => Color::WHITE,
         };
         let face = |image: &Handle<Image>, size: Vec2| {
-            let mut sprite = tiled(image.clone(), size);
+            let mut sprite = tiled_at(image.clone(), size, look.scale);
             sprite.color = tint;
             sprite
         };
@@ -395,12 +471,12 @@ pub(super) fn spawn_walls(
         ));
         commands.spawn((
             Scenery,
-            face(&sprites.front, Vec2::new(w, wall_height)),
+            face(&look.front, Vec2::new(w, wall_height)),
             Transform::from_translation(at(run.y0 + wall_height / 2.0, 0.0)),
         ));
         commands.spawn((
             Scenery,
-            face(&sprites.top, Vec2::new(w, depth_len)),
+            face(&look.top, Vec2::new(w, depth_len)),
             Transform::from_translation(at(run.y0 + wall_height + depth_len / 2.0, Z_STEP)),
         ));
         // Sunlit lip where the cap meets the face, grime where the face meets the ground,
