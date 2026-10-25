@@ -5,10 +5,7 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-ignore = [
-  # ttf-parser is pulled in by Bevy's text stack; no maintained drop-in replacement upstream yet.
-  { id = "RUSTSEC-2026-0192", reason = "transitive via bevy_text, waiting on upstream" },
-]
+ignore = []
 
 [licenses]
 version = 2
