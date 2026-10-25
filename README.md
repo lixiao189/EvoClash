@@ -187,3 +187,7 @@ CI 的镜像冒烟测试会确认匹配服务能提供网页客户端，并拉�
   镜像里已带网页客户端；非本机访问需要在前面加一层 HTTPS 反向代理。
 
 - **依赖更新**：Dependabot 每周提 Cargo 和 Actions 的升级 PR；Bevy / lightyear 单独提，需要手动迁移。
+
+## 许可证
+
+代码采用 MIT OR Apache-2.0。美术素材（`crates/client/assets/lpc/`，来自 [Liberated Pixel Cup](https://lpc.opengameart.org/) 系列）是其他作者的作品，**不**适用代码的许可证：默认按 CC-BY-SA 3.0 分发，详见 [`LICENSE-ART.md`](crates/client/assets/LICENSE-ART.md)；每个文件的作者、来源和许可证列在 [`CREDITS.md`](crates/client/assets/CREDITS.md)，游戏内可在 `/play/credits.html` 查看。新增素材文件时必须同时补上致谢条目，否则 `cargo test` 的 `every_art_file_is_credited` 会失败。

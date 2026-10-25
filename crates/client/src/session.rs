@@ -19,6 +19,7 @@ use lightyear::webtransport::prelude::client::WebTransportClientIo;
 use serde::Serialize;
 
 use crate::ClientArgs;
+use crate::assets::assets_ready;
 
 const MAX_RECONNECT_ATTEMPTS: u32 = 12;
 
@@ -159,8 +160,13 @@ impl Plugin for SessionPlugin {
             );
             world.insert_resource(PredictionManager::default());
         });
-        app.add_systems(Startup, connect);
-        app.add_systems(Update, watch_connection);
+        // Join only once the files the match needs have loaded.
+        app.add_systems(
+            Update,
+            (connect.run_if(run_once), watch_connection)
+                .chain()
+                .run_if(assets_ready),
+        );
     }
 }
 

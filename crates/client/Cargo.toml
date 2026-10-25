@@ -24,6 +24,8 @@ bevy = { workspace = true, features = [
   "bevy_text",
   "bevy_ui",
   "bevy_ui_render",
+  # Sprites shipped as files (assets/lpc/).
+  "png",
   "webgl2",
   "web",
   # Only so the client still builds natively on Linux (CI clippy/tests); winit needs a backend.
