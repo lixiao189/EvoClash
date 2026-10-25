@@ -159,21 +159,27 @@ fn draw_armed(sheet: &mut Canvas, kind: WeaponKind, feet: Vec2, aim: Vec2, since
     let attack = crate::render::attack_pose(kind, aim, since);
     let held = Vec2::from_angle(aim.to_angle() + attack.swing);
     let left = aim.x < 0.0;
-    let pivot =
-        feet + Vec2::new(
+    let (reach, arm_len) = if kind.melee().is_some() {
+        (MELEE_REACH, LONG_ARM)
+    } else {
+        (0.0, ARM)
+    };
+    let shoulder = feet
+        + Vec2::new(
             if facing == Facing::Side {
                 if flip { -4.0 } else { 4.0 }
             } else {
                 0.0
             },
             GUN_HEIGHT,
-        ) + attack.push;
-    let (center, arm_at) = held_layout(pivot, held, size, grip, left);
+        );
+    let pivot = shoulder + held * reach * PIXEL + attack.push;
+    let (center, arm_at) = held_layout(pivot, held, size, grip, left, arm_len);
     let behind = facing == Facing::Up;
     let gun = |sheet: &mut Canvas| {
         draw_sprite(
             sheet,
-            &paint_arm(),
+            &paint_arm(arm_len),
             arm_at,
             held.to_angle(),
             (false, left),

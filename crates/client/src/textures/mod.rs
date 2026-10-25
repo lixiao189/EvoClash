@@ -65,8 +65,10 @@ pub struct Textures {
     pub shadow: Handle<Image>,
     pub glow: Handle<Image>,
     survivor: Vec<SurvivorFrame>,
-    /// Sleeve reaching from the shoulder to the weapon grip; tinted like the jacket.
+    /// Sleeve reaching from the shoulder to a gun's grip ([`ARM`] long); tinted like the jacket.
     pub arm: Handle<Image>,
+    /// The whole arm ([`LONG_ARM`]), for a melee weapon held out at [`MELEE_REACH`].
+    pub long_arm: Handle<Image>,
     /// Side view, two skitter frames.
     pub roach: [Handle<Image>; 2],
     pub pod: Handle<Image>,
@@ -177,13 +179,24 @@ pub struct WeaponSprite {
 
 /// Where to put a held weapon and the sleeve reaching for it, so the rear fist lands on `pivot`.
 /// `size` and `grip` come from [`WeaponSprite`]; `flip` says the weapon is drawn flipped
-/// vertically (it points left), which mirrors the grip too.
-pub fn held_layout(pivot: Vec2, aim: Vec2, size: Vec2, grip: Vec2, flip: bool) -> (Vec2, Vec2) {
+/// vertically (it points left), which mirrors the grip too. `arm` is the sleeve's length in
+/// texture pixels; its cuff ends under the fist.
+pub fn held_layout(
+    pivot: Vec2,
+    aim: Vec2,
+    size: Vec2,
+    grip: Vec2,
+    flip: bool,
+    arm: u32,
+) -> (Vec2, Vec2) {
     let mut g = Vec2::new(grip.x - size.x / 2.0, size.y / 2.0 - grip.y) * PIXEL;
     if flip {
         g.y = -g.y;
     }
-    (pivot - aim.rotate(g), pivot - aim * 3.0 * PIXEL)
+    (
+        pivot - aim.rotate(g),
+        pivot - aim * (arm as f32 / 2.0 - 0.5) * PIXEL,
+    )
 }
 
 fn weapon_index(kind: WeaponKind) -> usize {
@@ -271,7 +284,8 @@ pub fn build(images: &mut Assets<Image>) -> Textures {
                 }
             })
             .collect(),
-        arm: add(paint_arm(), true),
+        arm: add(paint_arm(ARM), true),
+        long_arm: add(paint_arm(LONG_ARM), true),
         roach: [0, 1].map(|frame| add(paint_roach(frame), true)),
         pod: add(paint_pod(), true),
         spore: add(paint_spore(), false),
