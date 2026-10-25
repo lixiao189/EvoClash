@@ -7,7 +7,7 @@ use bevy::math::Vec2;
 
 use crate::map::{ARENA_HALF, ArenaMap, segment_circle};
 
-const CELL: f32 = 32.0;
+const CELL: f32 = 16.0;
 
 pub struct NavGrid {
     width: usize,
@@ -65,10 +65,11 @@ impl NavGrid {
         !self.blocked[y * self.width + x]
     }
 
-    /// Nearest open cell to `p` (spiral search), for agents hugging a wall.
-    fn open_cell_near(&self, p: Vec2) -> Option<(usize, usize)> {
+    /// Nearest open cell to `p` in plain sight of it (spiral search), for agents hugging a
+    /// wall. Never one behind a wall: walking to it would just push into that wall.
+    fn open_cell_near(&self, map: &ArenaMap, p: Vec2) -> Option<(usize, usize)> {
         let (cx, cy) = self.cell_of(p);
-        for r in 0..6i32 {
+        for r in 0..10i32 {
             let mut best: Option<((usize, usize), f32)> = None;
             for dy in -r..=r {
                 for dx in -r..=r {
@@ -80,7 +81,7 @@ impl NavGrid {
                         continue;
                     }
                     let (x, y) = (x as usize, y as usize);
-                    if self.is_open(x, y) {
+                    if self.is_open(x, y) && map.line_of_sight(p, Self::center_of(x, y)) {
                         let d = Self::center_of(x, y).distance_squared(p);
                         if best.is_none_or(|(_, bd)| d < bd) {
                             best = Some(((x, y), d));
@@ -96,9 +97,9 @@ impl NavGrid {
     }
 
     /// 8-connected A* path of cell centers from `from` to `to` (without corner cutting).
-    pub fn path(&self, from: Vec2, to: Vec2) -> Option<Vec<Vec2>> {
-        let start = self.open_cell_near(from)?;
-        let goal = self.open_cell_near(to)?;
+    pub fn path(&self, map: &ArenaMap, from: Vec2, to: Vec2) -> Option<Vec<Vec2>> {
+        let start = self.open_cell_near(map, from)?;
+        let goal = self.open_cell_near(map, to)?;
         let idx = |(x, y): (usize, usize)| y * self.width + x;
         let heuristic = |(x, y): (usize, usize)| {
             let dx = (x as i32 - goal.0 as i32).unsigned_abs();
@@ -180,12 +181,16 @@ pub fn clear_sweep(map: &ArenaMap, a: Vec2, b: Vec2, radius: f32) -> bool {
             .all(|p| segment_circle(a, b, p.pos, p.kind.radius() + radius).is_none())
 }
 
+/// Extra room string-pulling keeps from corners, so agents don't clip them on the way past.
+const SWEEP_MARGIN: f32 = 2.0;
+
 /// Point to walk toward this tick to eventually reach `to`.
 pub fn next_waypoint(grid: &NavGrid, map: &ArenaMap, from: Vec2, to: Vec2, radius: f32) -> Vec2 {
+    let radius = radius + SWEEP_MARGIN;
     if clear_sweep(map, from, to, radius) {
         return to;
     }
-    let Some(path) = grid.path(from, to) else {
+    let Some(path) = grid.path(map, from, to) else {
         return to;
     };
     // String-pull: aim at the furthest path point we can reach in a straight line.
@@ -197,6 +202,44 @@ pub fn next_waypoint(grid: &NavGrid, map: &ArenaMap, from: Vec2, to: Vec2, radiu
         .unwrap_or(to)
 }
 
+/// Can a circle of `radius` walk `probe` along `dir` from `from` without touching a wall or
+/// one of the live `obstacles`? Samples every `radius`, so no wall is stepped over.
+pub fn clear_ahead(
+    map: &ArenaMap,
+    obstacles: &[(Vec2, f32)],
+    from: Vec2,
+    dir: Vec2,
+    radius: f32,
+    probe: f32,
+) -> bool {
+    let dir = dir.normalize_or_zero();
+    let steps = (probe / radius).ceil().max(1.0) as u32;
+    (1..=steps).all(|i| {
+        let p = from + dir * (probe * i as f32 / steps as f32);
+        map.resolve_with(p, radius, obstacles).distance_squared(p) < 0.25
+    })
+}
+
+/// `dir` turned as little as possible (up to 135°, either way) so the next `probe` of travel
+/// stays clear, keeping its length. Unchanged when it is already clear or nothing is.
+pub fn steer_clear(
+    map: &ArenaMap,
+    obstacles: &[(Vec2, f32)],
+    from: Vec2,
+    dir: Vec2,
+    radius: f32,
+    probe: f32,
+) -> Vec2 {
+    if dir == Vec2::ZERO {
+        return dir;
+    }
+    [0.0f32, 1.0, -1.0, 2.0, -2.0, 3.0, -3.0]
+        .into_iter()
+        .map(|eighths| Vec2::from_angle(eighths * std::f32::consts::FRAC_PI_4).rotate(dir))
+        .find(|d| clear_ahead(map, obstacles, from, *d, radius, probe))
+        .unwrap_or(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,9 +247,9 @@ mod tests {
     #[test]
     fn finds_route_into_the_vault() {
         let map = ArenaMap::generate(3);
-        let grid = NavGrid::new(&map, 28.0);
+        let grid = NavGrid::new(&map, 24.0);
         let from = map.spawn_points[0];
-        let path = grid.path(from, Vec2::ZERO).expect("vault reachable");
+        let path = grid.path(&map, from, Vec2::ZERO).expect("vault reachable");
         assert!(path.len() > 2);
         // Every hop on the path is walkable.
         for pair in path.windows(2) {
@@ -221,10 +264,10 @@ mod tests {
     fn every_layout_is_connected() {
         for seed in 0..120 {
             let map = ArenaMap::generate(seed);
-            let grid = NavGrid::new(&map, 28.0);
+            let grid = NavGrid::new(&map, 24.0);
             let from = map.spawn_points[0];
             let reach = |to: Vec2| {
-                let path = grid.path(from, to)?;
+                let path = grid.path(&map, from, to)?;
                 let end = *path.get(path.len().saturating_sub(2))?;
                 (end.distance(to) < 120.0 && map.line_of_sight(end, to)).then_some(())
             };
@@ -239,6 +282,62 @@ mod tests {
                 assert!(
                     reach(prop.pos).is_some(),
                     "seed {seed}: {prop:?} unreachable"
+                );
+            }
+        }
+    }
+
+    /// Facing a wall head-on, the look-ahead sees it and turns to a free heading.
+    #[test]
+    fn steers_off_a_wall_ahead() {
+        let map = ArenaMap::generate(3);
+        let r = 22.0;
+        let mut checked = 0;
+        for wall in &map.walls {
+            let at = Vec2::new(wall.min.x - r - 10.0, wall.center().y);
+            if map.resolve_with(at, r, &[]) != at || wall.height() < 4.0 * r {
+                continue;
+            }
+            assert!(!clear_ahead(&map, &[], at, Vec2::X, r, 2.0 * r));
+            let turned = steer_clear(&map, &[], at, Vec2::X, r, 2.0 * r);
+            assert!(
+                turned.dot(Vec2::X) < 0.9,
+                "{at}: still heading into the wall"
+            );
+            assert!(clear_ahead(&map, &[], at, turned, r, 2.0 * r));
+            checked += 1;
+        }
+        assert!(checked > 5);
+    }
+
+    /// An agent following the waypoints walks from every spawn to the vault, barely
+    /// touching a wall on the way (it used to grind along corners).
+    #[test]
+    fn agents_walk_without_grinding_walls() {
+        let r = 22.0;
+        let speed = 340.0 / 64.0;
+        for seed in 0..20 {
+            let map = ArenaMap::generate(seed);
+            let grid = NavGrid::new(&map, r + 2.0);
+            for &spawn in &map.spawn_points {
+                let (mut at, mut bumps, mut ticks) = (spawn, 0, 0);
+                while at.distance(Vec2::ZERO) > 40.0 {
+                    ticks += 1;
+                    assert!(
+                        ticks < 3000,
+                        "seed {seed}: stuck walking from {spawn} at {at}"
+                    );
+                    let dir = next_waypoint(&grid, &map, at, Vec2::ZERO, r) - at;
+                    let dir = steer_clear(&map, &[], at, dir.normalize_or_zero(), r, 2.0 * r);
+                    let want = at + dir * speed;
+                    at = map.resolve_with(want, r, &[]);
+                    if at.distance_squared(want) > 1.0 {
+                        bumps += 1;
+                    }
+                }
+                assert!(
+                    bumps * 20 < ticks,
+                    "seed {seed}: {bumps} bumps in {ticks} ticks from {spawn}"
                 );
             }
         }
