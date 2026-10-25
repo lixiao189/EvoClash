@@ -32,7 +32,13 @@ Baked from the sources below by `cargo test -p evoclash -- --ignored bake_lpc_sh
 | `lpc/wall-brick.png`, `lpc/wall-metal.png`, `lpc/wall-rock.png` | `lpc-src/map/wall-*.png`, top trim and baseboard | CC-BY-SA 3.0 |
 | `lpc/wall-top.png`, `lpc/roof-tar.png`, `lpc/roof-concrete.png` | `lpc-src/map/roof-*.png` | CC-BY-SA 3.0 |
 
-The survivor sheets are CC-BY-SA 3.0 because the backpack is only offered under CC-BY-SA
+| `lpc/wolf.png`, `lpc/wolf-grey.png` | `lpc-src/creatures/wolf-*.png`, re-laid out by facing | OGA-BY 3.0 |
+| `lpc/ghoul.png` | zombie body and head, pants, bandages (`lpc-src/`, walk) | CC-BY-SA 3.0 |
+| `lpc/slime.png` | `lpc-src/creatures/slime.png` | CC-BY-SA 3.0 |
+| `lpc/golem.png` | `lpc-src/creatures/golem-walk.png` | OGA-BY 3.0 |
+| `lpc/crate.png`, `lpc/barrel.png`, `lpc/safe.png`, `lpc/safe-open.png` | `lpc-src/props/*.png` | CC-BY-SA 4.0 |
+
+ the backpack is only offered under CC-BY-SA
 3.0 / GPL 3.0; every other piece is used under the first license listed for it below.
 
 ### Map sources (`lpc-src/map/`)
@@ -55,6 +61,26 @@ pack's own credits file is vendored next to them and lists every author it requi
 | `lpc-src/map/CREDITS-walls.txt` | the pack's credits | [LPC] Walls | — |
 | `lpc-src/map/CREDITS-roofs.txt` | the pack's credits | [LPC] Roofs v2 | — |
 | `lpc-src/map/CREDITS-terrain.txt` | the pack's credits | [LPC] Terrains | — |
+
+### Creature and prop sources (`lpc-src/creatures/`, `lpc-src/props/`)
+
+| File | Source | Authors | License used (offered) |
+|---|---|---|---|
+| `lpc-src/creatures/wolf-brown.png` | `wolfsheet1.png` of [LPC] Wolf Animation, <https://opengameart.org/content/lpc-wolf-animation> | Stephen "Redshrike" Challener (graphic artist), William.Thompsonj (contributor) | OGA-BY 3.0 (CC-BY 4.0, CC-BY 3.0, GPL 3.0, GPL 2.0, OGA-BY 3.0) |
+| `lpc-src/creatures/wolf-grey.png` | `wolfsheet4.png` of [LPC] Wolf Animation, same page | Stephen "Redshrike" Challener, William.Thompsonj | OGA-BY 3.0 (as above) |
+| `lpc-src/creatures/golem-walk.png` | [LPC] Golem, <https://opengameart.org/content/lpc-golem> | Stephen "Redshrike" Challener (graphic artist), William.Thompsonj (contributor) | OGA-BY 3.0 (CC-BY 4.0, CC-BY 3.0, GPL 3.0, GPL 2.0, OGA-BY 3.0) |
+| `lpc-src/creatures/slime.png` | [LPC] Monsters, <https://opengameart.org/content/lpc-monsters> (also <https://opengameart.org/content/liberated-pixel-cup-lpc-base-assets-sprites-map-tiles>) | Charles Sanchez (CharlesGabriel), bagzie, bluecarrot16 | CC-BY-SA 3.0 (CC-BY-SA 3.0+, GPL 3.0+) |
+| `lpc-src/props/crate.png` | `container.png` (64, 488, 32, 40) of [LPC] Containers v4.2, <https://opengameart.org/content/lpc-containers> | see `lpc-src/props/CREDITS-container.txt` | CC-BY-SA 4.0 |
+| `lpc-src/props/barrel.png` | `container.png` (320, 0, 32, 44), same pack | see `lpc-src/props/CREDITS-container.txt` | CC-BY-SA 4.0 |
+| `lpc-src/props/safe.png` | `container.png` (320, 256, 32, 32), same pack | see `lpc-src/props/CREDITS-container.txt` | CC-BY-SA 4.0 |
+| `lpc-src/props/safe-open.png` | `container.png` (320, 320, 32, 32), same pack | see `lpc-src/props/CREDITS-container.txt` | CC-BY-SA 4.0 |
+| `lpc-src/props/CREDITS-container.txt` | the pack's credits | [LPC] Containers | — |
+| `lpc-src/body/bodies/zombie/walk/zombie.png` | Universal LPC generator (`body/bodies/zombie/walk.png`) | Stephen Challener (Redshrike), Johannes Sjölund (wulax), Sander Frenken (castelonia), Benjamin K. Smith (BenCreating), bluecarrot16 | OGA-BY 3.0 (OGA-BY 3.0, CC-BY-SA 3.0, GPL 3.0) |
+| `lpc-src/head/heads/zombie/adult/walk.png` | Universal LPC generator | bluecarrot16, Benjamin K. Smith (BenCreating), Sander Frenken (castelonia), Stephen Challener (Redshrike) | CC-BY-SA 3.0 (CC-BY-SA 3.0, GPL 3.0) |
+| `lpc-src/torso/bandage/male/walk/white.png` | Universal LPC generator, <https://opengameart.org/content/lpc-bandages> | Nila122 | OGA-BY 3.0 (OGA-BY 3.0, CC-BY-SA 3.0, GPL 2.0, GPL 3.0) |
+
+The prop files (`lpc-src/props/` and the props they become in `lpc/`) are CC-BY-SA **4.0**:
+[LPC] Containers is only offered under 4.0, and 4.0 art can't be relicensed as 3.0.
 
 ### Character sources (`lpc-src/`, from the Universal LPC Spritesheet Character Generator)
 

@@ -6,20 +6,56 @@ pub(super) fn monster_image(kind: MonsterKind, textures: &Textures) -> Handle<Im
     match kind {
         MonsterKind::Roach => textures.roach[0].clone(),
         MonsterKind::SporePod => textures.pod.clone(),
-        MonsterKind::Dog => textures.dog[0].clone(),
-        MonsterKind::Ghoul => textures.ghoul[0].clone(),
-        MonsterKind::Spitter => textures.spitter.clone(),
         MonsterKind::Crawler => textures.crawler.clone(),
-        // Raiders are LPC sheets (see `dress_monster`); the loot icon stands in for lookups.
-        MonsterKind::Raider => textures.weapon(WeaponKind::Rifle).icon.clone(),
         MonsterKind::Drone => textures.drone[0].clone(),
-        MonsterKind::Behemoth => textures.behemoth[0].clone(),
+        // LPC sheets (see `LpcLook`); never drawn from here.
+        MonsterKind::Dog
+        | MonsterKind::Ghoul
+        | MonsterKind::Spitter
+        | MonsterKind::Raider
+        | MonsterKind::Behemoth => textures.glow.clone(),
+    }
+}
+
+/// How a monster drawn from LPC art looks: its sheet and frame grid, and where its feet are
+/// in a frame (pixels from the top).
+pub(super) struct LpcLook {
+    image: Handle<Image>,
+    layout: Handle<TextureAtlasLayout>,
+    feet: f32,
+}
+
+pub(super) fn lpc_look(
+    kind: MonsterKind,
+    coat: usize,
+    lpc_sprites: &LpcSprites,
+) -> Option<LpcLook> {
+    let look = |image: &Handle<Image>, layout: &Handle<TextureAtlasLayout>, feet| {
+        Some(LpcLook {
+            image: image.clone(),
+            layout: layout.clone(),
+            feet,
+        })
+    };
+    let s = lpc_sprites;
+    match kind {
+        MonsterKind::Raider => look(&s.raider, &s.layout, lpc::FEET),
+        MonsterKind::Dog => look(&s.wolves[coat % s.wolves.len()], &s.wolf_layout, lpc::FEET),
+        MonsterKind::Ghoul => look(&s.ghoul, &s.ghoul_layout, lpc::FEET),
+        MonsterKind::Spitter => look(&s.slime, &s.slime_layout, lpc::SLIME_FEET),
+        MonsterKind::Behemoth => look(&s.golem, &s.golem_layout, lpc::FEET),
+        _ => None,
     }
 }
 
 pub(super) fn monster_size(kind: MonsterKind, textures: &Textures, images: &Assets<Image>) -> Vec2 {
-    if kind == MonsterKind::Raider {
-        return Vec2::new(32.0, lpc::HEIGHT);
+    // LPC creatures: roughly what they cover above their feet.
+    match kind {
+        MonsterKind::Raider | MonsterKind::Ghoul => return Vec2::new(32.0, lpc::HEIGHT),
+        MonsterKind::Dog => return Vec2::new(48.0, 44.0),
+        MonsterKind::Spitter => return Vec2::new(28.0, 30.0) * lpc::BIG_SCALE,
+        MonsterKind::Behemoth => return Vec2::new(50.0, 61.0) * lpc::BIG_SCALE,
+        _ => {}
     }
     images
         .get(&monster_image(kind, textures))
@@ -50,23 +86,27 @@ pub(super) fn dress_monster(
         return;
     };
     let pos = pos.map_or(Vec2::ZERO, |p| p.0);
-    let (body, base_y, gun) = if monster.kind == MonsterKind::Raider {
-        // Drawn like a player: an LPC sheet at one texture pixel per world pixel, and a rifle.
-        let base_y = lpc::FEET - lpc::CELL as f32 / 2.0;
+    let coat = trigger.entity.to_bits() as usize;
+    let (body, base_y, gun) = if let Some(look) = lpc_look(monster.kind, coat, &lpc_sprites) {
+        // Standing on its feet like a player: `base_y` is in texture pixels, scaled per frame.
+        let base_y = -(lpc::CELL as f32 - look.feet);
         let sprite = Sprite {
-            image: lpc_sprites.raider.clone(),
+            image: look.image,
             texture_atlas: Some(TextureAtlas {
-                layout: lpc_sprites.layout.clone(),
+                layout: look.layout,
                 index: 0,
             }),
             ..default()
         };
         let body = commands
-            .spawn((sprite, Transform::from_xyz(0.0, base_y, 0.0)))
+            .spawn((sprite, Anchor::BOTTOM_CENTER, Transform::default()))
             .id();
-        let rifle = Sprite::from_image(textures.weapon(WeaponKind::Rifle).held.clone());
-        let gun = commands.spawn((rifle, Transform::default())).id();
-        (body, base_y, Some(gun))
+        // Raiders carry a rifle at the hip.
+        let gun = (monster.kind == MonsterKind::Raider).then(|| {
+            let rifle = Sprite::from_image(textures.weapon(WeaponKind::Rifle).held.clone());
+            commands.spawn((rifle, Transform::default())).id()
+        });
+        (body, base_y, gun)
     } else {
         let (sprite, transform) = pixel_sprite(monster_image(monster.kind, &textures));
         let (anchor, base_y) = match monster.kind {
@@ -132,20 +172,9 @@ pub(super) fn sync_monsters(
         let moved = pos.0 - parts.last;
         let moving = moved.length_squared() > 0.01;
         parts.last = pos.0;
-        // Side-view creatures face where they look (roaches: where they crawl).
-        match monster.kind {
-            MonsterKind::Roach => {
-                if moved.x.abs() > 0.05 {
-                    parts.flip = moved.x < 0.0;
-                }
-            }
-            MonsterKind::Dog | MonsterKind::Ghoul | MonsterKind::Spitter => {
-                let dir = state.facing.cos();
-                if dir.abs() > 0.2 {
-                    parts.flip = dir < 0.0;
-                }
-            }
-            _ => {}
+        // Roaches face where they crawl.
+        if monster.kind == MonsterKind::Roach && moved.x.abs() > 0.05 {
+            parts.flip = moved.x < 0.0;
         }
         sprite.flip_x = parts.flip;
         let walk = |rate: f32, frames: usize| {
@@ -155,8 +184,33 @@ pub(super) fn sync_monsters(
                 0
             }
         };
-        let mut scale = Vec2::splat(PIXEL * if monster.elite { ELITE_SCALE } else { 1.0 });
-        let mut offset = Vec2::new(0.0, parts.base_y);
+        // LPC creatures face one of four rows; the rest are procedural, drawn at `PIXEL`.
+        let lpc_scale = match monster.kind {
+            MonsterKind::Raider | MonsterKind::Dog | MonsterKind::Ghoul => Some(1.0),
+            MonsterKind::Spitter | MonsterKind::Behemoth => Some(lpc::BIG_SCALE),
+            _ => None,
+        };
+        let aim = Vec2::from_angle(state.facing);
+        let row = {
+            let (facing, flip) = Facing::from_aim(aim);
+            lpc::row(facing, flip)
+        };
+        let mut show = |columns: u32, row: u32, col: u32| {
+            if let Some(atlas) = &mut sprite.texture_atlas {
+                atlas.index = (row * columns + col) as usize;
+            }
+        };
+        let cycle = |rate: f32, frames: u32| (t * rate + parts.phase) as u32 % frames;
+        let elite = if monster.elite { ELITE_SCALE } else { 1.0 };
+        let mut scale = Vec2::splat(lpc_scale.unwrap_or(PIXEL) * elite);
+        let mut offset = Vec2::new(
+            0.0,
+            if lpc_scale.is_some() {
+                0.0
+            } else {
+                parts.base_y
+            },
+        );
         let mut tint = if monster.elite {
             ELITE_TINT
         } else {
@@ -171,9 +225,23 @@ pub(super) fn sync_monsters(
                 let pulse = 0.05 * (t * 3.0 + parts.phase).sin();
                 scale *= Vec2::new(1.0 + pulse, 1.0 - pulse);
             }
-            MonsterKind::Dog => sprite.image = textures.dog[walk(18.0, 2)].clone(),
+            MonsterKind::Dog => {
+                // Trotting while wandering, running once it charges.
+                let speed = moved.length() / time.delta_secs().max(1e-3);
+                let col = match (moving, speed > 220.0) {
+                    (false, _) => lpc::WOLF_WALK,
+                    (true, false) => lpc::WOLF_WALK + cycle(9.0, lpc::WOLF_FRAMES),
+                    (true, true) => lpc::WOLF_RUN + cycle(14.0, lpc::WOLF_FRAMES),
+                };
+                show(lpc::WOLF_COLUMNS, row, col);
+            }
             MonsterKind::Ghoul => {
-                sprite.image = textures.ghoul[walk(9.0, 2)].clone();
+                let col = if moving {
+                    1 + cycle(9.0, lpc::STRIDE_FRAMES as u32)
+                } else {
+                    0
+                };
+                show(lpc::GHOUL_COLUMNS, row, col);
                 if state.action == MonsterAction::Arming {
                     // Blinks faster as the fuse runs down.
                     let rate = 6.0 + 500.0 / (state.fuse as f32 + 24.0);
@@ -184,16 +252,17 @@ pub(super) fn sync_monsters(
                     scale *= Vec2::splat(swell);
                 }
             }
+            // The slime hops along, or sits and wobbles.
             MonsterKind::Spitter => {
-                let pulse = 0.04 * (t * 4.0 + parts.phase).sin();
-                scale *= Vec2::new(1.0 - pulse, 1.0 + pulse);
+                if moving {
+                    show(lpc::SLIME_COLUMNS, 1, cycle(10.0, 8));
+                } else {
+                    show(lpc::SLIME_COLUMNS, 0, cycle(5.0, 6));
+                }
             }
             MonsterKind::Crawler => body.rotation = Quat::from_rotation_z(state.facing),
             MonsterKind::Raider => {
                 // Posed like a player: four facings, the stride, a rifle at the hip.
-                let aim = Vec2::from_angle(state.facing);
-                let (facing, flip) = Facing::from_aim(aim);
-                let row = lpc::row(facing, flip);
                 if moving {
                     parts.stride += moved.length() / STRIDE_PX;
                 }
@@ -203,12 +272,8 @@ pub(super) fn sync_monsters(
                     0
                 };
                 let frame = lpc::frame(lpc::Action::Walk(stride), false);
-                if let Some(atlas) = &mut sprite.texture_atlas {
-                    atlas.index = (row * lpc::COLUMNS + frame.body) as usize;
-                }
-                let s = if monster.elite { ELITE_SCALE } else { 1.0 };
-                scale = Vec2::splat(s);
-                offset.y = parts.base_y * s;
+                show(lpc::COLUMNS, row, frame.body);
+                let s = elite;
                 let rifle = textures.weapon(WeaponKind::Rifle);
                 let left = aim.x < 0.0;
                 let center = textures::held_layout(
@@ -231,7 +296,15 @@ pub(super) fn sync_monsters(
                 offset.y += 4.0 * (t * 3.0 + parts.phase).sin();
             }
             MonsterKind::Behemoth => {
-                sprite.image = textures.behemoth[walk(3.0, 2)].clone();
+                show(
+                    lpc::GOLEM_COLUMNS,
+                    row,
+                    if moving {
+                        cycle(5.0, lpc::GOLEM_COLUMNS)
+                    } else {
+                        0
+                    },
+                );
                 tint = match state.phase {
                     0 | 1 => tint,
                     2 => Color::srgb(1.0, 0.82, 0.7),
@@ -245,6 +318,10 @@ pub(super) fn sync_monsters(
                     scale *= Vec2::new(1.0 + 0.04, 1.0 + 0.1);
                 }
             }
+        }
+        // LPC frames stand on their feet, a few texture pixels above the frame's bottom.
+        if lpc_scale.is_some() {
+            offset.y += parts.base_y * scale.y;
         }
         sprite.color = tint;
         body.scale = scale.extend(1.0);

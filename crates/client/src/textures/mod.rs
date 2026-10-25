@@ -48,10 +48,6 @@ pub struct Textures {
     floors: [Handle<Image>; 3],
     /// Sandbag barricades (the other wall styles are LPC tiles, see `crate::lpc`).
     pub sandbags: WallSprites,
-    pub crate_box: Handle<Image>,
-    pub barrel: Handle<Image>,
-    pub safe: Handle<Image>,
-    pub safe_open: Handle<Image>,
     /// Flat ground stains.
     pub decals: Vec<Handle<Image>>,
     /// Upright clutter (dead grass, bushes, rocks, bones), depth-sorted like everything else.
@@ -62,15 +58,10 @@ pub struct Textures {
     pub roach: [Handle<Image>; 2],
     pub pod: Handle<Image>,
     pub spore: Handle<Image>,
-    /// Side views facing right, two gait frames.
-    pub dog: [Handle<Image>; 2],
-    pub ghoul: [Handle<Image>; 2],
-    pub spitter: Handle<Image>,
     /// Seen from above, facing +X; rotated to its heading at draw time.
     pub crawler: Handle<Image>,
     /// Two rotor phases.
     pub drone: [Handle<Image>; 2],
-    pub behemoth: [Handle<Image>; 2],
     /// Acid glob in flight.
     pub acid: Handle<Image>,
     /// Chevron pointing +X, white; tinted for off-screen markers.
@@ -216,10 +207,6 @@ pub fn build(images: &mut Assets<Image>) -> Textures {
             front: add(paint_sandbags(false), true),
             top: add(paint_sandbags(true), true),
         },
-        crate_box: add(paint_crate(), true),
-        barrel: add(paint_barrel(), true),
-        safe: add(paint_safe(false), true),
-        safe_open: add(paint_safe(true), true),
         decals: (0..6).map(|i| add(paint_decal(i), true)).collect(),
         decor: (0..5).map(|i| add(paint_decor(i), true)).collect(),
         shadow: add(paint_soft_disc(32, [0.0, 0.0, 0.0], 1.6), false),
@@ -227,12 +214,8 @@ pub fn build(images: &mut Assets<Image>) -> Textures {
         roach: [0, 1].map(|frame| add(paint_roach(frame), true)),
         pod: add(paint_pod(), true),
         spore: add(paint_spore(), false),
-        dog: [0, 1].map(|frame| add(paint_dog(frame), true)),
-        ghoul: [0, 1].map(|frame| add(paint_ghoul(frame), true)),
-        spitter: add(paint_spitter(), true),
         crawler: add(paint_crawler(), true),
         drone: [0, 1].map(|frame| add(paint_drone(frame), true)),
-        behemoth: [0, 1].map(|frame| add(paint_behemoth(frame), true)),
         acid: add(paint_acid(), true),
         arrow: add(paint_arrow(), true),
         splat: add(paint_splat(), true),

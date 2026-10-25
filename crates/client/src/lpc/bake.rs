@@ -337,6 +337,74 @@ fn crop(src: &Rgba, x: i32, y: i32, w: i32, h: i32) -> Rgba {
     out
 }
 
+/// Wolves: the side views face right (walk row 3, run row 4) and left (rows 9, 10) in 64x32
+/// frames on the right half; front and back views are 32x64 frames on the left half (walk row
+/// 3, run row 4: five facing the camera, then five facing away).
+fn wolf_sheet(src: &Rgba) -> Rgba {
+    let c = CELL as i32;
+    let mut out = Rgba::new(WOLF_COLUMNS * CELL, ROWS * CELL);
+    for (col0, side_rows, upright_row) in [(WOLF_WALK, (3, 9), 3), (WOLF_RUN, (4, 10), 4)] {
+        for k in 0..WOLF_FRAMES as i32 {
+            let x = (col0 as i32 + k) * c;
+            // Up (facing away) and down (facing the camera): centered, feet at the bottom.
+            out.blit(src, (5 + k) * 32, upright_row * c, 32, c, x + 16, 0, PLAIN);
+            out.blit(src, k * 32, upright_row * c, 32, c, x + 16, 2 * c, PLAIN);
+            // Left and right: standing on the bottom of the frame.
+            let (right, left) = side_rows;
+            out.blit(src, 320 + k * c, left * 32, c, 32, x, c + 32, PLAIN);
+            out.blit(src, 320 + k * c, right * 32, c, 32, x, 3 * c + 32, PLAIN);
+        }
+    }
+    out
+}
+
+/// Ghouls: the zombie body and head in trousers and grubby bandages, walking.
+fn ghoul_sheet(src: &mut Layers) -> Rgba {
+    let layers = [
+        ("body/bodies/zombie/walk/zombie.png", PLAIN),
+        ("head/heads/zombie/adult/walk.png", PLAIN),
+        ("legs/pants/male/walk.png", [70, 64, 56]),
+        ("torso/bandage/male/walk/white.png", [170, 150, 110]),
+    ];
+    let c = CELL as i32;
+    let mut out = Rgba::new(GHOUL_COLUMNS * CELL, ROWS * CELL);
+    for (path, tint) in layers {
+        let sheet = src.get(path).clone();
+        out.blit(
+            &sheet,
+            0,
+            0,
+            GHOUL_COLUMNS as i32 * c,
+            ROWS as i32 * c,
+            0,
+            0,
+            tint,
+        );
+    }
+    out
+}
+
+fn bake_creatures(src: &mut Layers, out: &Path) {
+    let file = |dir: &str, name: &str| read(&assets().join("lpc-src").join(dir).join(name));
+    for (name, target) in ["wolf-brown.png", "wolf-grey.png"]
+        .into_iter()
+        .zip(WOLF_FILES)
+    {
+        write(&wolf_sheet(&file("creatures", name)), &out.join(target));
+    }
+    write(&ghoul_sheet(src), &out.join(GHOUL_FILE));
+    write(&file("creatures", "slime.png"), &out.join(SLIME_FILE));
+    write(&file("creatures", "golem-walk.png"), &out.join(GOLEM_FILE));
+    for (name, target) in [
+        ("crate.png", CRATE_FILE),
+        ("barrel.png", BARREL_FILE),
+        ("safe.png", SAFE_FILE),
+        ("safe-open.png", SAFE_OPEN_FILE),
+    ] {
+        write(&file("props", name), &out.join(target));
+    }
+}
+
 fn bake_map(out: &Path) {
     let src = |name: &str| read(&assets().join("lpc-src/map").join(name));
     write(&ground(&src("ground-dirt.png")), &out.join(GROUND_DIRT));
@@ -403,5 +471,6 @@ fn bake_lpc_sheets() {
         &format!("{mace}/universal_behind/hurt/mace.png"),
     );
     write(&behind, &out.join(CLUB_BEHIND_FILE));
+    bake_creatures(&mut src, &out);
     bake_map(&out);
 }
