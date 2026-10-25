@@ -11,7 +11,24 @@ workspace = true
 
 [dependencies]
 evoclash-game = { workspace = true, features = ["client"] }
-bevy = { workspace = true, features = ["2d", "ui", "web"] }
+# Hand-picked rather than the "2d"/"ui" bundles, which also pull in gamepads, picking, scenes,
+# animation, gizmos, UI widgets, sysinfo and Wayland: compile time and wasm size this game never uses.
+bevy = { workspace = true, features = [
+  "bevy_asset",
+  "bevy_window",
+  "bevy_winit",
+  "bevy_render",
+  "bevy_core_pipeline",
+  "bevy_sprite",
+  "bevy_sprite_render",
+  "bevy_text",
+  "bevy_ui",
+  "bevy_ui_render",
+  "webgl2",
+  "web",
+  # Only so the client still builds natively on Linux (CI clippy/tests); winit needs a backend.
+  "x11",
+] }
 lightyear = { workspace = true, features = ["client"] }
 serde.workspace = true
 serde_json.workspace = true

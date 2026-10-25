@@ -20,9 +20,9 @@ env:
   # Debug info makes Bevy's target dir huge and slows cache save/restore; CI doesn't need it.
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
-  # Native libraries the client (winit, audio, gamepad) links against on Linux; the client only
+  # Native libraries the client (winit on X11) links against on Linux; the client only
   # runs in browsers, but it still compiles natively for clippy and its tests.
-  LINUX_DEPS: pkg-config libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+  LINUX_DEPS: pkg-config libxkbcommon-dev
 
 jobs:
   fmt:
