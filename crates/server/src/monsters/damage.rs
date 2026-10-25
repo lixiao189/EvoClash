@@ -35,7 +35,7 @@ pub(super) fn drops(monster: Monster, brain: &Brain, rng: &mut impl Rng) -> Vec<
             // Whatever it carried, like any fallen fighter.
             let mut items = vec![Item::Weapon {
                 kind: brain.weapon,
-                ammo: brain.weapon.stats().max_ammo / 2,
+                ammo: brain.weapon.max_ammo() / 2,
             }];
             if rng.random_bool(0.35) {
                 items.push(Item::Armor {
@@ -111,7 +111,7 @@ pub(super) fn resolve_monster_damage(
                 .map_or(0, |(_, p, _)| p.client_id),
         });
         if let Some(by) = dmg.attacker {
-            let melee = dmg.cause.is_none() && dmg.weapon.is_some_and(|w| w.stats().melee);
+            let melee = dmg.cause.is_none() && dmg.weapon.is_some_and(|w| w.melee().is_some());
             dealt.0.push(Hit {
                 attacker: by,
                 amount,

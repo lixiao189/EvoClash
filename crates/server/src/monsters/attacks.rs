@@ -141,22 +141,16 @@ pub(super) fn attack(
                     continue;
                 }
                 let weapon = brain.weapon;
-                let stats = weapon.stats();
+                // Raiders only ever carry guns.
+                let Some(gun) = weapon.ranged() else {
+                    continue;
+                };
                 // Slower trigger finger than a player, or a rifle squad would shred everyone.
-                brain.attack_cd = (stats.cooldown * 2).max(14);
-                let base = brain.aim.to_angle();
-                for i in 0..stats.pellets {
-                    let fan = if stats.pellets > 1 {
-                        (i as f32 / (stats.pellets - 1) as f32 - 0.5) * stats.spread
-                    } else if stats.spread > 0.0 {
-                        rng.random_range(-stats.spread..stats.spread)
-                    } else {
-                        0.0
-                    };
-                    let dir = Vec2::from_angle(base + fan);
-                    let flight = Flight::raider_shot(entity, weapon);
+                brain.attack_cd = (gun.cooldown() * 2).max(14);
+                for dir in gun.volley(brain.aim, &mut rng) {
+                    let flight = Flight::raider_shot(entity, gun);
                     let kind = ProjectileKind::Shot(weapon);
-                    let speed = stats.range_or_speed;
+                    let speed = gun.muzzle_speed();
                     shoot(&mut commands, kind, muzzle(dir), dir, speed, flight);
                 }
             }

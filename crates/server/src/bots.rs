@@ -4,11 +4,11 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 use evoclash_game::evolution::{EvoPath, Evolution, Skill, SkillState};
-use evoclash_game::items::{ArmorKind, WeaponKind};
+use evoclash_game::items::{Arm, ArmorKind, WeaponKind};
 use evoclash_game::map::ARENA_HALF;
 use evoclash_game::nav::{NavGrid, next_waypoint};
 use evoclash_game::protocol::*;
-use evoclash_game::sim::{Arena, DT, PLAYER_RADIUS};
+use evoclash_game::sim::{Arena, PLAYER_RADIUS};
 use rand::Rng;
 
 use crate::combat::auto_wants;
@@ -66,11 +66,9 @@ pub struct Nav(pub NavGrid);
 
 /// How far a weapon is worth firing from.
 pub fn engage_range(weapon: WeaponKind) -> f32 {
-    let stats = weapon.stats();
-    if stats.melee {
-        stats.range_or_speed + 20.0
-    } else {
-        stats.range_or_speed * stats.lifetime as f32 * DT * 0.8
+    match weapon.arm() {
+        Arm::Melee(club) => club.reach() + 20.0,
+        Arm::Ranged(gun) => gun.range() * 0.8,
     }
 }
 
@@ -262,13 +260,12 @@ fn think(
         if let Some((_, enemy_pos, enemy_armor, dist, _)) = enemy {
             let to_enemy = (enemy_pos - pos.0).normalize_or(Vec2::X);
             input.aim = aim_toward(to_enemy, bot.aim_error, &mut rng);
-            let stats = loadout.weapon.stats();
             let range = engage_range(loadout.weapon);
             if rng.random_bool(0.03) {
                 bot.strafe = -bot.strafe;
             }
             let strafe = to_enemy.perp() * bot.strafe;
-            let dir = if stats.melee || dist > range * 0.85 {
+            let dir = if loadout.weapon.melee().is_some() || dist > range * 0.85 {
                 let waypoint = next_waypoint(&nav.0, &arena, pos.0, enemy_pos, PLAYER_RADIUS);
                 (waypoint - pos.0).normalize_or_zero() + strafe * 0.3
             } else if dist < range * 0.35 {

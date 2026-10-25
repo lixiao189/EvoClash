@@ -202,7 +202,7 @@ fn draw_armed(sheet: &mut Canvas, kind: WeaponKind, feet: Vec2, aim: Vec2, since
         let muzzle = center + held * (size.x / 2.0 - 1.0) * PIXEL;
         let flash = paint_muzzle();
         let scale = attack.flash / Vec2::new(flash.w as f32, flash.h as f32);
-        let c = kind.stats().color.mix(&Color::WHITE, 0.45).to_srgba();
+        let c = kind.spec().color().mix(&Color::WHITE, 0.45).to_srgba();
         draw_sprite(
             sheet,
             &flash,
@@ -353,7 +353,7 @@ fn preview_effects() {
     let tints = [
         (paint_bolt(), rgb(1.0, 0.9, 0.4), 0, 10),
         (paint_muzzle(), rgb(1.0, 0.85, 0.55), 0, 40),
-        (paint_slash(), rgb(1.0, 0.92, 0.75), 60, 10),
+        (paint_slash(1.1, 0.7), rgb(1.0, 0.92, 0.75), 60, 10),
         (paint_shock(), rgb(1.0, 0.6, 0.2), 160, 10),
         (paint_blast(), rgb(1.0, 0.5, 0.12), 290, 10),
     ];
@@ -492,7 +492,7 @@ fn sprites_have_opaque_pixels() {
     // Soft effects never reach full opacity but must not be blank.
     for canvas in [
         paint_bolt(),
-        paint_slash(),
+        paint_slash(1.1, 0.5),
         paint_muzzle(),
         paint_shock(),
         paint_blast(),

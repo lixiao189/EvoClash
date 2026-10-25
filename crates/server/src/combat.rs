@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use bevy::prelude::*;
 use evoclash_game::evolution::{Evolution, SkillState};
-use evoclash_game::items::{ArmorKind, Item, WeaponKind};
+use evoclash_game::items::{Arm, ArmorKind, Item, RangedWeapon, WeaponKind};
 use evoclash_game::map::segment_circle;
 use evoclash_game::protocol::*;
 use evoclash_game::sim::{Arena, DT, PLAYER_RADIUS};
@@ -25,7 +25,6 @@ const EMP_SPEED: f32 = 760.0;
 const EMP_FUSE_TICKS: u16 = 36;
 const EMP_RADIUS: f32 = 180.0;
 const EMP_DAMAGE: f32 = 12.0;
-const MELEE_ARC_COS: f32 = 0.45;
 
 pub struct CombatPlugin;
 
@@ -76,15 +75,14 @@ impl Flight {
     }
 
     /// A raider's gunshot: weapon stats, but it never hits other monsters.
-    pub fn raider_shot(owner: Entity, weapon: WeaponKind) -> Self {
-        let stats = weapon.stats();
+    pub fn raider_shot(owner: Entity, gun: &dyn RangedWeapon) -> Self {
         Self {
             owner,
             rewind: 0,
-            ttl: stats.lifetime,
-            damage: stats.damage,
-            armor_mult: stats.armor_mult,
-            piercing: stats.piercing,
+            ttl: gun.lifetime(),
+            damage: gun.damage(),
+            armor_mult: gun.armor_mult(),
+            piercing: gun.piercing(),
             already_hit: Vec::new(),
             fauna: true,
             cause: None,
@@ -184,74 +182,61 @@ fn fire_weapons(
             continue;
         }
         let aim = input.aim.normalize_or(Vec2::X);
-        let stats = loadout.weapon.stats();
-        cd.fire = evo.fire_cooldown(stats.cooldown);
+        let weapon = loadout.weapon.spec();
+        cd.fire = evo.fire_cooldown(weapon.cooldown());
         // Perks (利爪, 能量聚焦) and 狂暴.
         let damage_amount =
-            stats.damage * evo.weapon_damage_mult(loadout.weapon) * skills.damage_mult();
-        let armor_mult = stats.armor_mult + evo.armor_mult_bonus(loadout.weapon);
+            weapon.damage() * evo.weapon_damage_mult(loadout.weapon) * skills.damage_mult();
+        let armor_mult = weapon.armor_mult() + evo.armor_mult_bonus(loadout.weapon);
 
-        if stats.melee {
-            for (target, target_pos, target_vitals, history, monster, prop) in &targets {
-                if target == entity || !target_vitals.alive {
-                    continue;
+        let gun = match loadout.weapon.arm() {
+            Arm::Ranged(gun) => gun,
+            Arm::Melee(club) => {
+                for (target, target_pos, target_vitals, history, monster, prop) in &targets {
+                    if target == entity || !target_vitals.alive {
+                        continue;
+                    }
+                    let seen_at = rewound(history, tick.0, rewind.0, target_pos.0);
+                    let radius = body_radius(monster, prop);
+                    if !club.strikes(seen_at - pos.0, radius, aim, evo.melee_reach_bonus()) {
+                        continue;
+                    }
+                    if !arena.line_of_sight(pos.0, seen_at) {
+                        continue;
+                    }
+                    damage.0.push(Damage {
+                        target,
+                        attacker: Some(entity),
+                        amount: damage_amount,
+                        armor_mult,
+                        weapon: Some(loadout.weapon),
+                        emp: false,
+                        cause: None,
+                    });
                 }
-                let reach =
-                    stats.range_or_speed + evo.melee_reach_bonus() + body_radius(monster, prop);
-                let seen_at = rewound(history, tick.0, rewind.0, target_pos.0);
-                let offset = seen_at - pos.0;
-                let dist = offset.length();
-                if dist > reach || offset.normalize_or_zero().dot(aim) < MELEE_ARC_COS {
-                    continue;
-                }
-                if !arena.line_of_sight(pos.0, seen_at) {
-                    continue;
-                }
-                damage.0.push(Damage {
-                    target,
-                    attacker: Some(entity),
-                    amount: damage_amount,
-                    armor_mult,
-                    weapon: Some(loadout.weapon),
-                    emp: false,
-                    cause: None,
+                outbox.fast.push(GameEvent::Melee {
+                    pos: pos.0,
+                    dir: aim,
                 });
+                continue;
             }
-            outbox.fast.push(GameEvent::Melee {
-                pos: pos.0,
-                dir: aim,
-            });
-            continue;
-        }
+        };
 
-        let base = aim.to_angle();
-        for i in 0..stats.pellets {
-            // Shotguns fan out evenly; everything else gets a little random bloom.
-            let fan = if stats.pellets > 1 {
-                (i as f32 / (stats.pellets - 1) as f32 - 0.5) * stats.spread
-            } else {
-                0.0
-            };
-            let bloom = if stats.spread > 0.0 && stats.pellets == 1 {
-                rand::Rng::random_range(&mut rng, -stats.spread..stats.spread)
-            } else {
-                0.0
-            };
-            let dir = Vec2::from_angle(base + fan + bloom);
+        for dir in gun.volley(aim, &mut rng) {
             commands.spawn((
                 Name::new("Projectile"),
                 Projectile {
                     kind: ProjectileKind::Shot(loadout.weapon),
-                    vel: dir * stats.range_or_speed,
+                    vel: dir * gun.muzzle_speed(),
                 },
                 Pos(pos.0 + dir * (PLAYER_RADIUS + 4.0)),
                 Flight {
                     owner: entity,
                     rewind: rewind.0,
-                    ttl: stats.lifetime,
+                    ttl: gun.lifetime(),
                     damage: damage_amount,
                     armor_mult,
-                    piercing: stats.piercing,
+                    piercing: gun.piercing(),
                     already_hit: Vec::new(),
                     fauna: false,
                     cause: None,
@@ -443,7 +428,7 @@ pub(crate) fn step_projectiles(
 pub fn auto_wants(item: &Item, vitals: &Vitals, loadout: &Loadout, evo: &Evolution) -> bool {
     match *item {
         Item::Weapon { kind, .. } => {
-            kind.stats().tier > loadout.weapon.stats().tier
+            kind.spec().tier() > loadout.weapon.spec().tier()
                 || (kind == loadout.weapon
                     && kind != WeaponKind::Stick
                     && loadout.ammo < evo.max_ammo(kind))

@@ -695,9 +695,9 @@ fn update_hud(
             },
             HudText::Status => match me {
                 Some((_, vitals, loadout, stats, dash, _)) => {
-                    let weapon = loadout.weapon.stats();
-                    color.0 = tier_color(weapon.tier).mix(&Color::WHITE, 0.4);
-                    let ammo = if weapon.melee {
+                    let weapon = loadout.weapon.spec();
+                    color.0 = tier_color(weapon.tier()).mix(&Color::WHITE, 0.4);
+                    let ammo = if loadout.weapon.melee().is_some() {
                         "∞".to_string()
                     } else {
                         loadout.ammo.to_string()
@@ -716,8 +716,8 @@ fn update_hud(
                         vitals.max_hp,
                         vitals.armor.name(),
                         vitals.armor_points,
-                        weapon.tier,
-                        weapon.name,
+                        weapon.tier(),
+                        weapon.name(),
                         loadout.emps,
                         stats.streak,
                     )

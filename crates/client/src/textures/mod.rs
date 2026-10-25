@@ -37,6 +37,8 @@ use weapons::*;
 
 /// World pixels per texture pixel.
 pub const PIXEL: f32 = 2.0;
+/// Frames in a melee swing's slash.
+pub const SLASH_FRAMES: usize = 6;
 
 #[derive(Resource)]
 pub struct Textures {
@@ -90,8 +92,6 @@ pub struct Textures {
     pub emp: Handle<Image>,
     /// Bullet streak: white, fading tail on the left, bright round head on the right.
     pub bolt: Handle<Image>,
-    /// Crescent of a melee swing, centered, opening toward +X.
-    pub slash: Handle<Image>,
     /// White muzzle flash: hot spot at the left edge, flame tongue toward +X; tinted per weapon.
     pub muzzle: Handle<Image>,
     /// Soft expanding shock ring.
@@ -170,6 +170,9 @@ pub struct WeaponSprite {
     pub size: Vec2,
     /// Where the rear hand grips, in texture pixels from the top-left. The renderer pivots here.
     pub grip: Vec2,
+    /// Melee only: the swing's frames, `SLASH_FRAMES` of them; empty for a gun. Each is the
+    /// struck sector centered on +X, radius = half the texture, with the blade sweeping clockwise.
+    pub slash: Vec<Handle<Image>>,
 }
 
 /// Where to put a held weapon and the sleeve reaching for it, so the rear fist lands on `pivot`.
@@ -219,6 +222,14 @@ pub fn build(images: &mut Assets<Image>) -> Textures {
             held: add(held, true),
             icon: add(icon, true),
             grip,
+            slash: kind.melee().map_or(Vec::new(), |club| {
+                (0..SLASH_FRAMES)
+                    .map(|i| {
+                        let progress = (i + 1) as f32 / SLASH_FRAMES as f32;
+                        add(paint_slash(club.half_arc(), progress), false)
+                    })
+                    .collect()
+            }),
         }
     });
     Textures {
@@ -280,7 +291,6 @@ pub fn build(images: &mut Assets<Image>) -> Textures {
         medkit: add(paint_medkit(), true),
         emp: add(paint_emp(), true),
         bolt: add(paint_bolt(), false),
-        slash: add(paint_slash(), false),
         muzzle: add(paint_muzzle(), false),
         shock: add(paint_shock(), false),
         blast: add(paint_blast(), false),
