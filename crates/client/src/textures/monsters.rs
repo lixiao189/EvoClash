@@ -102,22 +102,6 @@ pub(super) fn paint_splat() -> Canvas {
     c
 }
 
-/// Copy `src` onto `dst` at (dx, dy), multiplying its color by `tint`.
-pub(super) fn stack(dst: &mut Canvas, src: &Canvas, dx: i32, dy: i32, tint: [f32; 3]) {
-    for y in 0..src.h as i32 {
-        for x in 0..src.w as i32 {
-            let p = src.get(x, y);
-            if p[3] > 0.0 {
-                dst.put(
-                    dx + x,
-                    dy + y,
-                    [p[0] * tint[0], p[1] * tint[1], p[2] * tint[2], p[3]],
-                );
-            }
-        }
-    }
-}
-
 /// Feral dog in profile, facing right: lean brown coat, pale snout.
 pub(super) fn paint_dog(frame: i32) -> Canvas {
     let mut c = Canvas::new(32, 20);
@@ -252,37 +236,6 @@ pub(super) fn paint_crawler() -> Canvas {
     }
     c.put(35, 9, rgb(1.0, 0.3, 0.2));
     c.put(35, 19, rgb(1.0, 0.3, 0.2));
-    c.outline(OUTLINE);
-    c
-}
-
-/// A raider: the survivor in a dark red jacket and red bandana, gun drawn.
-pub(super) fn paint_raider(frame: usize) -> Canvas {
-    let mut c = Canvas::new(28, 30);
-    let (jacket, mut gear) = paint_survivor(Facing::Side, frame);
-    let bob = if frame % 2 == 1 { 1 } else { 0 };
-    let red = rgb(0.85, 0.12, 0.1);
-    // Bandana over the face and a knotted headband; clear the goggles' lens first.
-    gear.rect(8, 11 + bob, 14, 12 + bob, red);
-    gear.rect(6, 12 + bob, 7, 13 + bob, shade(red, 0.75));
-    gear.rect(7, 4 + bob, 14, 4 + bob, red);
-    gear.put(13, 4 + bob, shade(red, 1.2));
-    gear.put(4, 5 + bob, red);
-    stack(&mut c, &jacket, 4, 0, [0.52, 0.3, 0.26]);
-    stack(&mut c, &gear, 4, 0, [1.0; 3]);
-    // Arm and a pistol held out front.
-    let metal = rgb(0.22, 0.22, 0.25);
-    c.line(
-        14.0,
-        15.0 + bob as f32,
-        19.0,
-        17.0 + bob as f32,
-        rgb(0.45, 0.26, 0.22),
-    );
-    c.rect(19, 16 + bob, 26, 17 + bob, metal);
-    c.rect(19, 18 + bob, 20, 19 + bob, metal);
-    c.rect(21, 16 + bob, 24, 16 + bob, shade(metal, 1.6));
-    c.put(19, 17 + bob, rgb(0.8, 0.65, 0.5));
     c.outline(OUTLINE);
     c
 }

@@ -25,7 +25,9 @@ Baked from the sources below by `cargo test -p evoclash -- --ignored bake_lpc_sh
 | `lpc/club.png` | mace (walk, attack_slash, hurt) | OGA-BY 3.0 |
 | `lpc/club-behind.png` | mace, behind-the-body parts | OGA-BY 3.0 |
 
-| `lpc/ground-dirt.png`, `lpc/ground-gravel.png` | `lpc-src/map/ground-*.png` fill tiles | CC-BY-SA 3.0 |
+| `lpc/ground-dirt.png` | `lpc-src/map/ground-dirt.png` fill tiles | CC-BY-SA 3.0 |
+| `lpc/ground-gravel-patch.png` | `lpc-src/map/ground-gravel-blob.png` | CC-BY-SA 3.0 |
+| `lpc/raider.png` | the survivor layers with leather armour, recolored, and the bandana in red | CC-BY-SA 3.0 |
 | `lpc/sidewalk.png`, `lpc/road.png` | `lpc-src/map/sidewalk_terrain.png`, `base_road_tile.png`, `cracks_transparent.png` | CC0 |
 | `lpc/wall-brick.png`, `lpc/wall-metal.png`, `lpc/wall-rock.png` | `lpc-src/map/wall-*.png`, top trim and baseboard | CC-BY-SA 3.0 |
 | `lpc/wall-top.png`, `lpc/roof-tar.png`, `lpc/roof-concrete.png` | `lpc-src/map/roof-*.png` | CC-BY-SA 3.0 |
@@ -46,7 +48,7 @@ pack's own credits file is vendored next to them and lists every author it requi
 | `lpc-src/map/roof-tar.png` | `roofs.png` (1112, 672, 112, 96) | [LPC] Roofs v2, see `lpc-src/map/CREDITS-roofs.txt` | CC-BY-SA 3.0 (CC-BY-SA 3.0, GPL 3.0) |
 | `lpc-src/map/roof-concrete.png` | `roofs.png` (760, 672, 112, 96) | [LPC] Roofs v2, see `lpc-src/map/CREDITS-roofs.txt` | CC-BY-SA 3.0 (CC-BY-SA 3.0, GPL 3.0) |
 | `lpc-src/map/ground-dirt.png` | `terrain-v7.png` (32, 96), (32, 160), (64, 160), (0, 160), 32x32 each | [LPC] Terrains, see `lpc-src/map/CREDITS-terrain.txt` | CC-BY-SA 3.0 (CC-BY-SA 3.0, 4.0) |
-| `lpc-src/map/ground-gravel.png` | `terrain-v7.png` (416, 96), (416, 160), (448, 160), (384, 160), 32x32 each | [LPC] Terrains, see `lpc-src/map/CREDITS-terrain.txt` | CC-BY-SA 3.0 (CC-BY-SA 3.0, 4.0) |
+| `lpc-src/map/ground-gravel-blob.png` | `terrain-v7.png` (384, 64, 96, 96) | [LPC] Terrains, see `lpc-src/map/CREDITS-terrain.txt` | CC-BY-SA 3.0 (CC-BY-SA 3.0, 4.0) |
 | `lpc-src/map/base_road_tile.png` | whole file | LPC Modern Streets by Faufilage | CC0 |
 | `lpc-src/map/cracks_transparent.png` | whole file | LPC Modern Streets by Faufilage | CC0 |
 | `lpc-src/map/sidewalk_terrain.png` | whole file | LPC Modern Streets by Faufilage | CC0 |

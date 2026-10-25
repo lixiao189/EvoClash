@@ -4,8 +4,10 @@
 //!
 //! Collision is unchanged: every position is still the point on the ground under the feet.
 
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::image::{ImageLoaderSettings, ImageSampler};
 use bevy::prelude::*;
+use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection};
 use bevy::sprite::{Anchor, SpriteImageMode};
 use bevy::window::PrimaryWindow;
 use evoclash_game::evolution::{ACID_HALF_ANGLE, ACID_RANGE, Evolution, SHIELD_HP, SkillState};
@@ -136,7 +138,7 @@ struct PlayerParts {
 #[derive(Resource)]
 struct LpcMap {
     dirt: Handle<Image>,
-    gravel: Handle<Image>,
+    gravel_patch: Handle<Image>,
     sidewalk: Handle<Image>,
     road: Handle<Image>,
     /// Brick, metal and rock wall faces, and the top every wall shows from above.
@@ -150,6 +152,7 @@ struct LpcMap {
 #[derive(Resource)]
 struct LpcSprites {
     bodies: [Handle<Image>; 4],
+    raider: Handle<Image>,
     team: Handle<Image>,
     club: Handle<Image>,
     club_behind: Handle<Image>,
@@ -165,6 +168,10 @@ struct PickupIcon {
 #[derive(Component)]
 struct MonsterParts {
     body: Entity,
+    /// A raider's rifle, held at the hip like a player's gun.
+    gun: Option<Entity>,
+    /// Distance walked, in stride frames (raiders).
+    stride: f32,
     /// Resting height of the body sprite relative to the monster's ground point.
     base_y: f32,
     last: Vec2,
@@ -335,6 +342,7 @@ fn load_lpc(
     };
     let sprites = LpcSprites {
         bodies: lpc::BODY_FILES.map(&mut load),
+        raider: load(lpc::RAIDER_FILE),
         team: load(lpc::TEAM_FILE),
         club: load(lpc::CLUB_FILE),
         club_behind: load(lpc::CLUB_BEHIND_FILE),
@@ -356,7 +364,7 @@ fn load_lpc(
     commands.insert_resource(sprites);
     let map = LpcMap {
         dirt: load(lpc::GROUND_DIRT),
-        gravel: load(lpc::GROUND_GRAVEL),
+        gravel_patch: load(lpc::GRAVEL_PATCH),
         sidewalk: load(lpc::SIDEWALK),
         road: load(lpc::ROAD),
         wall_faces: lpc::WALL_FACES.map(&mut load),
@@ -370,6 +378,21 @@ fn load_lpc(
 fn spawn_camera(mut commands: Commands) {
     commands.spawn((
         Camera2d,
+        // A dusty grade over everything: a little warmer, a little washed out. Color grading
+        // runs in the tonemapping pass, which `Tonemapping::None` skips.
+        Tonemapping::Linear,
+        ColorGrading {
+            global: ColorGradingGlobal {
+                temperature: 0.12,
+                post_saturation: 0.82,
+                ..default()
+            },
+            midtones: ColorGradingSection {
+                contrast: 1.06,
+                ..default()
+            },
+            ..default()
+        },
         // A little closer than 1:1 so the pixel art reads, while still showing a wide field.
         Projection::Orthographic(OrthographicProjection {
             scale: CAMERA_SCALE,

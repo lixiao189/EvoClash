@@ -157,6 +157,30 @@ impl Layers {
     }
 }
 
+/// Raiders: darker, blood-red cloth over leather, the bandana baked in.
+const RAIDER_SHIRT: [u8; 3] = [92, 52, 44];
+const RAIDER_PANTS: [u8; 3] = [64, 56, 48];
+const RAIDER_BANDANA: [u8; 3] = [168, 38, 30];
+
+fn raider_layers(row: u32) -> Vec<(String, [u8; 3])> {
+    let mut layers = body_layers(1, row);
+    for (path, tint) in &mut layers {
+        if path.starts_with("torso/clothes") {
+            *tint = RAIDER_SHIRT;
+        } else if path.starts_with("legs/") {
+            *tint = RAIDER_PANTS;
+        }
+    }
+    let bandana = (
+        "hat/cloth/bandana/adult/{a}.png".to_string(),
+        RAIDER_BANDANA,
+    );
+    // Over the head but under the backpack when it covers the body.
+    let at = layers.len() - usize::from(row == 0);
+    layers.insert(at, bandana);
+    layers
+}
+
 /// Body layers back to front; facing away, the backpack covers the body instead of hiding behind.
 fn body_layers(outfit: usize, row: u32) -> Vec<(String, [u8; 3])> {
     let pack = ("backpack/squarepack/male/{a}/forest.png".to_string(), PLAIN);
@@ -316,7 +340,7 @@ fn crop(src: &Rgba, x: i32, y: i32, w: i32, h: i32) -> Rgba {
 fn bake_map(out: &Path) {
     let src = |name: &str| read(&assets().join("lpc-src/map").join(name));
     write(&ground(&src("ground-dirt.png")), &out.join(GROUND_DIRT));
-    write(&ground(&src("ground-gravel.png")), &out.join(GROUND_GRAVEL));
+    write(&src("ground-gravel-blob.png"), &out.join(GRAVEL_PATCH));
     // The sidewalk's plain flagstones (2x2 tiles) from the Modern Streets terrain.
     write(
         &crop(&src("sidewalk_terrain.png"), 192, 160, 64, 64),
@@ -360,6 +384,10 @@ fn bake_lpc_sheets() {
         vec![("hat/cloth/bandana/adult/{a}.png".to_string(), PLAIN)]
     });
     write(&team, &out.join(TEAM_FILE));
+    write(
+        &character_sheet(&mut src, raider_layers),
+        &out.join(RAIDER_FILE),
+    );
     let mace = "weapon/blunt/mace";
     let front = club_sheet(
         &mut src,

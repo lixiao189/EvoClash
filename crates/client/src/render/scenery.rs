@@ -22,7 +22,7 @@ pub(super) fn build_scenery(
     }
     let arena = &arena.0;
     // LPC tiles, one texture pixel per world pixel.
-    let mut floor = |image: Handle<Image>, rect: Rect, z: f32| {
+    let floor = |commands: &mut Commands, image: Handle<Image>, rect: Rect, z: f32| {
         commands.spawn((
             Scenery,
             tiled_at(image, rect.size(), 1.0),
@@ -32,18 +32,44 @@ pub(super) fn build_scenery(
 
     // Dirt everywhere, running a little past the boundary walls.
     floor(
+        &mut commands,
         map.dirt.clone(),
         Rect::from_center_size(Vec2::ZERO, ARENA_HALF * 2.0 + 240.0),
         Z_FLOOR,
     );
+    let mut rng = rand::rng();
+    let mut sidewalks = Vec::new();
     for block in &arena.blocks {
-        let cover = match block.biome {
-            Biome::Urban | Biome::Vault => Some(map.sidewalk.clone()),
-            Biome::Industrial => Some(map.gravel.clone()),
-            Biome::Wasteland | Biome::Radiation => None,
-        };
-        if let Some(image) = cover {
-            floor(image, block.rect.inflate(-MARGIN + 12.0), Z_FLOOR + 0.2);
+        let cover = block.rect.inflate(-MARGIN + 12.0);
+        match block.biome {
+            Biome::Urban | Biome::Vault => {
+                floor(&mut commands, map.sidewalk.clone(), cover, Z_FLOOR + 0.2);
+                sidewalks.push(cover);
+            }
+            // Gravel frays into the surrounding dirt instead of ending in a straight line.
+            Biome::Industrial => ground_patch(
+                &mut commands,
+                &map.gravel_patch,
+                cover.inflate(16.0),
+                Z_FLOOR + 0.2,
+            ),
+            // A few gravel patches break up the open dirt. Cosmetic, so a fresh scatter is fine.
+            Biome::Wasteland | Biome::Radiation => {
+                for _ in 0..3 {
+                    let size = Vec2::new(
+                        rng.random_range(120.0..280.0),
+                        rng.random_range(100.0..220.0),
+                    );
+                    let room = (cover.size() - size).max(Vec2::ZERO) / 2.0;
+                    let at = cover.center()
+                        + Vec2::new(
+                            rng.random_range(-room.x..=room.x),
+                            rng.random_range(-room.y..=room.y),
+                        );
+                    let rect = Rect::from_center_size(at, size);
+                    ground_patch(&mut commands, &map.gravel_patch, rect, Z_FLOOR + 0.15);
+                }
+            }
         }
     }
     // Roads between the blocks, with faded center dashes.
@@ -73,33 +99,46 @@ pub(super) fn build_scenery(
         ));
     }
     for rect in &streets {
-        floor(map.road.clone(), *rect, Z_FLOOR + 0.3);
+        floor(&mut commands, map.road.clone(), *rect, Z_FLOOR + 0.3);
     }
-    // Curbs: a pale stone lip with a shadow on the road side, along both edges of every street.
-    let lip = Color::srgb(0.58, 0.6, 0.6);
-    let gutter = Color::srgba(0.0, 0.0, 0.0, 0.35);
+    // Curbs along both edges of every street, their shadow on the road.
     for rect in &streets {
         let vertical = rect.height() > rect.width();
         for side in [-1.0, 1.0] {
-            let (center, size) = if vertical {
-                let x = rect.center().x + side * (STREET / 2.0 - 2.0);
-                (Vec2::new(x, 0.0), Vec2::new(4.0, rect.height()))
+            let across = if vertical { Vec2::X } else { Vec2::Y };
+            let edge = rect.center() * (Vec2::ONE - across)
+                + across * (rect.center() + across * side * STREET / 2.0);
+            let length = if vertical {
+                rect.height()
             } else {
-                let y = rect.center().y + side * (STREET / 2.0 - 2.0);
-                (Vec2::new(0.0, y), Vec2::new(rect.width(), 4.0))
+                rect.width()
             };
-            let shadow = center - side * if vertical { Vec2::X } else { Vec2::Y } * 3.0;
-            let shadow_size = if vertical {
-                Vec2::new(2.0, size.y)
-            } else {
-                Vec2::new(size.x, 2.0)
-            };
-            for (color, at, size) in [(lip, center, size), (gutter, shadow, shadow_size)] {
-                commands.spawn((
-                    Scenery,
-                    Sprite::from_color(color, size),
-                    Transform::from_translation(at.extend(Z_FLOOR + 0.32)),
-                ));
+            curb(
+                &mut commands,
+                edge - across * side * 2.0,
+                length,
+                vertical,
+                -across * side,
+            );
+        }
+    }
+    // Sidewalks ending somewhere other than a street (the arena's edge) get a curb too, with
+    // the drop on the dirt side.
+    let under_street = |p: Vec2| streets.iter().any(|s| s.contains(p));
+    for rect in &sidewalks {
+        for (edge, vertical, out) in [
+            (Vec2::new(rect.min.x, rect.center().y), true, -Vec2::X),
+            (Vec2::new(rect.max.x, rect.center().y), true, Vec2::X),
+            (Vec2::new(rect.center().x, rect.min.y), false, -Vec2::Y),
+            (Vec2::new(rect.center().x, rect.max.y), false, Vec2::Y),
+        ] {
+            if !under_street(edge) {
+                let length = if vertical {
+                    rect.height()
+                } else {
+                    rect.width()
+                };
+                curb(&mut commands, edge - out * 2.0, length, vertical, out);
             }
         }
     }
@@ -159,7 +198,6 @@ pub(super) fn build_scenery(
     }
 
     // Scorch marks and oil stains. Purely cosmetic, so a fresh scatter each time is fine.
-    let mut rng = rand::rng();
     let random_spot = |rng: &mut rand::rngs::ThreadRng| {
         Vec2::new(
             rng.random_range(-ARENA_HALF.x..ARENA_HALF.x),
@@ -324,6 +362,48 @@ pub(super) fn build_scenery(
                 r.min.y + WALL_HEIGHT - 2.0,
                 z + Z_STEP,
             )),
+        ));
+    }
+}
+
+/// A stretch of ground cover with frayed edges: `image` 9-sliced over `rect` (see
+/// `lpc::GROUND_EDGE`), one texture pixel per world pixel.
+fn ground_patch(commands: &mut Commands, image: &Handle<Image>, rect: Rect, z: f32) {
+    let tile = SliceScaleMode::Tile { stretch_value: 1.0 };
+    commands.spawn((
+        Scenery,
+        Sprite {
+            image: image.clone(),
+            custom_size: Some(rect.size()),
+            image_mode: SpriteImageMode::Sliced(TextureSlicer {
+                border: BorderRect::all(lpc::GROUND_EDGE),
+                center_scale_mode: tile,
+                sides_scale_mode: tile,
+                max_corner_scale: 1.0,
+            }),
+            ..default()
+        },
+        Transform::from_translation(rect.center().extend(z)),
+    ));
+}
+
+/// A curb `length` long centered on `at`, running vertically or horizontally: a pale stone lip
+/// and a shadow on the lower side (`down`).
+fn curb(commands: &mut Commands, at: Vec2, length: f32, vertical: bool, down: Vec2) {
+    let lip = Color::srgb(0.58, 0.6, 0.6);
+    let gutter = Color::srgba(0.0, 0.0, 0.0, 0.35);
+    let size = |w: f32| {
+        if vertical {
+            Vec2::new(w, length)
+        } else {
+            Vec2::new(length, w)
+        }
+    };
+    for (color, at, size) in [(lip, at, size(4.0)), (gutter, at + down * 3.0, size(2.0))] {
+        commands.spawn((
+            Scenery,
+            Sprite::from_color(color, size),
+            Transform::from_translation(at.extend(Z_FLOOR + 0.32)),
         ));
     }
 }
