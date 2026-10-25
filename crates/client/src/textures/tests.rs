@@ -144,68 +144,152 @@ fn draw_sprite(
     }
 }
 
-/// A survivor standing at `feet`, holding `kind` along `aim`, `since` seconds after attacking,
-/// posed the way render/players.rs does it.
-fn draw_armed(sheet: &mut Canvas, kind: WeaponKind, feet: Vec2, aim: Vec2, since: f32) {
-    const GUN_HEIGHT: f32 = 26.0;
-    const FOOT_INSET: f32 = 2.0;
+/// The baked LPC sheets (scrap-armor outfit), as canvases.
+struct Lpc {
+    body: Canvas,
+    team: Canvas,
+    club: Canvas,
+    club_behind: Canvas,
+}
+
+fn load_lpc() -> Lpc {
+    let canvas = |file: &str| {
+        let img = crate::lpc::bake::read(&crate::lpc::bake::assets().join(file));
+        let mut c = Canvas::new(img.w, img.h);
+        for (dst, p) in c.px.iter_mut().zip(&img.px) {
+            *dst = p.map(|v| v as f32 / 255.0);
+        }
+        c
+    };
+    Lpc {
+        body: canvas(crate::lpc::BODY_FILES[1]),
+        team: canvas(crate::lpc::TEAM_FILE),
+        club: canvas(crate::lpc::CLUB_FILE),
+        club_behind: canvas(crate::lpc::CLUB_BEHIND_FILE),
+    }
+}
+
+fn cell(sheet: &Canvas, size: u32, columns: u32, index: u32) -> Canvas {
+    let (x0, y0) = (
+        (index % columns * size) as i32,
+        (index / columns * size) as i32,
+    );
+    Canvas::filled(size, size, |x, y| sheet.get(x0 + x, y0 + y))
+}
+
+/// A player standing at `feet` on stride frame `stride`, holding `kind` along `aim`, `since`
+/// seconds after attacking, posed the way render/players.rs does it: LPC sheets with our guns.
+#[allow(clippy::too_many_arguments)]
+fn draw_armed(
+    sheet: &mut Canvas,
+    lpc: &Lpc,
+    kind: WeaponKind,
+    feet: Vec2,
+    aim: Vec2,
+    since: f32,
+    stride: usize,
+) {
+    use crate::lpc::{self, Action};
     let tint = [0.35, 0.6, 0.95, 1.0];
-    let px = Vec2::splat(PIXEL);
+    let one = Vec2::ONE;
+    let (facing, flip) = Facing::from_aim(aim);
+    let row = lpc::row(facing, flip);
+    let melee = kind.melee().is_some();
+    let swing = crate::render::SWING_SECS;
+    let action = if melee && since < swing {
+        Action::Swing {
+            since,
+            total: swing,
+        }
+    } else {
+        Action::Walk(stride)
+    };
+    let frame = lpc::frame(action, melee);
+    let center = feet + Vec2::Y * (lpc::FEET - lpc::CELL as f32 / 2.0);
+    let body = |c: &Canvas| cell(c, lpc::CELL, lpc::COLUMNS, row * lpc::COLUMNS + frame.body);
+    let club = |c: &Canvas, col: u32| {
+        cell(
+            c,
+            lpc::CLUB_CELL,
+            lpc::CLUB_COLUMNS,
+            row * lpc::CLUB_COLUMNS + col,
+        )
+    };
+
     let (_, weapon, grip) = paint_weapon(kind);
     let size = Vec2::new(weapon.w as f32, weapon.h as f32);
-    let (facing, flip) = Facing::from_aim(aim);
-    let (jacket, gear) = paint_survivor(facing, 0);
-    let body = feet + Vec2::Y * (SURVIVOR.y as f32 * PIXEL / 2.0 - FOOT_INSET);
     let attack = crate::render::attack_pose(kind, aim, since);
     let held = Vec2::from_angle(aim.to_angle() + attack.swing);
-    let left = aim.x < 0.0;
-    let (reach, arm_len) = if kind.melee().is_some() {
-        (MELEE_REACH, LONG_ARM)
-    } else {
-        (0.0, ARM)
-    };
-    let shoulder = feet
-        + Vec2::new(
-            if facing == Facing::Side {
-                if flip { -4.0 } else { 4.0 }
-            } else {
-                0.0
-            },
-            GUN_HEIGHT,
-        );
-    let pivot = shoulder + held * reach * PIXEL + attack.push;
-    let (center, arm_at) = held_layout(pivot, held, size, grip, left, arm_len);
-    let behind = facing == Facing::Up;
+    let left = held.x < 0.0;
+    let gun_at = held_layout(
+        feet + lpc::gun_grip(row) + attack.push,
+        held,
+        size,
+        grip,
+        left,
+        1.0,
+    );
     let gun = |sheet: &mut Canvas| {
+        if !melee {
+            draw_sprite(
+                sheet,
+                &weapon,
+                gun_at,
+                held.to_angle(),
+                (false, left),
+                one,
+                [1.0; 4],
+            );
+        }
+    };
+    if row == 0 {
+        gun(sheet);
+    }
+    if let Some(col) = frame.club {
         draw_sprite(
             sheet,
-            &paint_arm(arm_len),
-            arm_at,
-            held.to_angle(),
-            (false, left),
-            px,
-            tint,
-        );
-        draw_sprite(
-            sheet,
-            &weapon,
+            &club(&lpc.club_behind, col),
             center,
-            held.to_angle(),
-            (false, left),
-            px,
+            0.0,
+            (false, false),
+            one,
             [1.0; 4],
         );
-    };
-    if behind {
+    }
+    draw_sprite(
+        sheet,
+        &body(&lpc.body),
+        center,
+        0.0,
+        (false, false),
+        one,
+        [1.0; 4],
+    );
+    draw_sprite(
+        sheet,
+        &body(&lpc.team),
+        center,
+        0.0,
+        (false, false),
+        one,
+        tint,
+    );
+    if let Some(col) = frame.club {
+        draw_sprite(
+            sheet,
+            &club(&lpc.club, col),
+            center,
+            0.0,
+            (false, false),
+            one,
+            [1.0; 4],
+        );
+    }
+    if row != 0 {
         gun(sheet);
     }
-    draw_sprite(sheet, &jacket, body, 0.0, (flip, false), px, tint);
-    draw_sprite(sheet, &gear, body, 0.0, (flip, false), px, [1.0; 4]);
-    if !behind {
-        gun(sheet);
-    }
-    if attack.flash_alpha > 0.0 {
-        let muzzle = center + held * (size.x / 2.0 - 1.0) * PIXEL;
+    if !melee && attack.flash_alpha > 0.0 {
+        let muzzle = gun_at + held * (size.x / 2.0 - 1.0);
         let flash = paint_muzzle();
         let scale = attack.flash / Vec2::new(flash.w as f32, flash.h as f32);
         let c = kind.spec().color().mix(&Color::WHITE, 0.45).to_srgba();
@@ -250,6 +334,7 @@ fn preview_armed() {
     };
     let angles = [0.0f32, 35.0, 80.0, 145.0, 180.0, -45.0, -90.0, -140.0];
     let (cw, ch) = (96, 96);
+    let lpc = load_lpc();
     let mut sheet = checker(cw * angles.len() as u32, ch * ALL_WEAPONS.len() as u32);
     for (row, kind) in ALL_WEAPONS.iter().enumerate() {
         for (col, deg) in angles.iter().enumerate() {
@@ -258,7 +343,7 @@ fn preview_armed() {
                 -(row as f32 * ch as f32 + 84.0),
             );
             let aim = Vec2::from_angle(deg.to_radians());
-            draw_armed(&mut sheet, *kind, feet, aim, f32::INFINITY);
+            draw_armed(&mut sheet, &lpc, *kind, feet, aim, f32::INFINITY, 0);
         }
     }
     write_bmp(&sheet, 4, &path);
@@ -275,6 +360,7 @@ fn preview_attacks() {
     };
     let steps = 10;
     let (cw, ch) = (96, 96);
+    let lpc = load_lpc();
     let mut sheet = checker(cw * steps, ch * 2 * ALL_WEAPONS.len() as u32);
     for (k, kind) in ALL_WEAPONS.iter().enumerate() {
         for (side, aim) in [Vec2::X, Vec2::new(-1.0, 0.3).normalize()]
@@ -287,7 +373,42 @@ fn preview_attacks() {
                     col as f32 * cw as f32 + 48.0,
                     -(row as f32 * ch as f32 + 80.0),
                 );
-                draw_armed(&mut sheet, *kind, feet, *aim, col as f32 / 30.0);
+                draw_armed(&mut sheet, &lpc, *kind, feet, *aim, col as f32 / 30.0, 0);
+            }
+        }
+    }
+    write_bmp(&sheet, 3, &path);
+}
+
+/// Dev aid: `EVOCLASH_POSES_PREVIEW=out.bmp cargo test -p evoclash -- --ignored preview_poses`
+/// lays out a character sheet: facing up, down, left and right (four columns each), rows
+/// walking with the club, swinging it, walking with a rifle, and firing it.
+#[test]
+#[ignore]
+fn preview_poses() {
+    let Ok(path) = std::env::var("EVOCLASH_POSES_PREVIEW") else {
+        return;
+    };
+    let lpc = load_lpc();
+    let dirs = [90.0f32, -90.0, 180.0, 0.0];
+    let (cw, ch) = (64, 76);
+    let mut sheet = checker(cw * 16, ch * 4);
+    for row in 0..4 {
+        for (d, deg) in dirs.iter().enumerate() {
+            for k in 0..4 {
+                let col = d * 4 + k;
+                let feet = Vec2::new(
+                    col as f32 * cw as f32 + 32.0,
+                    -(row as f32 * ch as f32 + 68.0),
+                );
+                let aim = Vec2::from_angle(deg.to_radians());
+                let (kind, since, stride) = match row {
+                    0 => (WeaponKind::Stick, f32::INFINITY, 1 + 2 * k),
+                    1 => (WeaponKind::Stick, 0.02 + 0.07 * k as f32, 0),
+                    2 => (WeaponKind::Rifle, f32::INFINITY, 1 + 2 * k),
+                    _ => (WeaponKind::Rifle, 0.015 * k as f32, 0),
+                };
+                draw_armed(&mut sheet, &lpc, kind, feet, aim, since, stride);
             }
         }
     }

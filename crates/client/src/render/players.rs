@@ -6,11 +6,15 @@ use super::*;
 const SWING_WINDUP: f32 = 0.04;
 const SWING_SWEEP: f32 = 0.12;
 const SWING_RECOVER: f32 = 0.14;
+/// The whole swing.
+pub const SWING_SECS: f32 = SWING_WINDUP + SWING_SWEEP + SWING_RECOVER;
 /// Radians behind and past the aim the swing reaches.
 const SWING_BACK: f32 = 1.2;
 const SWING_THROUGH: f32 = 1.1;
 /// How far the hands thrust toward the target mid-swing, in world pixels.
 const SWING_LUNGE: f32 = 6.0;
+/// Guns are drawn at one texture pixel per world pixel, like the LPC characters holding them.
+const GUN_SCALE: f32 = 1.0;
 /// Muzzle flash lifetime and its size for a rifle, in world pixels.
 const FLASH_SECS: f32 = 0.06;
 const FLASH_SIZE: Vec2 = Vec2::new(22.0, 14.0);
@@ -29,27 +33,46 @@ pub(super) fn dress_player(
     players: Query<&Player>,
     mut commands: Commands,
     textures: Res<Textures>,
+    lpc_sprites: Res<LpcSprites>,
     font: Res<UiFont>,
 ) {
     let Ok(player) = players.get(trigger.entity) else {
         return;
     };
-    let frame = textures.survivor(Facing::Down, 0).clone();
-    let lift = Vec3::new(0.0, SURVIVOR_HEIGHT / 2.0 - FOOT_INSET, 0.0);
-    let (mut jacket, transform) = pixel_sprite(frame.jacket);
-    jacket.color = player_color(player);
-    let jacket = commands
-        .spawn((jacket, transform.with_translation(lift)))
+    // LPC frames are drawn at one texture pixel per world pixel, feet on the entity's origin.
+    let lift = Vec3::new(0.0, lpc::FEET - lpc::CELL as f32 / 2.0, 0.0);
+    let mut sheet = |image: Handle<Image>, layout: &Handle<TextureAtlasLayout>, z: f32| {
+        let sprite = Sprite {
+            image,
+            texture_atlas: Some(TextureAtlas {
+                layout: layout.clone(),
+                index: 0,
+            }),
+            ..default()
+        };
+        commands
+            .spawn((sprite, Transform::from_translation(lift + Vec3::Z * z)))
+            .id()
+    };
+    let body = sheet(lpc_sprites.bodies[0].clone(), &lpc_sprites.layout, 0.0);
+    let team = sheet(lpc_sprites.team.clone(), &lpc_sprites.layout, Z_STEP);
+    let club = sheet(
+        lpc_sprites.club.clone(),
+        &lpc_sprites.club_layout,
+        2.0 * Z_STEP,
+    );
+    let club_behind = sheet(
+        lpc_sprites.club_behind.clone(),
+        &lpc_sprites.club_layout,
+        -Z_STEP,
+    );
+    let weapon = commands
+        .spawn((
+            Sprite::from_image(textures.weapon(WeaponKind::Stick).held.clone()),
+            Transform::default(),
+            Visibility::Hidden,
+        ))
         .id();
-    let (gear, transform) = pixel_sprite(frame.gear);
-    let gear = commands
-        .spawn((gear, transform.with_translation(lift + Vec3::Z * Z_STEP)))
-        .id();
-    let (weapon, transform) = pixel_sprite(textures.weapon(WeaponKind::Stick).held.clone());
-    let weapon = commands.spawn((weapon, transform)).id();
-    let (mut arm, transform) = pixel_sprite(textures.long_arm.clone());
-    arm.color = player_color(player);
-    let arm = commands.spawn((arm, transform)).id();
     let flash = commands
         .spawn((
             Sprite::from_image(textures.muzzle.clone()),
@@ -59,7 +82,7 @@ pub(super) fn dress_player(
         ))
         .id();
     let shadow = commands
-        .spawn(shadow(&textures, Vec2::new(46.0, 22.0)))
+        .spawn(shadow(&textures, Vec2::new(40.0, 18.0)))
         .id();
     commands
         .entity(trigger.entity)
@@ -67,17 +90,19 @@ pub(super) fn dress_player(
             Transform::default(),
             Visibility::Hidden,
             PlayerParts {
-                jacket,
-                gear,
+                body,
+                team,
+                club,
+                club_behind,
                 weapon,
-                arm,
                 flash,
-                shown: Some(WeaponKind::Stick),
+                shown: None,
                 last: Vec2::ZERO,
                 stride: 0.0,
+                died: None,
             },
         ))
-        .add_children(&[shadow, jacket, gear, weapon, arm, flash])
+        .add_children(&[shadow, body, team, club, club_behind, weapon, flash])
         .with_child((
             NameLabel,
             Text2d::new(player.name.clone()),
@@ -140,21 +165,28 @@ pub(super) fn sync_players(
     fixed: Res<Time<Fixed>>,
     arena: Res<Arena>,
     indoors: Res<Indoors>,
+    time: Res<Time>,
     mut players: Query<
         (
             &Pos,
             Option<&TickSamples>,
             &Vitals,
+            Option<&PlayerParts>,
             &mut Transform,
             &mut Visibility,
         ),
         With<Player>,
     >,
 ) {
-    for (pos, samples, vitals, mut transform, mut visibility) in &mut players {
+    let now = time.elapsed_secs();
+    for (pos, samples, vitals, parts, mut transform, mut visibility) in &mut players {
         let p = visual_pos(pos, samples, &fixed);
         transform.translation = p.extend(depth(p.y));
-        *visibility = if vitals.alive && !indoors.conceals(&arena, p) {
+        // The dead stay down for a moment while they fall over.
+        let shown = vitals.alive
+            || parts
+                .is_some_and(|parts| parts.died.is_none_or(|died| now - died < lpc::DEATH_SECS));
+        *visibility = if shown && !indoors.conceals(&arena, p) {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -279,9 +311,12 @@ fn swing_angle(t: f32) -> f32 {
     }
 }
 
-/// Walk cycle, facing, the weapon swinging around to point at the target, and attack moves.
+/// Walk cycle, facing, the outfit for the armor worn, club swings, the gun pointing at the
+/// target with its recoil and flash, and falling over on death.
+#[allow(clippy::type_complexity)]
 pub(super) fn pose_players(
     tex: Res<Textures>,
+    lpc_sprites: Res<LpcSprites>,
     cursor: Res<CursorWorld>,
     fixed: Res<Time<Fixed>>,
     time: Res<Time>,
@@ -290,6 +325,7 @@ pub(super) fn pose_players(
         Option<&TickSamples>,
         &Aim,
         &Loadout,
+        &Vitals,
         Option<&Strike>,
         &mut PlayerParts,
         Has<LocalPlayer>,
@@ -298,7 +334,16 @@ pub(super) fn pose_players(
     mut shown: Query<&mut Visibility, Without<Player>>,
 ) {
     let now = time.elapsed_secs();
-    for (pos, samples, aim, loadout, strike, mut parts, local) in &mut players {
+    let mut show = |entity: Entity, on: bool| {
+        if let Ok(mut visibility) = shown.get_mut(entity) {
+            visibility.set_if_neq(if on {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            });
+        }
+    };
+    for (pos, samples, aim, loadout, vitals, strike, mut parts, local) in &mut players {
         let p = visual_pos(pos, samples, &fixed);
         let gun_at = p + Vec2::Y * GUN_HEIGHT;
         // Your own body follows the cursor directly instead of waiting for the server's aim.
@@ -306,96 +351,100 @@ pub(super) fn pose_players(
             (true, Some(c)) => (c - gun_at).normalize_or(aim.0),
             _ => aim.0,
         };
+        if vitals.alive {
+            parts.died = None;
+        } else if parts.died.is_none() {
+            parts.died = Some(now);
+        }
         // Respawn teleports don't count as steps.
         let step = p.distance(parts.last);
         parts.last = p;
         let moving = step > 0.2 && step < 60.0 && step / time.delta_secs().max(1e-3) > 40.0;
-        let frame = if moving {
+        let stride = if moving {
             parts.stride += step / STRIDE_PX;
-            parts.stride as usize % textures::WALK_FRAMES
+            1 + parts.stride as usize % lpc::STRIDE_FRAMES
         } else {
-            // Settle on a passing pose instead of freezing mid-stride.
-            parts.stride = parts.stride.floor()
-                + if parts.stride as usize % 2 == 1 {
-                    1.0
-                } else {
-                    0.0
-                };
             0
         };
+
         let (facing, flip) = Facing::from_aim(aim);
-        let images = tex.survivor(facing, frame).clone();
-        for (entity, image) in [(parts.jacket, images.jacket), (parts.gear, images.gear)] {
+        let row = lpc::row(facing, flip);
+        let melee = loadout.weapon.melee().is_some();
+        let since = strike.map_or(f32::INFINITY, |s| now - s.0);
+        let action = match parts.died {
+            Some(died) => lpc::Action::Fall(now - died),
+            None if melee && since < SWING_SECS => lpc::Action::Swing {
+                since,
+                total: SWING_SECS,
+            },
+            None => lpc::Action::Walk(stride),
+        };
+        let frame = lpc::frame(action, melee);
+        let outfit = lpc::outfit(vitals.armor, vitals.armor_points);
+        for (entity, image) in [
+            (parts.body, &lpc_sprites.bodies[outfit]),
+            (parts.team, &lpc_sprites.team),
+        ] {
             if let Ok((mut sprite, _)) = parts_q.get_mut(entity) {
-                sprite.image = image;
-                sprite.flip_x = flip;
+                if sprite.image != *image {
+                    sprite.image = image.clone();
+                }
+                if let Some(atlas) = &mut sprite.texture_atlas {
+                    atlas.index = (row * lpc::COLUMNS + frame.body) as usize;
+                }
+            }
+        }
+        for entity in [parts.club, parts.club_behind] {
+            show(entity, frame.club.is_some());
+            if let Some(col) = frame.club
+                && let Ok((mut sprite, _)) = parts_q.get_mut(entity)
+                && let Some(atlas) = &mut sprite.texture_atlas
+            {
+                atlas.index = (row * lpc::CLUB_COLUMNS + col) as usize;
             }
         }
 
-        let since = strike.map_or(f32::INFINITY, |s| now - s.0);
-        let left = aim.x < 0.0;
+        // A gun is held at the hip and turns to the aim; facing away, it's in front of the
+        // body, out of sight.
+        let gun = !melee && parts.died.is_none();
+        show(parts.weapon, gun);
         let attack = attack_pose(loadout.weapon, aim, since);
+        let lit = gun && attack.flash_alpha > 0.0;
+        show(parts.flash, lit);
+        if !gun {
+            continue;
+        }
         let held = Vec2::from_angle(aim.to_angle() + attack.swing);
-
-        // The weapon pivots at the hands; when you face away it's held in front of you, out of sight.
-        let behind = facing == Facing::Up;
+        let left = held.x < 0.0;
         let sprite_info = tex.weapon(loadout.weapon);
-        // A melee weapon has no stock to hide the arm, so it's held out at arm's length.
-        let melee = loadout.weapon.melee().is_some();
-        let (reach, arm_len) = if melee {
-            (textures::MELEE_REACH, textures::LONG_ARM)
-        } else {
-            (0.0, textures::ARM)
-        };
-        let shoulder = Vec2::new(
-            if facing == Facing::Side {
-                if flip { -4.0 } else { 4.0 }
-            } else {
-                0.0
-            },
-            GUN_HEIGHT,
-        );
-        let pivot = shoulder + held * reach * PIXEL + attack.push;
-        let (center, arm_at) = textures::held_layout(
-            pivot,
+        let grip = lpc::gun_grip(row) + attack.push;
+        let center = textures::held_layout(
+            grip,
             held,
             sprite_info.size,
             sprite_info.grip,
             left,
-            arm_len,
+            GUN_SCALE,
         );
-        let z = if behind { -2.0 * Z_STEP } else { 3.0 * Z_STEP };
-        let new_weapon = parts.shown != Some(loadout.weapon);
+        let z = if row == 0 {
+            -2.0 * Z_STEP
+        } else {
+            3.0 * Z_STEP
+        };
         if let Ok((mut sprite, mut transform)) = parts_q.get_mut(parts.weapon) {
-            if new_weapon {
+            if parts.shown != Some(loadout.weapon) {
                 sprite.image = sprite_info.held.clone();
             }
             // Keep the gun upright when it points left.
             sprite.flip_y = left;
             transform.translation = center.extend(z);
             transform.rotation = Quat::from_rotation_z(held.to_angle());
-        }
-        // Under the weapon, so the fist closes over the cuff.
-        if let Ok((mut sprite, mut transform)) = parts_q.get_mut(parts.arm) {
-            if new_weapon {
-                sprite.image = if melee { &tex.long_arm } else { &tex.arm }.clone();
-            }
-            sprite.flip_y = left;
-            transform.translation = arm_at.extend(z - Z_STEP);
-            transform.rotation = Quat::from_rotation_z(held.to_angle());
+            transform.scale = Vec3::new(GUN_SCALE, GUN_SCALE, 1.0);
         }
         parts.shown = Some(loadout.weapon);
-        // Drawn over everything, even a gun raised behind the head.
-        let lit = attack.flash_alpha > 0.0;
-        if let Ok(mut visibility) = shown.get_mut(parts.flash) {
-            visibility.set_if_neq(if lit {
-                Visibility::Inherited
-            } else {
-                Visibility::Hidden
-            });
-        }
+        // Drawn over everything, even a gun held behind the body.
         if lit && let Ok((mut sprite, mut transform)) = parts_q.get_mut(parts.flash) {
-            let muzzle = center + held * (sprite_info.size.x / 2.0 - 1.0) * PIXEL;
+            let muzzle = center + held * (sprite_info.size.x / 2.0 - 1.0) * GUN_SCALE;
             sprite.custom_size = Some(attack.flash);
             sprite.color = loadout
                 .weapon
@@ -454,7 +503,7 @@ pub(super) fn tint_players(
             let color = if is_shadow {
                 Color::WHITE.with_alpha(0.6 * alpha)
             } else {
-                let base = if child == parts.jacket || child == parts.arm {
+                let base = if child == parts.team {
                     player_color(player)
                 } else {
                     Color::WHITE

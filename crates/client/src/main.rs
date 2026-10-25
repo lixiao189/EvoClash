@@ -10,6 +10,7 @@ mod assets;
 mod effects;
 mod hud;
 mod input;
+mod lpc;
 mod minimap;
 mod predict;
 mod render;

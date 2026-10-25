@@ -1,5 +1,6 @@
-//! Every sprite file shipped in `assets/lpc/` must be credited in `assets/CREDITS.md`: the art
-//! is CC-BY-SA and friends, so shipping a file nobody is credited for breaks its license.
+//! Every sprite file in `assets/lpc/` (shipped) and `assets/lpc-src/` (the layers they are baked
+//! from) must be credited in `assets/CREDITS.md`: the art is CC-BY-SA and friends, so a file
+//! nobody is credited for breaks its license.
 
 use std::path::{Path, PathBuf};
 
@@ -22,8 +23,10 @@ fn every_art_file_is_credited() {
         assets.join("LICENSE-ART.md").exists(),
         "assets/LICENSE-ART.md is missing"
     );
+    // The shipped sheets and the layers they are baked from.
     let mut shipped = Vec::new();
     files(&assets.join("lpc"), &mut shipped);
+    files(&assets.join("lpc-src"), &mut shipped);
     let missing: Vec<String> = shipped
         .iter()
         .map(|p| {
@@ -37,6 +40,6 @@ fn every_art_file_is_credited() {
         .collect();
     assert!(
         missing.is_empty(),
-        "add these files to assets/CREDITS.md (as `lpc/...` in the Files table): {missing:?}"
+        "add these files to assets/CREDITS.md (as `lpc/...` or `lpc-src/...`): {missing:?}"
     );
 }
