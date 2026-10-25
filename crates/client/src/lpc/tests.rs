@@ -84,3 +84,19 @@ fn map_tiles_match_the_layout() {
         assert!(w % 32 == 0 && h % 32 == 0, "{file}: {w}x{h}");
     }
 }
+
+/// Creature sheets have the frame grids the renderer slices them into.
+#[test]
+fn creature_sheets_match_the_layout() {
+    for (file, columns) in [
+        (WOLF_FILES[0], WOLF_COLUMNS),
+        (WOLF_FILES[1], WOLF_COLUMNS),
+        (GHOUL_FILE, GHOUL_COLUMNS),
+        (SLIME_FILE, SLIME_COLUMNS),
+        (GOLEM_FILE, GOLEM_COLUMNS),
+    ] {
+        assert_eq!(png_size(file), (columns * CELL, ROWS * CELL), "{file}");
+    }
+    assert_eq!(WOLF_WALK + WOLF_FRAMES, WOLF_RUN);
+    assert_eq!(WOLF_RUN + WOLF_FRAMES, WOLF_COLUMNS);
+}

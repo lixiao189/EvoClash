@@ -59,6 +59,31 @@ pub const TEAM_FILE: &str = "lpc/survivor-team.png";
 pub const CLUB_FILE: &str = "lpc/club.png";
 pub const CLUB_BEHIND_FILE: &str = "lpc/club-behind.png";
 
+/// Creatures, 64 px frames, rows facing up, left, down and right like the characters.
+/// Dogs are wolves (two coats): 5 walking then 5 running frames.
+pub const WOLF_FILES: [&str; 2] = ["lpc/wolf.png", "lpc/wolf-grey.png"];
+pub const WOLF_WALK: u32 = 0;
+pub const WOLF_RUN: u32 = 5;
+pub const WOLF_FRAMES: u32 = 5;
+pub const WOLF_COLUMNS: u32 = 10;
+/// Ghouls are zombies: standing, then the 8-step stride.
+pub const GHOUL_FILE: &str = "lpc/ghoul.png";
+pub const GHOUL_COLUMNS: u32 = 9;
+/// Spitters are slimes, drawn twice as big: row 0 sits (6 frames), row 1 hops (8).
+pub const SLIME_FILE: &str = "lpc/slime.png";
+pub const SLIME_COLUMNS: u32 = 8;
+pub const SLIME_FEET: f32 = 46.0;
+/// The behemoth is a golem, drawn twice as big: 7 walking frames.
+pub const GOLEM_FILE: &str = "lpc/golem.png";
+pub const GOLEM_COLUMNS: u32 = 7;
+/// How big spitters and the behemoth are drawn, in world pixels per texture pixel.
+pub const BIG_SCALE: f32 = 2.0;
+/// Props, drawn standing on their spot.
+pub const CRATE_FILE: &str = "lpc/crate.png";
+pub const BARREL_FILE: &str = "lpc/barrel.png";
+pub const SAFE_FILE: &str = "lpc/safe.png";
+pub const SAFE_OPEN_FILE: &str = "lpc/safe-open.png";
+
 /// Map tiles, drawn at one texture pixel per world pixel and repeated over each area.
 pub const GROUND_DIRT: &str = "lpc/ground-dirt.png";
 pub const SIDEWALK: &str = "lpc/sidewalk.png";

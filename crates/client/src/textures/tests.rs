@@ -398,7 +398,7 @@ fn preview_poses() {
 }
 
 /// Dev aid: `EVOCLASH_CITY_PREVIEW=out.bmp cargo test -p evoclash -- --ignored preview_city`
-/// lays out the procedural city tiles (2x2 repeats, to check seams) and the props.
+/// lays out the procedural city tiles (2x2 repeats, to check seams); props are LPC now.
 #[test]
 #[ignore]
 fn preview_city() {
@@ -414,28 +414,14 @@ fn preview_city() {
         paint_sandbags(false),
         paint_sandbags(true),
     ];
-    let props = [
-        paint_crate(),
-        paint_barrel(),
-        paint_safe(false),
-        paint_safe(true),
-    ];
     let cell = 132;
-    let mut sheet = Canvas::filled(cell * 4, cell * 4 + 30, |_, _| rgb(0.36, 0.22, 0.16));
+    let mut sheet = Canvas::filled(cell * 4, cell * 2, |_, _| rgb(0.36, 0.22, 0.16));
     for (i, tile) in tiles.iter().enumerate() {
         let (ox, oy) = ((i % 4) as i32 * cell as i32, (i / 4) as i32 * cell as i32);
         for y in 0..128 {
             for x in 0..128 {
                 let p = tile.get(x % tile.w as i32, y % tile.h as i32);
                 sheet.put(ox + x, oy + y, p);
-            }
-        }
-    }
-    for (i, prop) in props.iter().enumerate() {
-        let (ox, oy) = (i as i32 * 30 + 4, cell as i32 * 4 + 4);
-        for y in 0..prop.h as i32 {
-            for x in 0..prop.w as i32 {
-                sheet.put(ox + x, oy + y, prop.get(x, y));
             }
         }
     }
@@ -504,19 +490,11 @@ fn preview_monsters() {
             }
         }
     };
-    let gold = [1.35, 1.1, 0.5];
-    let row1 = [
-        paint_roach(0),
-        paint_pod(),
-        paint_dog(0),
-        paint_dog(1),
-        paint_ghoul(0),
-        paint_spitter(),
-        paint_crawler(),
-    ];
+    // Dogs, ghouls, spitters, raiders and the behemoth are LPC sheets now (`preview_poses`).
+    let row1 = [paint_roach(0), paint_pod(), paint_crawler()];
     let mut x = 4;
-    for (i, c) in row1.iter().enumerate() {
-        draw(&mut sheet, c, x, 80, if i == 3 { gold } else { [1.0; 3] });
+    for c in &row1 {
+        draw(&mut sheet, c, x, 80, [1.0; 3]);
         x += c.w as i32 * 2 + 4;
     }
     let row2 = [paint_drone(0), paint_drone(1), paint_acid()];
@@ -525,8 +503,6 @@ fn preview_monsters() {
         draw(&mut sheet, c, x, 150, [1.0; 3]);
         x += c.w as i32 * 2 + 4;
     }
-    draw(&mut sheet, &paint_behemoth(0), 4, 290, [1.0; 3]);
-    draw(&mut sheet, &paint_behemoth(1), 160, 290, [1.0, 0.5, 0.42]);
     write_bmp(&sheet, 3, &path);
 }
 
@@ -565,12 +541,8 @@ fn sprites_have_opaque_pixels() {
         paint_trap(),
         paint_roach(0),
         paint_pod(),
-        paint_dog(1),
-        paint_ghoul(0),
-        paint_spitter(),
         paint_crawler(),
         paint_drone(1),
-        paint_behemoth(1),
         paint_acid(),
         paint_medkit(),
         paint_reticle(),

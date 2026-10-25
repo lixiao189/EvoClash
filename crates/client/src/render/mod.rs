@@ -158,6 +158,20 @@ struct LpcSprites {
     club_behind: Handle<Image>,
     layout: Handle<TextureAtlasLayout>,
     club_layout: Handle<TextureAtlasLayout>,
+    /// Creatures (see `lpc_look`) and their frame grids.
+    wolves: [Handle<Image>; 2],
+    wolf_layout: Handle<TextureAtlasLayout>,
+    ghoul: Handle<Image>,
+    ghoul_layout: Handle<TextureAtlasLayout>,
+    slime: Handle<Image>,
+    slime_layout: Handle<TextureAtlasLayout>,
+    golem: Handle<Image>,
+    golem_layout: Handle<TextureAtlasLayout>,
+    /// Props.
+    crate_box: Handle<Image>,
+    barrel: Handle<Image>,
+    safe: Handle<Image>,
+    safe_open: Handle<Image>,
 }
 
 #[derive(Component)]
@@ -340,26 +354,43 @@ fn load_lpc(
         pending.add(handle.clone());
         handle
     };
+    let club_layout = layouts.add(TextureAtlasLayout::from_grid(
+        UVec2::splat(lpc::CLUB_CELL),
+        lpc::CLUB_COLUMNS,
+        lpc::ROWS,
+        None,
+        None,
+    ));
+    // 64 px frames, four facings.
+    let mut grid = |columns: u32| {
+        layouts.add(TextureAtlasLayout::from_grid(
+            UVec2::splat(lpc::CELL),
+            columns,
+            lpc::ROWS,
+            None,
+            None,
+        ))
+    };
     let sprites = LpcSprites {
         bodies: lpc::BODY_FILES.map(&mut load),
         raider: load(lpc::RAIDER_FILE),
         team: load(lpc::TEAM_FILE),
         club: load(lpc::CLUB_FILE),
         club_behind: load(lpc::CLUB_BEHIND_FILE),
-        layout: layouts.add(TextureAtlasLayout::from_grid(
-            UVec2::splat(lpc::CELL),
-            lpc::COLUMNS,
-            lpc::ROWS,
-            None,
-            None,
-        )),
-        club_layout: layouts.add(TextureAtlasLayout::from_grid(
-            UVec2::splat(lpc::CLUB_CELL),
-            lpc::CLUB_COLUMNS,
-            lpc::ROWS,
-            None,
-            None,
-        )),
+        layout: grid(lpc::COLUMNS),
+        club_layout,
+        wolves: lpc::WOLF_FILES.map(&mut load),
+        wolf_layout: grid(lpc::WOLF_COLUMNS),
+        ghoul: load(lpc::GHOUL_FILE),
+        ghoul_layout: grid(lpc::GHOUL_COLUMNS),
+        slime: load(lpc::SLIME_FILE),
+        slime_layout: grid(lpc::SLIME_COLUMNS),
+        golem: load(lpc::GOLEM_FILE),
+        golem_layout: grid(lpc::GOLEM_COLUMNS),
+        crate_box: load(lpc::CRATE_FILE),
+        barrel: load(lpc::BARREL_FILE),
+        safe: load(lpc::SAFE_FILE),
+        safe_open: load(lpc::SAFE_OPEN_FILE),
     };
     commands.insert_resource(sprites);
     let map = LpcMap {
