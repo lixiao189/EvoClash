@@ -39,12 +39,13 @@ pub(super) fn paint_weapon(kind: WeaponKind) -> (Canvas, Canvas, Vec2) {
             (c, &[(3, 2)])
         }
         WeaponKind::Bow => {
-            // Recurve bow with a wrapped grip and an arrow on the string.
-            let mut c = Canvas::new(15, 21);
+            // Recurve bow at full draw: the rear hand pinches the nock at the chest, the fore
+            // hand grips the wrapped handle 15 px ahead (the span of the character's two hands).
+            let mut c = Canvas::new(27, 21);
             let wood = rgb(0.64, 0.44, 0.22);
             for y in 1..=19 {
                 let t = (y as f32 - 10.0) / 9.0;
-                let x = (3.0 + 4.5 * (1.0 - t * t)).round() as i32;
+                let x = (15.0 + 4.5 * (1.0 - t * t)).round() as i32;
                 c.put(x, y, wood);
                 if t.abs() < 0.6 {
                     c.put(x - 1, y, shade(wood, 1.25));
@@ -52,20 +53,23 @@ pub(super) fn paint_weapon(kind: WeaponKind) -> (Canvas, Canvas, Vec2) {
                     c.put(x + 1, y, shade(wood, 0.8));
                 }
             }
-            c.rect(6, 8, 7, 12, rgb(0.36, 0.22, 0.13));
-            c.put(6, 9, rgb(0.5, 0.33, 0.2));
-            c.put(6, 11, rgb(0.5, 0.33, 0.2));
-            c.line(3.0, 1.5, 3.0, 19.5, rgb(0.9, 0.88, 0.78));
+            c.rect(18, 8, 19, 12, rgb(0.36, 0.22, 0.13));
+            c.put(18, 9, rgb(0.5, 0.33, 0.2));
+            c.put(18, 11, rgb(0.5, 0.33, 0.2));
+            let string = rgb(0.9, 0.88, 0.78);
+            c.line(15.0, 1.5, 3.5, 10.5, string);
+            c.line(15.0, 19.5, 3.5, 10.5, string);
             let shaft = rgb(0.78, 0.66, 0.45);
-            c.rect(2, 10, 11, 10, shaft);
+            c.rect(2, 10, 23, 10, shaft);
             let head = rgb(0.62, 0.64, 0.66);
-            c.rect(12, 10, 13, 10, head);
-            c.put(12, 9, shade(head, 1.2));
-            c.put(12, 11, shade(head, 0.7));
+            c.rect(24, 10, 25, 10, head);
+            c.put(24, 9, shade(head, 1.2));
+            c.put(24, 11, shade(head, 0.7));
             let feather = rgb(0.82, 0.25, 0.2);
             c.rect(1, 9, 2, 9, feather);
             c.rect(1, 11, 2, 11, shade(feather, 0.75));
-            (c, &[(5, 8)])
+            // Draw hand first: it is the rear grip the sprite pivots on.
+            (c, &[(2, 9), (17, 8)])
         }
         WeaponKind::PipeShotgun => {
             // Scrap pipe on a wooden stock, held together with tape and a hose clamp.
