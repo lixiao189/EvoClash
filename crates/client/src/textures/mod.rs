@@ -92,6 +92,8 @@ pub struct Textures {
     pub bolt: Handle<Image>,
     /// Crescent of a melee swing, centered, opening toward +X.
     pub slash: Handle<Image>,
+    /// White muzzle flash: hot spot at the left edge, flame tongue toward +X; tinted per weapon.
+    pub muzzle: Handle<Image>,
     /// Soft expanding shock ring.
     pub shock: Handle<Image>,
     /// Ragged billowing fireball puff.
@@ -171,11 +173,11 @@ pub struct WeaponSprite {
 }
 
 /// Where to put a held weapon and the sleeve reaching for it, so the rear fist lands on `pivot`.
-/// `size` and `grip` come from [`WeaponSprite`]; the weapon is drawn flipped vertically when it
-/// points left, which mirrors the grip too.
-pub fn held_layout(pivot: Vec2, aim: Vec2, size: Vec2, grip: Vec2) -> (Vec2, Vec2) {
+/// `size` and `grip` come from [`WeaponSprite`]; `flip` says the weapon is drawn flipped
+/// vertically (it points left), which mirrors the grip too.
+pub fn held_layout(pivot: Vec2, aim: Vec2, size: Vec2, grip: Vec2, flip: bool) -> (Vec2, Vec2) {
     let mut g = Vec2::new(grip.x - size.x / 2.0, size.y / 2.0 - grip.y) * PIXEL;
-    if aim.x < 0.0 {
+    if flip {
         g.y = -g.y;
     }
     (pivot - aim.rotate(g), pivot - aim * 3.0 * PIXEL)
@@ -279,6 +281,7 @@ pub fn build(images: &mut Assets<Image>) -> Textures {
         emp: add(paint_emp(), true),
         bolt: add(paint_bolt(), false),
         slash: add(paint_slash(), false),
+        muzzle: add(paint_muzzle(), false),
         shock: add(paint_shock(), false),
         blast: add(paint_blast(), false),
         reticle: add(paint_reticle(), true),

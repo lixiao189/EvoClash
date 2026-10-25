@@ -16,7 +16,7 @@ use rand::Rng;
 
 use crate::hud::path_color;
 use crate::input::{GUN_HEIGHT, LocalPlayer};
-use crate::render::{CameraShake, UiFont, tracer_size};
+use crate::render::{CameraShake, Strike, UiFont, swing_side, tracer_size};
 use crate::textures::Textures;
 
 const Z_FX: f32 = 7.0;
@@ -306,6 +306,7 @@ fn local_fire(
     state: Query<&MatchState>,
     me: Query<
         (
+            Entity,
             &Pos,
             &Vitals,
             &Loadout,
@@ -316,7 +317,7 @@ fn local_fire(
     >,
 ) {
     gun.cooldown -= time.delta_secs();
-    let Ok((pos, vitals, loadout, action, evo)) = me.single() else {
+    let Ok((entity, pos, vitals, loadout, action, evo)) = me.single() else {
         return;
     };
     let input = &action.0;
@@ -328,6 +329,7 @@ fn local_fire(
     // 超频扳机 shortens the interval on the server; match it so tracers don't lag behind.
     let cooldown = evo.map_or(stats.cooldown, |e| e.fire_cooldown(stats.cooldown));
     gun.cooldown = cooldown as f32 / 64.0;
+    commands.entity(entity).insert(Strike(time.elapsed_secs()));
     let aim = input.aim.normalize_or(Vec2::X);
     if stats.melee {
         spawn_swing(&mut commands, &textures, pos.0, aim);
@@ -415,7 +417,7 @@ fn receive_events(
     font: Res<UiFont>,
     mut receivers: Query<&mut MessageReceiver<GameEvent>, With<Client>>,
     me: Query<(&Player, &Pos), With<LocalPlayer>>,
-    players: Query<(&Player, &Pos)>,
+    players: Query<(Entity, &Player, &Pos, Has<LocalPlayer>)>,
     mut feed: ResMut<KillFeed>,
     mut banner: ResMut<Banner>,
     mut marker: ResMut<HitMarker>,
@@ -472,9 +474,18 @@ fn receive_events(
                     );
                 }
                 GameEvent::Melee { pos, dir } => {
-                    // Our own swing was already drawn locally.
-                    if me.is_some_and(|(_, p)| p.0.distance(pos) < 40.0) {
-                        continue;
+                    let swinger = players
+                        .iter()
+                        .map(|(entity, _, p, local)| (entity, local, p.0.distance(pos)))
+                        .filter(|(_, _, d)| *d < 40.0)
+                        .min_by(|a, b| a.2.total_cmp(&b.2));
+                    match swinger {
+                        // Our own swing was already drawn locally.
+                        Some((_, true, _)) => continue,
+                        Some((entity, false, _)) => {
+                            commands.entity(entity).insert(Strike(now));
+                        }
+                        None => {}
                     }
                     spawn_swing(&mut commands, &textures, pos, dir);
                 }
@@ -495,7 +506,9 @@ fn receive_events(
                     1.3,
                 ),
                 GameEvent::LevelUp { client, level } => {
-                    let Some((_, pos)) = players.iter().find(|(p, _)| p.client_id == client) else {
+                    let Some((_, _, pos, _)) =
+                        players.iter().find(|(_, p, _, _)| p.client_id == client)
+                    else {
                         continue;
                     };
                     spawn_level_burst(&mut commands, &textures, pos.0);
@@ -610,7 +623,9 @@ fn age_effects(
         let (size, alpha, tint) = match fx.kind {
             FxKind::Swing { dir } => {
                 let reach = WeaponKind::Stick.stats().range_or_speed + PLAYER_RADIUS;
-                transform.rotation = Quat::from_rotation_z(dir.to_angle() - 1.0 + 2.0 * t);
+                // Sweeps down from overhead, in step with the weapon.
+                let side = swing_side(dir);
+                transform.rotation = Quat::from_rotation_z(dir.to_angle() - side * (1.0 - 2.0 * t));
                 (2.0 * reach, fade, tint)
             }
             FxKind::Ring { radius } => (2.0 * radius * (0.3 + 0.7 * t) / 0.85, fade, tint),
