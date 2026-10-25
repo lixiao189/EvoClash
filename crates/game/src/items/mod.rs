@@ -5,16 +5,9 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, Reflect, Default)]
-pub enum WeaponKind {
-    #[default]
-    Stick,
-    Bow,
-    PipeShotgun,
-    Rifle,
-    Laser,
-    Railgun,
-}
+mod weapons;
+
+pub use weapons::*;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, Reflect, Default)]
 pub enum ArmorKind {
@@ -32,124 +25,6 @@ pub enum Item {
     Armor { kind: ArmorKind, points: f32 },
     Emp,
     Medkit,
-}
-
-pub struct WeaponStats {
-    pub name: &'static str,
-    pub tier: u8,
-    /// Ticks between shots.
-    pub cooldown: u16,
-    pub damage: f32,
-    pub melee: bool,
-    /// Melee reach or projectile speed (px/s).
-    pub range_or_speed: f32,
-    /// Projectile lifetime in ticks.
-    pub lifetime: u16,
-    pub pellets: u8,
-    pub spread: f32,
-    pub max_ammo: u16,
-    /// Multiplier applied to damage absorbed by armor.
-    pub armor_mult: f32,
-    /// Railgun slugs go through walls and bodies.
-    pub piercing: bool,
-    pub color: Color,
-}
-
-impl WeaponKind {
-    pub fn stats(self) -> WeaponStats {
-        match self {
-            WeaponKind::Stick => WeaponStats {
-                name: "木棍",
-                tier: 0,
-                cooldown: 22,
-                damage: 22.0,
-                melee: true,
-                range_or_speed: 78.0,
-                lifetime: 0,
-                pellets: 1,
-                spread: 0.0,
-                max_ammo: 0,
-                armor_mult: 1.0,
-                piercing: false,
-                color: Color::srgb(0.65, 0.5, 0.3),
-            },
-            WeaponKind::Bow => WeaponStats {
-                name: "猎弓",
-                tier: 1,
-                cooldown: 36,
-                damage: 34.0,
-                melee: false,
-                range_or_speed: 950.0,
-                lifetime: 60,
-                pellets: 1,
-                spread: 0.0,
-                max_ammo: 14,
-                armor_mult: 1.0,
-                piercing: false,
-                color: Color::srgb(0.85, 0.75, 0.5),
-            },
-            WeaponKind::PipeShotgun => WeaponStats {
-                name: "管式霰弹枪",
-                tier: 1,
-                cooldown: 48,
-                damage: 11.0,
-                melee: false,
-                range_or_speed: 1150.0,
-                lifetime: 22,
-                pellets: 7,
-                spread: 0.38,
-                max_ammo: 10,
-                armor_mult: 1.0,
-                piercing: false,
-                color: Color::srgb(1.0, 0.6, 0.2),
-            },
-            WeaponKind::Rifle => WeaponStats {
-                name: "制式步枪",
-                tier: 2,
-                cooldown: 7,
-                damage: 11.0,
-                melee: false,
-                range_or_speed: 1600.0,
-                lifetime: 50,
-                pellets: 1,
-                spread: 0.06,
-                max_ammo: 45,
-                armor_mult: 1.0,
-                piercing: false,
-                color: Color::srgb(1.0, 0.95, 0.4),
-            },
-            WeaponKind::Laser => WeaponStats {
-                name: "脉冲激光",
-                tier: 3,
-                cooldown: 9,
-                damage: 15.0,
-                melee: false,
-                range_or_speed: 2600.0,
-                lifetime: 34,
-                pellets: 1,
-                spread: 0.0,
-                max_ammo: 36,
-                armor_mult: 2.0,
-                piercing: false,
-                color: Color::srgb(0.3, 1.0, 1.0),
-            },
-            WeaponKind::Railgun => WeaponStats {
-                name: "轨道炮",
-                tier: 4,
-                cooldown: 64,
-                damage: 95.0,
-                melee: false,
-                range_or_speed: 5200.0,
-                lifetime: 24,
-                pellets: 1,
-                spread: 0.0,
-                max_ammo: 6,
-                armor_mult: 1.5,
-                piercing: true,
-                color: Color::srgb(0.85, 0.4, 1.0),
-            },
-        }
-    }
 }
 
 impl ArmorKind {
@@ -192,7 +67,7 @@ impl ArmorKind {
 impl Item {
     pub fn tier(self) -> u8 {
         match self {
-            Item::Weapon { kind, .. } => kind.stats().tier,
+            Item::Weapon { kind, .. } => kind.spec().tier(),
             Item::Armor { kind, .. } => kind.tier(),
             Item::Emp | Item::Medkit => 1,
         }
@@ -200,7 +75,7 @@ impl Item {
 
     pub fn label(self) -> String {
         match self {
-            Item::Weapon { kind, ammo } => format!("{} ({ammo})", kind.stats().name),
+            Item::Weapon { kind, ammo } => format!("{} ({ammo})", kind.spec().name()),
             Item::Armor { kind, points } => format!("{} ({points:.0})", kind.name()),
             Item::Emp => "电磁脉冲雷".into(),
             Item::Medkit => "医疗包".into(),
@@ -214,7 +89,7 @@ impl Item {
     pub fn weapon(kind: WeaponKind) -> Self {
         Item::Weapon {
             kind,
-            ammo: kind.stats().max_ammo,
+            ammo: kind.max_ammo(),
         }
     }
 

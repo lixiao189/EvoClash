@@ -45,7 +45,7 @@ pub fn resolve_damage(
     for dmg in queue.0.drain(..) {
         let attacker = dmg.attacker.and_then(|a| players.get(a).ok());
         let attacker_id = attacker.map_or(0, |(p, ..)| p.client_id);
-        let attacker_tier = attacker.map(|(_, _, _, loadout, ..)| loadout.weapon.stats().tier);
+        let attacker_tier = attacker.map(|(_, _, _, loadout, ..)| loadout.weapon.spec().tier());
         let Ok((_, pos, mut vitals, mut loadout, _, evo, mut skills, mut recovery)) =
             players.get_mut(dmg.target)
         else {
@@ -98,7 +98,7 @@ pub fn resolve_damage(
         }
         if let Some(by) = dmg.attacker.filter(|a| *a != dmg.target) {
             let melee =
-                !dmg.emp && dmg.cause.is_none() && dmg.weapon.is_some_and(|w| w.stats().melee);
+                !dmg.emp && dmg.cause.is_none() && dmg.weapon.is_some_and(|w| w.melee().is_some());
             dealt.0.push(crate::evolution::Hit {
                 attacker: by,
                 amount: soaked + (amount - hp_hit) + hp_hit.min(hp_before),
@@ -122,7 +122,7 @@ pub fn resolve_damage(
             skills.shield_hp = 0.0;
             let how = dmg
                 .cause
-                .or(dmg.weapon.map(|w| w.stats().name))
+                .or(dmg.weapon.map(|w| w.spec().name()))
                 .unwrap_or("撕咬");
             deaths.push((dmg.target, dmg.attacker, how, target_tier, evo.level));
         }
@@ -182,7 +182,7 @@ pub fn resolve_damage(
                 killer_stats.kills += 1;
                 killer_stats.streak += 1;
                 killer_stats.score += if had_bounty { 3 } else { 1 };
-                let killer_tier = killer_loadout.weapon.stats().tier;
+                let killer_tier = killer_loadout.weapon.spec().tier();
                 let giant_slayer = victim_tier >= killer_tier + GIANT_SLAYER_GAP;
                 xp.0.push(XpAward {
                     to: killer.expect("killer"),

@@ -50,7 +50,7 @@ pub(super) fn dress_projectile(
         ProjectileKind::Shot(weapon) => (
             Sprite {
                 image: textures.bolt.clone(),
-                color: weapon.stats().color,
+                color: weapon.spec().color(),
                 custom_size: Some(tracer_size(weapon)),
                 ..default()
             },

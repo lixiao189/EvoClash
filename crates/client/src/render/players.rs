@@ -231,7 +231,7 @@ pub struct AttackPose {
 /// The pose `since` seconds after a strike with `weapon` aimed along `aim`: a melee weapon arcs
 /// through the aim with a little lunge, a gun kicks back and its muzzle climbs, then both settle.
 pub fn attack_pose(weapon: WeaponKind, aim: Vec2, since: f32) -> AttackPose {
-    if weapon.stats().melee {
+    if weapon.melee().is_some() {
         let total = SWING_WINDUP + SWING_SWEEP + SWING_RECOVER;
         let t = since.min(total);
         let lunge = SWING_LUNGE * (std::f32::consts::PI * t / total).sin();
@@ -381,8 +381,8 @@ pub(super) fn pose_players(
             sprite.custom_size = Some(attack.flash);
             sprite.color = loadout
                 .weapon
-                .stats()
-                .color
+                .spec()
+                .color()
                 .mix(&Color::WHITE, 0.45)
                 .with_alpha(attack.flash_alpha);
             transform.translation = muzzle.extend(4.0 * Z_STEP);

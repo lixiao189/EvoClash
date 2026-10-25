@@ -7,7 +7,7 @@
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
 use evoclash_game::evolution::{Evolution, Skill};
-use evoclash_game::items::WeaponKind;
+use evoclash_game::items::{Arm, WeaponKind};
 use evoclash_game::protocol::*;
 use evoclash_game::sim::{Arena, PLAYER_RADIUS};
 use lightyear::prelude::input::native::ActionState;
@@ -20,6 +20,9 @@ use crate::render::{CameraShake, Strike, UiFont, swing_side, tracer_size};
 use crate::textures::Textures;
 
 const Z_FX: f32 = 7.0;
+/// A swing's slash lives this long, and the blade crosses the arc over the first `SWING_SWEPT` of it.
+const SWING_LIFE: f32 = 0.24;
+const SWING_SWEPT: f32 = 0.6;
 
 pub struct EffectsPlugin;
 
@@ -88,8 +91,12 @@ struct Fx {
 }
 
 enum FxKind {
-    /// Crescent sweeping around the swinger.
-    Swing { dir: Vec2 },
+    /// The struck sector, swept by the blade: `reach` is its radius, perks included.
+    Swing {
+        dir: Vec2,
+        weapon: WeaponKind,
+        reach: f32,
+    },
     /// Expanding shock ring.
     Ring { radius: f32 },
     /// Billowing fireball that darkens as it fades.
@@ -112,7 +119,7 @@ fn spawn_fx(
     life: f32,
 ) {
     let (image, z) = match kind {
-        FxKind::Swing { .. } => (&textures.slash, Z_FX),
+        FxKind::Swing { weapon, .. } => (&textures.weapon(weapon).slash[0], Z_FX),
         FxKind::Ring { .. } => (&textures.shock, Z_FX - 0.2),
         FxKind::Puff { .. } => (&textures.blast, Z_FX - 0.1),
         FxKind::Flash { .. } => (&textures.glow, Z_FX),
@@ -136,14 +143,26 @@ fn spawn_fx(
     ));
 }
 
-fn spawn_swing(commands: &mut Commands, textures: &Textures, pos: Vec2, dir: Vec2) {
+/// Draws the exact area a swing of `weapon` hits: the same reach and arc the server tests.
+fn spawn_swing(
+    commands: &mut Commands,
+    textures: &Textures,
+    pos: Vec2,
+    dir: Vec2,
+    weapon: WeaponKind,
+    evo: Option<&Evolution>,
+) {
+    let Some(club) = weapon.melee() else {
+        return;
+    };
+    let reach = club.reach() + evo.map_or(0.0, |e| e.melee_reach_bonus());
     spawn_fx(
         commands,
         textures,
-        FxKind::Swing { dir },
+        FxKind::Swing { dir, weapon, reach },
         pos + Vec2::Y * GUN_HEIGHT,
         Color::srgb(1.0, 0.92, 0.75),
-        0.15,
+        SWING_LIFE,
     );
 }
 
@@ -325,41 +344,31 @@ fn local_fire(
     if !input.fire || !vitals.alive || intermission || gun.cooldown > 0.0 {
         return;
     }
-    let stats = loadout.weapon.stats();
+    let weapon = loadout.weapon.spec();
     // 超频扳机 shortens the interval on the server; match it so tracers don't lag behind.
-    let cooldown = evo.map_or(stats.cooldown, |e| e.fire_cooldown(stats.cooldown));
+    let cooldown = evo.map_or(weapon.cooldown(), |e| e.fire_cooldown(weapon.cooldown()));
     gun.cooldown = cooldown as f32 / 64.0;
     commands.entity(entity).insert(Strike(time.elapsed_secs()));
     let aim = input.aim.normalize_or(Vec2::X);
-    if stats.melee {
-        spawn_swing(&mut commands, &textures, pos.0, aim);
-        return;
-    }
-    let mut rng = rand::rng();
-    let base = aim.to_angle();
-    for i in 0..stats.pellets {
-        let fan = if stats.pellets > 1 {
-            (i as f32 / (stats.pellets - 1) as f32 - 0.5) * stats.spread
-        } else {
-            0.0
-        };
-        let bloom = if stats.spread > 0.0 && stats.pellets == 1 {
-            rng.random_range(-stats.spread..stats.spread)
-        } else {
-            0.0
-        };
-        let dir = Vec2::from_angle(base + fan + bloom);
+    let shooter = match loadout.weapon.arm() {
+        Arm::Ranged(shooter) => shooter,
+        Arm::Melee(_) => {
+            spawn_swing(&mut commands, &textures, pos.0, aim, loadout.weapon, evo);
+            return;
+        }
+    };
+    for dir in shooter.volley(aim, &mut rand::rng()) {
         let start = pos.0 + dir * (PLAYER_RADIUS + 4.0);
         commands.spawn((
             Tracer {
                 pos: start,
-                vel: dir * stats.range_or_speed,
-                ttl: stats.lifetime as f32 / 64.0,
+                vel: dir * shooter.muzzle_speed(),
+                ttl: shooter.lifetime() as f32 / 64.0,
                 weapon: loadout.weapon,
             },
             Sprite {
                 image: textures.bolt.clone(),
-                color: stats.color,
+                color: shooter.color(),
                 custom_size: Some(tracer_size(loadout.weapon)),
                 ..default()
             },
@@ -390,7 +399,7 @@ fn step_tracers(
         let from = tracer.pos;
         let to = from + tracer.vel * dt;
         tracer.ttl -= dt;
-        let piercing = tracer.weapon.stats().piercing;
+        let piercing = tracer.weapon.ranged().is_some_and(|w| w.piercing());
         let blocked = !piercing
             && (arena.segment_hits_wall(from, to).is_some()
                 || others.iter().any(|(p, v, turret)| {
@@ -418,6 +427,7 @@ fn receive_events(
     mut receivers: Query<&mut MessageReceiver<GameEvent>, With<Client>>,
     me: Query<(&Player, &Pos), With<LocalPlayer>>,
     players: Query<(Entity, &Player, &Pos, Has<LocalPlayer>)>,
+    gear: Query<(&Loadout, Option<&Evolution>)>,
     mut feed: ResMut<KillFeed>,
     mut banner: ResMut<Banner>,
     mut marker: ResMut<HitMarker>,
@@ -479,15 +489,17 @@ fn receive_events(
                         .map(|(entity, _, p, local)| (entity, local, p.0.distance(pos)))
                         .filter(|(_, _, d)| *d < 40.0)
                         .min_by(|a, b| a.2.total_cmp(&b.2));
-                    match swinger {
+                    let (weapon, evo) = match swinger {
                         // Our own swing was already drawn locally.
                         Some((_, true, _)) => continue,
                         Some((entity, false, _)) => {
                             commands.entity(entity).insert(Strike(now));
+                            gear.get(entity)
+                                .map_or((WeaponKind::Stick, None), |(l, e)| (l.weapon, e))
                         }
-                        None => {}
-                    }
-                    spawn_swing(&mut commands, &textures, pos, dir);
+                        None => (WeaponKind::Stick, None),
+                    };
+                    spawn_swing(&mut commands, &textures, pos, dir, weapon, evo);
                 }
                 GameEvent::Boom { pos, radius, fire } => {
                     if me.is_some_and(|(_, p)| p.0.distance(pos) < radius * 1.5) {
@@ -604,6 +616,7 @@ fn shake_on_damage(
 fn age_effects(
     mut commands: Commands,
     time: Res<Time>,
+    textures: Res<Textures>,
     mut fx: Query<(Entity, &mut Fx, &mut Sprite, &mut Transform)>,
     mut numbers: Query<(Entity, &mut FloatText, &mut Transform, &mut TextColor), Without<Fx>>,
     mut marker: ResMut<HitMarker>,
@@ -621,12 +634,22 @@ fn age_effects(
         let fade = 1.0 - t;
         let tint = fx.tint.to_srgba();
         let (size, alpha, tint) = match fx.kind {
-            FxKind::Swing { dir } => {
-                let reach = WeaponKind::Stick.stats().range_or_speed + PLAYER_RADIUS;
-                // Sweeps down from overhead, in step with the weapon.
-                let side = swing_side(dir);
-                transform.rotation = Quat::from_rotation_z(dir.to_angle() - side * (1.0 - 2.0 * t));
-                (2.0 * reach, fade, tint)
+            FxKind::Swing { dir, weapon, reach } => {
+                // The blade sweeps the sector down from overhead, in step with the weapon, then
+                // the whole struck area lingers and fades. The sprite itself never turns, so it
+                // covers exactly the arc that hits.
+                let frames = &textures.weapon(weapon).slash;
+                let swept = (t / SWING_SWEPT).min(1.0);
+                let frame = ((swept * frames.len() as f32) as usize).min(frames.len() - 1);
+                sprite.image = frames[frame].clone();
+                sprite.flip_y = swing_side(dir) > 0.0;
+                transform.rotation = Quat::from_rotation_z(dir.to_angle());
+                let alpha = if t < SWING_SWEPT {
+                    1.0
+                } else {
+                    (1.0 - t) / (1.0 - SWING_SWEPT)
+                };
+                (2.0 * reach, alpha, tint)
             }
             FxKind::Ring { radius } => (2.0 * radius * (0.3 + 0.7 * t) / 0.85, fade, tint),
             FxKind::Puff { radius } => {

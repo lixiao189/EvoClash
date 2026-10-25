@@ -28,7 +28,7 @@ pub fn gear_tier(vitals: &Vitals, loadout: &crate::protocol::Loadout) -> u8 {
     } else {
         0
     };
-    loadout.weapon.stats().tier.max(armor)
+    loadout.weapon.spec().tier().max(armor)
 }
 
 /// Damage multiplier when a weaker weapon hits better-equipped gear: the stone age can

@@ -7,7 +7,7 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::items::{ArmorKind, WeaponKind};
+use crate::items::{Arm, ArmorKind, WeaponKind};
 use crate::sim::MAX_HP;
 
 const SEC: u16 = 64;
@@ -429,16 +429,14 @@ impl Evolution {
     }
 
     fn energy(weapon: WeaponKind) -> bool {
-        matches!(weapon, WeaponKind::Laser | WeaponKind::Railgun)
+        weapon.ranged().is_some_and(|w| w.energy())
     }
 
     pub fn weapon_damage_mult(&self, weapon: WeaponKind) -> f32 {
-        if weapon.stats().melee {
-            self.melee_damage_mult()
-        } else if Self::energy(weapon) {
-            1.0 + 0.1 * self.r(Perk::EnergyFocus)
-        } else {
-            1.0
+        match weapon.arm() {
+            Arm::Melee(_) => self.melee_damage_mult(),
+            Arm::Ranged(w) if w.energy() => 1.0 + 0.1 * self.r(Perk::EnergyFocus),
+            Arm::Ranged(_) => 1.0,
         }
     }
 
@@ -459,7 +457,7 @@ impl Evolution {
     }
 
     pub fn max_ammo(&self, weapon: WeaponKind) -> u16 {
-        let base = weapon.stats().max_ammo;
+        let base = weapon.max_ammo();
         (base as f32 * (1.0 + 0.2 * self.r(Perk::AmmoRecycler))).round() as u16
     }
 

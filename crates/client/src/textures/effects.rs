@@ -21,17 +21,29 @@ pub(super) fn paint_bolt() -> Canvas {
     })
 }
 
-pub(super) fn paint_slash() -> Canvas {
+/// One frame of a melee swing: the sector within `half_arc` of +X, swept clockwise from the top
+/// down to where the blade is after `progress` (0..=1) of the swing. The texture's edge is the
+/// weapon's reach, so whatever the drawn sector touches is hit.
+pub(super) fn paint_slash(half_arc: f32, progress: f32) -> Canvas {
     let n = 96u32;
     let half = n as f32 / 2.0;
+    let lead = half_arc * (1.0 - 2.0 * progress);
     Canvas::filled(n, n, |x, y| {
         let p = Vec2::new(x as f32 + 0.5 - half, half - (y as f32 + 0.5)) / half;
-        let (r, ang) = (p.length(), p.to_angle().abs());
-        let reach = 0.95 - 0.1 * (ang / 1.0);
-        let band = (1.0 - (r - reach).abs() / (0.12 + 0.28 * (1.0 - ang / 1.1).max(0.0))).max(0.0);
-        let taper = smooth((1.1 - ang) / 0.7);
-        let grain = 0.75 + 0.25 * noise(x as f32 / 5.0, y as f32 / 5.0, 19, 21);
-        [1.0, 1.0, 1.0, (band * taper * grain).min(1.0)]
+        let (r, ang) = (p.length(), p.to_angle());
+        let behind = ang - lead;
+        if r > 1.0 || ang.abs() > half_arc || behind < 0.0 {
+            return [1.0, 1.0, 1.0, 0.0];
+        }
+        // A hard-edged blade along the rim, brightest at the leading edge, trailing off behind it,
+        // over a faint wash of the whole swept sector.
+        let rim = smooth((r - 0.45) / 0.4) * smooth((1.0 - r) / 0.05);
+        let trail = (-behind / 0.7).exp();
+        let wash = 0.14 * smooth((r - 0.15) / 0.3) * smooth((1.0 - r) / 0.03);
+        let tips = smooth((half_arc - ang.abs()) / 0.06) * smooth(behind / 0.04);
+        let grain = 0.8 + 0.2 * noise(x as f32 / 5.0, y as f32 / 5.0, 19, 21);
+        let a = (rim * (0.3 + 0.7 * trail) * grain).max(wash) * tips;
+        [1.0, 1.0, 1.0, a.min(1.0)]
     })
 }
 
