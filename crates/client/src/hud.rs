@@ -10,6 +10,7 @@ use evoclash_game::map::PropKind;
 use evoclash_game::protocol::*;
 use evoclash_game::sim::{Arena, DASH_COOLDOWN, PLAYER_RADIUS};
 
+use crate::assets::{Loading, PendingAssets};
 use crate::effects::{Banner, BossBar, KillFeed};
 use crate::input::LocalPlayer;
 use crate::render::UiFont;
@@ -636,6 +637,7 @@ fn update_hud(
     mut panel: Query<&mut Visibility, With<BossPanel>>,
     mut fill: Query<(&mut Node, &mut BackgroundColor), With<BossFill>>,
     mut texts: Query<(&HudText, &mut Text, &mut TextColor)>,
+    assets: Res<PendingAssets>,
 ) {
     let now = time.elapsed_secs();
     let me = me.single().ok();
@@ -722,7 +724,11 @@ fn update_hud(
                         stats.streak,
                     )
                 }
-                None => "连接中…".to_string(),
+                None => match &assets.state {
+                    Loading::Waiting => "加载资源中…".to_string(),
+                    Loading::Failed(path) => format!("资源加载失败：{path}\n请刷新页面重试"),
+                    Loading::Ready => "连接中…".to_string(),
+                },
             },
             HudText::Clock => match state {
                 Some(s) => match s.phase {

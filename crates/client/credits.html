@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EvoClash — Art credits</title>
+  <style>
+    html, body { margin: 0; background: #1b1712; color: #e8dcc4;
+      font: 15px/1.5 system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; }
+    main { max-width: 900px; margin: 0 auto; padding: 24px 16px; }
+    a { color: #e0a45a; }
+    pre { white-space: pre-wrap; word-break: break-word; background: #2a241c; padding: 16px;
+      border-radius: 6px; font: 13px/1.5 ui-monospace, Menlo, Consolas, monospace; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>美术素材致谢 / Art credits</h1>
+    <p>The game's code is MIT OR Apache-2.0. The sprite art comes from other artists under its
+      own licenses: <a href="assets/LICENSE-ART.md">LICENSE-ART.md</a>.</p>
+    <!-- One source of truth: the credits file itself, shown as is. -->
+    <pre id="credits">Loading assets/CREDITS.md…</pre>
+    <p><a href="./">← back to the game</a></p>
+  </main>
+  <script>
+    fetch("assets/CREDITS.md")
+      .then((r) => (r.ok ? r.text() : Promise.reject(r.status)))
+      .then((text) => (document.getElementById("credits").textContent = text))
+      .catch((e) => (document.getElementById("credits").textContent = "Could not load credits: " + e));
+  </script>
+</body>
+</html>

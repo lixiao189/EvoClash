@@ -5,6 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>EvoClash</title>
   <link data-trunk rel="rust" data-bin="evoclash" data-cargo-profile="web" data-wasm-opt="0">
+  <!-- Sprite files the client loads at runtime (src/assets.rs), and their licenses/credits. -->
+  <link data-trunk rel="copy-dir" href="assets/lpc" data-target-path="assets/lpc">
+  <link data-trunk rel="copy-file" href="assets/CREDITS.md" data-target-path="assets">
+  <link data-trunk rel="copy-file" href="assets/LICENSE-ART.md" data-target-path="assets">
+  <link data-trunk rel="copy-file" href="credits.html">
   <style>
     html, body { margin: 0; height: 100%; overflow: hidden; background: #1b1712; color: #e8dcc4;
       font: 16px system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; }
@@ -16,6 +21,7 @@
     #join input { background: #2a241c; color: inherit; }
     #join button { background: #e0a45a; color: #1b1712; border-color: #e0a45a; cursor: pointer; }
     #join p { margin: 8px 0 0; opacity: .7; font-size: 14px; }
+    #join a { color: inherit; font-size: 13px; opacity: .55; }
   </style>
 </head>
 <body>
@@ -25,6 +31,7 @@
     <input name="name" maxlength="16" placeholder="你的名字" required autofocus>
     <button>进入废土</button>
     <p>WASD 移动 · 鼠标瞄准射击 · 空格冲刺 · E 拾取 · Q / 右键投掷</p>
+    <a href="credits.html" target="_blank">美术素材致谢 / Art credits</a>
   </form>
   <script>
     // The wasm client starts only once the URL names the player (src/main.rs).

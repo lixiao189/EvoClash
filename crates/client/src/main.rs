@@ -6,6 +6,7 @@
 // Natively only the tests use the game code; the wasm build (checked in CI) catches dead code.
 #![cfg_attr(not(target_family = "wasm"), allow(dead_code, unused_imports))]
 
+mod assets;
 mod effects;
 mod hud;
 mod input;
@@ -15,6 +16,7 @@ mod render;
 mod session;
 mod textures;
 
+use bevy::asset::AssetMetaCheck;
 use bevy::prelude::*;
 use evoclash_game::net::tick_duration;
 use lightyear::prelude::client::ClientPlugins;
@@ -51,23 +53,33 @@ fn main() {
     };
 
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window {
-            title: format!("EvoClash — {}", args.name),
-            canvas: Some("#game".into()),
-            fit_canvas_to_parent: true,
-            // Keep browser shortcuts (F5, Ctrl+W, …) working.
-            prevent_default_event_handling: false,
-            ..default()
-        }),
-        ..default()
-    }));
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: format!("EvoClash — {}", args.name),
+                    canvas: Some("#game".into()),
+                    fit_canvas_to_parent: true,
+                    // Keep browser shortcuts (F5, Ctrl+W, …) working.
+                    prevent_default_event_handling: false,
+                    ..default()
+                }),
+                ..default()
+            })
+            // Files come from `/play/assets/` (see assets.rs); there are no `.meta` files, so
+            // don't ask the server for one per image.
+            .set(AssetPlugin {
+                meta_check: AssetMetaCheck::Never,
+                ..default()
+            }),
+    );
     app.add_plugins(ClientPlugins {
         tick_duration: tick_duration(),
     });
     app.add_plugins(evoclash_game::SharedPlugin);
     app.insert_resource(args);
     app.add_plugins((
+        assets::AssetsPlugin,
         session::SessionPlugin,
         input::InputPlugin,
         predict::PredictPlugin,
