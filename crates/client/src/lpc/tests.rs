@@ -62,3 +62,23 @@ fn each_facing_has_its_own_row() {
     assert!((gun_grip(1).x + gun_grip(3).x).abs() < 0.5);
     assert!((15.0..25.0).contains(&gun_grip(3).y));
 }
+
+/// The map tiles fit what the renderer assumes: wall faces as tall as their walls stand, roofs
+/// with room inside their frame, everything a whole number of tiles wide.
+#[test]
+fn map_tiles_match_the_layout() {
+    for (file, height) in WALL_FACES.iter().zip(WALL_FACE_HEIGHTS) {
+        assert_eq!(png_size(file).1, height, "{file}");
+    }
+    for file in [ROOF_TAR, ROOF_CONCRETE] {
+        let (w, h) = png_size(file);
+        assert!(
+            w as f32 > 2.0 * ROOF_BORDER && h as f32 > 2.0 * ROOF_BORDER,
+            "{file}"
+        );
+    }
+    for file in [GROUND_DIRT, GROUND_GRAVEL, SIDEWALK, ROAD, WALL_TOP] {
+        let (w, h) = png_size(file);
+        assert!(w % 32 == 0 && h % 32 == 0, "{file}: {w}x{h}");
+    }
+}

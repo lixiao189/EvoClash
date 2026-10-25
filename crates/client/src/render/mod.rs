@@ -11,7 +11,7 @@ use bevy::window::PrimaryWindow;
 use evoclash_game::evolution::{ACID_HALF_ANGLE, ACID_RANGE, Evolution, SHIELD_HP, SkillState};
 use evoclash_game::items::{WeaponKind, tier_color};
 use evoclash_game::map::{
-    ARENA_HALF, ArenaMap, BLOCK, Biome, MARGIN, PropKind, VAULT_CENTER, WallStyle,
+    ARENA_HALF, ArenaMap, BLOCK, Biome, MARGIN, PropKind, Roof, VAULT_CENTER, WallStyle,
 };
 use evoclash_game::protocol::*;
 use evoclash_game::sim::{Arena, PLAYER_RADIUS};
@@ -22,7 +22,7 @@ use crate::assets::PendingAssets;
 use crate::input::{CursorWorld, GUN_HEIGHT, LocalPlayer};
 use crate::lpc;
 use crate::predict::TickSamples;
-use crate::textures::{self, Facing, PIXEL, Textures, WallSprites};
+use crate::textures::{self, Facing, PIXEL, Textures};
 
 mod camera;
 mod monsters;
@@ -55,7 +55,7 @@ const Z_PROJECTILE: f32 = 4.0;
 const Z_LABEL: f32 = 3.0;
 const SPLAT_SECS: f32 = 8.0;
 /// How tall brick walls stand, in world pixels. Roofs sit on top of them.
-const WALL_HEIGHT: f32 = 40.0;
+const WALL_HEIGHT: f32 = lpc::WALL_FACE_HEIGHTS[0] as f32;
 /// Road width between city blocks.
 const STREET: f32 = 2.0 * MARGIN;
 /// Roof opacity while you're inside the building.
@@ -130,6 +130,20 @@ struct PlayerParts {
     stride: f32,
     /// When the combatant died, while the fall plays.
     died: Option<f32>,
+}
+
+/// LPC map tiles (see `crate::lpc`), drawn at one texture pixel per world pixel.
+#[derive(Resource)]
+struct LpcMap {
+    dirt: Handle<Image>,
+    gravel: Handle<Image>,
+    sidewalk: Handle<Image>,
+    road: Handle<Image>,
+    /// Brick, metal and rock wall faces, and the top every wall shows from above.
+    wall_faces: [Handle<Image>; 3],
+    wall_top: Handle<Image>,
+    roof_tar: Handle<Image>,
+    roof_concrete: Handle<Image>,
 }
 
 /// The LPC sheets players are drawn with (see `crate::lpc`).
@@ -213,14 +227,20 @@ fn pixel_sprite(image: Handle<Image>) -> (Sprite, Transform) {
     )
 }
 
+/// A procedural texture repeated over `size`.
 fn tiled(image: Handle<Image>, size: Vec2) -> Sprite {
+    tiled_at(image, size, PIXEL)
+}
+
+/// `image` repeated over `size`, `scale` world pixels per texture pixel.
+fn tiled_at(image: Handle<Image>, size: Vec2, scale: f32) -> Sprite {
     Sprite {
         image,
         custom_size: Some(size),
         image_mode: SpriteImageMode::Tiled {
             tile_x: true,
             tile_y: true,
-            stretch_value: PIXEL,
+            stretch_value: scale,
         },
         ..default()
     }
@@ -296,7 +316,7 @@ fn load_textures(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     commands.insert_resource(textures::build(&mut images));
 }
 
-/// Start fetching the player sheets; the session waits for them (`PendingAssets`).
+/// Start fetching the player sheets and map tiles; the session waits for them (`PendingAssets`).
 fn load_lpc(
     mut commands: Commands,
     server: Res<AssetServer>,
@@ -334,6 +354,17 @@ fn load_lpc(
         )),
     };
     commands.insert_resource(sprites);
+    let map = LpcMap {
+        dirt: load(lpc::GROUND_DIRT),
+        gravel: load(lpc::GROUND_GRAVEL),
+        sidewalk: load(lpc::SIDEWALK),
+        road: load(lpc::ROAD),
+        wall_faces: lpc::WALL_FACES.map(&mut load),
+        wall_top: load(lpc::WALL_TOP),
+        roof_tar: load(lpc::ROOF_TAR),
+        roof_concrete: load(lpc::ROOF_CONCRETE),
+    };
+    commands.insert_resource(map);
 }
 
 fn spawn_camera(mut commands: Commands) {

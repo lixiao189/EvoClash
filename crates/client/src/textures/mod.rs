@@ -11,7 +11,7 @@ use bevy::image::ImageSampler;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use evoclash_game::items::{ArmorKind, Item, WeaponKind};
-use evoclash_game::map::{Floor, Roof, WallStyle};
+use evoclash_game::map::Floor;
 
 mod arena;
 mod canvas;
@@ -42,18 +42,12 @@ pub const SLASH_FRAMES: usize = 6;
 
 #[derive(Resource)]
 pub struct Textures {
-    pub ground: Handle<Image>,
     pub vault_floor: Handle<Image>,
     pub trefoil: Handle<Image>,
-    /// Ground cover of city blocks and streets.
-    pub pavement: Handle<Image>,
-    pub oily_concrete: Handle<Image>,
     pub rad_ground: Handle<Image>,
-    pub asphalt: Handle<Image>,
     floors: [Handle<Image>; 3],
-    roofs: [Handle<Image>; 3],
-    /// (face seen from the front, cap seen from above) for each wall style.
-    walls: [WallSprites; 4],
+    /// Sandbag barricades (the other wall styles are LPC tiles, see `crate::lpc`).
+    pub sandbags: WallSprites,
     pub crate_box: Handle<Image>,
     pub barrel: Handle<Image>,
     pub safe: Handle<Image>,
@@ -113,29 +107,11 @@ pub struct WallSprites {
 }
 
 impl Textures {
-    pub fn wall(&self, style: WallStyle) -> &WallSprites {
-        &self.walls[match style {
-            WallStyle::Brick => 0,
-            WallStyle::Metal => 1,
-            WallStyle::Rock => 2,
-            WallStyle::Sandbag => 3,
-        }]
-    }
-
     pub fn floor(&self, floor: Floor) -> Handle<Image> {
         self.floors[match floor {
             Floor::Planks => 0,
             Floor::Tiles => 1,
             Floor::Concrete => 2,
-        }]
-        .clone()
-    }
-
-    pub fn roof(&self, roof: Roof) -> Handle<Image> {
-        self.roofs[match roof {
-            Roof::Tin => 0,
-            Roof::Tar => 1,
-            Roof::Concrete => 2,
         }]
         .clone()
     }
@@ -233,25 +209,14 @@ pub fn build(images: &mut Assets<Image>) -> Textures {
         }
     });
     Textures {
-        ground: add(paint_ground(), true),
         vault_floor: add(paint_vault_floor(), true),
         trefoil: add(paint_trefoil(), true),
-        pavement: add(paint_pavement(), true),
-        oily_concrete: add(paint_oily_concrete(), true),
         rad_ground: add(paint_rad_ground(), true),
-        asphalt: add(paint_asphalt(), true),
         floors: [paint_planks(), paint_tiles(), paint_floor_concrete()].map(|c| add(c, true)),
-        roofs: [Roof::Tin, Roof::Tar, Roof::Concrete].map(|r| add(paint_roof(r), true)),
-        walls: [
-            (paint_wall(), paint_wall_top()),
-            (paint_metal(), paint_metal_top()),
-            (paint_rock(false), paint_rock(true)),
-            (paint_sandbags(false), paint_sandbags(true)),
-        ]
-        .map(|(front, top)| WallSprites {
-            front: add(front, true),
-            top: add(top, true),
-        }),
+        sandbags: WallSprites {
+            front: add(paint_sandbags(false), true),
+            top: add(paint_sandbags(true), true),
+        },
         crate_box: add(paint_crate(), true),
         barrel: add(paint_barrel(), true),
         safe: add(paint_safe(false), true),

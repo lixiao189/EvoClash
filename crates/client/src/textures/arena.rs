@@ -2,58 +2,6 @@
 
 use super::*;
 
-pub(super) fn paint_ground() -> Canvas {
-    let base = rgb(0.36, 0.22, 0.16);
-    let mut c = Canvas::filled(64, 64, |x, y| {
-        let (fx, fy) = (x as f32, y as f32);
-        let broad = noise(fx / 16.0, fy / 16.0, 4, 1);
-        let mid = noise(fx / 6.4, fy / 6.4, 10, 2);
-        let grain = hash(x, y, 3) - 0.5;
-        let k = 0.78 + broad * 0.22 + mid * 0.14 + grain * 0.07;
-        // Patches of ashy gray dust.
-        let ash = (noise(fx / 10.67, fy / 10.67, 6, 4) - 0.55).max(0.0) * 1.6;
-        // Patches of violet ash, like the rust-red badlands they settle on.
-        mix(shade(base, k), rgb(0.27, 0.2, 0.25), ash)
-    });
-    // Pebbles.
-    for i in 0..26 {
-        let x = (hash(i, 0, 10) * 64.0) as i32;
-        let y = (hash(i, 1, 10) * 64.0) as i32;
-        let light = hash(i, 2, 10) > 0.5;
-        let col = if light {
-            rgb(0.5, 0.34, 0.25)
-        } else {
-            rgb(0.2, 0.12, 0.1)
-        };
-        c.put_wrap(x, y, col);
-        if hash(i, 3, 10) > 0.6 {
-            c.put_wrap(x + 1, y, col);
-            c.put_wrap(x, y + 1, shade(col, 0.7));
-        }
-    }
-    // Hairline cracks: short random walks.
-    for i in 0..2 {
-        let (mut x, mut y) = (
-            (hash(i, 0, 20) * 64.0) as i32,
-            (hash(i, 1, 20) * 64.0) as i32,
-        );
-        for step in 0..18 {
-            c.put_wrap(x, y, [0.16, 0.09, 0.07, 0.45]);
-            let r = hash(i, step, 21);
-            if r < 0.45 {
-                x += 1;
-            } else if r < 0.7 {
-                y += 1;
-            } else if r < 0.85 {
-                y -= 1;
-            } else {
-                x -= 1;
-            }
-        }
-    }
-    c
-}
-
 pub(super) fn paint_vault_floor() -> Canvas {
     let plate = rgb(0.25, 0.25, 0.24);
     let mut c = Canvas::filled(32, 32, |x, y| {
@@ -96,69 +44,6 @@ pub(super) fn paint_trefoil() -> Canvas {
             } else if (22.0..23.5).contains(&r) {
                 c.put(x, y, alpha(ink, 0.8));
             }
-        }
-    }
-    c
-}
-
-pub(super) fn paint_wall() -> Canvas {
-    let concrete = rgb(0.42, 0.39, 0.35);
-    let mut c = Canvas::filled(32, 32, |x, y| {
-        let row = y / 8;
-        let offset = if row % 2 == 0 { 0 } else { 8 };
-        let bx = (x + offset).rem_euclid(32) / 16;
-        let (lx, ly) = ((x + offset).rem_euclid(16), y % 8);
-        if lx == 0 || ly == 0 {
-            return rgb(0.16, 0.15, 0.14);
-        }
-        let tone = 0.82 + hash(bx, row, 40) * 0.26;
-        let grain = (hash(x, y, 41) - 0.5) * 0.08;
-        let mut col = shade(concrete, tone + grain);
-        if ly == 1 || lx == 1 {
-            col = shade(col, 1.18);
-        } else if ly == 7 || lx == 15 {
-            col = shade(col, 0.72);
-        }
-        // Soot and moss creeping up.
-        let grime = (noise(x as f32 / 8.0, y as f32 / 8.0, 4, 42) - 0.55).max(0.0) * 1.8;
-        mix(col, rgb(0.2, 0.22, 0.14), grime)
-    });
-    for i in 0..3 {
-        let (mut x, mut y) = (
-            (hash(i, 0, 43) * 32.0) as i32,
-            (hash(i, 1, 43) * 32.0) as i32,
-        );
-        for step in 0..6 {
-            c.put_wrap(x, y, rgb(0.13, 0.12, 0.11));
-            x += 1;
-            y += if hash(i, step, 44) > 0.5 { 1 } else { 0 };
-        }
-    }
-    c
-}
-
-pub(super) fn paint_wall_top() -> Canvas {
-    let slab = rgb(0.6, 0.55, 0.48);
-    let mut c = Canvas::filled(32, 32, |x, y| {
-        let n = noise(x as f32 / 8.0, y as f32 / 8.0, 4, 45);
-        let grain = (hash(x, y, 46) - 0.5) * 0.06;
-        let mut col = shade(slab, 0.88 + n * 0.2 + grain);
-        // Seams between cast slabs.
-        if x % 16 == 0 || y % 16 == 0 {
-            col = shade(slab, 0.68);
-        }
-        let moss = (noise(x as f32 / 5.33, y as f32 / 5.33, 6, 47) - 0.62).max(0.0) * 2.4;
-        mix(col, rgb(0.42, 0.5, 0.3), moss)
-    });
-    for i in 0..3 {
-        let (mut x, mut y) = (
-            (hash(i, 0, 48) * 32.0) as i32,
-            (hash(i, 1, 48) * 32.0) as i32,
-        );
-        for step in 0..7 {
-            c.put_wrap(x, y, rgb(0.3, 0.27, 0.24));
-            x += 1;
-            y += if hash(i, step, 49) > 0.5 { 1 } else { -1 };
         }
     }
     c

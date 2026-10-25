@@ -416,28 +416,19 @@ fn preview_poses() {
 }
 
 /// Dev aid: `EVOCLASH_CITY_PREVIEW=out.bmp cargo test -p evoclash -- --ignored preview_city`
-/// lays out the city tiles (2x2 repeats, to check seams) and the props.
+/// lays out the procedural city tiles (2x2 repeats, to check seams) and the props.
 #[test]
 #[ignore]
 fn preview_city() {
     let Ok(path) = std::env::var("EVOCLASH_CITY_PREVIEW") else {
         return;
     };
+    // Ground, roofs and most walls are LPC tiles now (`assets/lpc/`); these are what's left.
     let tiles = [
-        paint_pavement(),
-        paint_asphalt(),
-        paint_oily_concrete(),
         paint_rad_ground(),
         paint_planks(),
         paint_tiles(),
         paint_floor_concrete(),
-        paint_roof(Roof::Tin),
-        paint_roof(Roof::Tar),
-        paint_roof(Roof::Concrete),
-        paint_metal(),
-        paint_metal_top(),
-        paint_rock(false),
-        paint_rock(true),
         paint_sandbags(false),
         paint_sandbags(true),
     ];
