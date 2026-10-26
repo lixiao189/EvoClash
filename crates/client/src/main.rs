@@ -7,6 +7,7 @@
 #![cfg_attr(not(target_family = "wasm"), allow(dead_code, unused_imports))]
 
 mod assets;
+mod backpack;
 mod buttons;
 mod death_screen;
 mod effects;
@@ -90,6 +91,7 @@ fn main() {
         render::RenderPlugin,
         effects::EffectsPlugin,
         hud::HudPlugin,
+        backpack::BackpackPlugin,
         minimap::MinimapPlugin,
         buttons::ButtonsPlugin,
         evo_panel::EvoPanelPlugin,

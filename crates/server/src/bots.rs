@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 use evoclash_game::evolution::{EvoPath, Evolution, Perk, Skill, SkillState};
-use evoclash_game::items::{Arm, ArmorKind, WeaponKind};
+use evoclash_game::items::{Arm, ArmorKind, GUN_SLOTS, HOTBAR_SLOTS, Item, WeaponKind};
 use evoclash_game::map::ARENA_HALF;
 use evoclash_game::nav::{NavGrid, clear_ahead, next_waypoint};
 use evoclash_game::protocol::*;
@@ -12,11 +12,11 @@ use evoclash_game::shop::{PlayerCommand, ShopItem, Wallet, can_deploy};
 use evoclash_game::sim::{Arena, DT, Obstacles, PLAYER_RADIUS, PLAYER_SPEED};
 use rand::Rng;
 
-use crate::combat::auto_wants;
 use crate::config::ServerConfig;
 use crate::connections::Human;
 use crate::evolution::{LifeLog, apply_evolution, handle_command};
 use crate::gameplay::{CurrentInput, SimSet, spawn_combatant};
+use crate::inventory::{BagContents, auto_wants};
 use evoclash_game::evolution::seen_from;
 
 /// Bots fire their skills at enemies this close.
@@ -73,6 +73,62 @@ pub fn engage_range(weapon: WeaponKind) -> f32 {
     match weapon.arm() {
         Arm::Melee(club) => club.reach() + 20.0,
         Arm::Ranged(gun) => gun.range() * 0.8,
+    }
+}
+
+/// Keep the two best guns that can fire on the hotbar and hold the best of them. Bots skip the
+/// backpack panel and rearrange directly.
+fn arrange(loadout: &mut Loadout) {
+    let rank = |l: &Loadout, w: Option<WeaponKind>| {
+        w.map_or(0, |w| u8::from(l.usable(w)) * 10 + w.spec().tier() + 1)
+    };
+    for hot in 0..GUN_SLOTS as u8 {
+        let best = (HOTBAR_SLOTS..evoclash_game::items::SLOT_COUNT)
+            .max_by_key(|&id| rank(loadout, loadout.slot(id)))
+            .expect("bag slots");
+        if rank(loadout, loadout.slot(best)) > rank(loadout, loadout.slot(hot)) {
+            loadout.move_slots(best, hot);
+        }
+    }
+    let best = loadout.best_slot();
+    if loadout.selected != best {
+        loadout.selected = best;
+    }
+}
+
+/// How keen a bot is on a pickup, as a distance multiplier (lower is keener), or `None` if it
+/// isn't worth the walk.
+fn interest(
+    item: &Item,
+    bag: Option<&BagContents>,
+    vitals: &Vitals,
+    loadout: &Loadout,
+    evo: &Evolution,
+) -> Option<f32> {
+    if let Some(bag) = bag {
+        return bag
+            .0
+            .iter()
+            .filter_map(|i| interest(i, None, vitals, loadout, evo))
+            .min_by(f32::total_cmp)
+            .map(|w| w * 0.8);
+    }
+    if !auto_wants(item, vitals, loadout, evo) {
+        return None;
+    }
+    match *item {
+        // Rounds only matter for a gun you carry, and most when nothing can fire.
+        Item::Ammo { kind, .. } => {
+            let feeds = loadout.guns().any(|g| g.ammo() == Some(kind));
+            let armed = loadout.weapon().ranged().is_some();
+            feeds.then_some(if armed { 0.7 } else { 0.4 })
+        }
+        Item::Weapon(kind) => Some(if loadout.best_tier() < kind.spec().tier() {
+            0.6
+        } else {
+            1.0
+        }),
+        _ => Some(1.0),
     }
 }
 
@@ -305,7 +361,7 @@ fn think(
         &mut CurrentInput,
         &Pos,
         &Vitals,
-        &Loadout,
+        &mut Loadout,
         &Evolution,
         &SkillState,
     )>,
@@ -313,7 +369,7 @@ fn think(
         (Entity, &Pos, &Vitals, Option<&Monster>, Has<Human>),
         Or<(With<Player>, With<Monster>)>,
     >,
-    items: Query<(&Pos, &Pickup)>,
+    items: Query<(&Pos, &Pickup, Option<&BagContents>)>,
 ) {
     let Some(nav) = nav else {
         return;
@@ -325,7 +381,7 @@ fn think(
             *claims.entry(target).or_default() += 1;
         }
     }
-    for (entity, mut bot, mut current, pos, vitals, loadout, evo, skills) in &mut bots {
+    for (entity, mut bot, mut current, pos, vitals, mut loadout, evo, skills) in &mut bots {
         if !vitals.alive {
             current.0 = PlayerInput::default();
             bot.target = None;
@@ -351,6 +407,10 @@ fn think(
         }
         bot.think_in = THINK_EVERY;
         let mut input = PlayerInput::default();
+        let mut arranged = *loadout;
+        arrange(&mut arranged);
+        loadout.set_if_neq(arranged);
+        let weapon = loadout.weapon();
 
         let previous = bot.target;
         let enemy = others
@@ -390,12 +450,12 @@ fn think(
         if let Some((_, enemy_pos, enemy_armor, dist, _)) = enemy {
             let to_enemy = (enemy_pos - pos.0).normalize_or(Vec2::X);
             input.aim = aim_toward(to_enemy, bot.aim_error, &mut rng);
-            let range = engage_range(loadout.weapon);
+            let range = engage_range(weapon);
             if rng.random_bool(0.03) {
                 bot.strafe = -bot.strafe;
             }
             let strafe = to_enemy.perp() * bot.strafe;
-            let dir = if loadout.weapon.melee().is_some() || dist > range * 0.85 {
+            let dir = if weapon.melee().is_some() || dist > range * 0.85 {
                 let waypoint = next_waypoint(&nav.0, &arena, pos.0, enemy_pos, PLAYER_RADIUS);
                 (waypoint - pos.0).normalize_or_zero() + strafe * 0.3
             } else if dist < range * 0.35 {
@@ -419,10 +479,15 @@ fn think(
             // Scavenge: head for the closest upgrade in sight, otherwise roam.
             let upgrade = items
                 .iter()
-                .filter(|(_, pickup)| auto_wants(&pickup.item, vitals, loadout, evo))
-                .map(|(p, _)| p.0)
-                .filter(|p| p.distance(pos.0) < SIGHT * 1.3 && (safe(*p) || vitals.hp > 70.0))
-                .min_by(|a, b| a.distance(pos.0).total_cmp(&b.distance(pos.0)));
+                .filter(|(p, ..)| {
+                    p.0.distance(pos.0) < SIGHT * 1.3 && (safe(p.0) || vitals.hp > 70.0)
+                })
+                .filter_map(|(p, pickup, bag)| {
+                    interest(&pickup.item, bag, vitals, &loadout, evo)
+                        .map(|w| (p.0, p.0.distance(pos.0) * w))
+                })
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(p, _)| p);
             if bot.stuck >= 12
                 || bot.goal.distance(pos.0) < 40.0
                 || !safe(bot.goal)
@@ -459,9 +524,44 @@ fn think(
 #[cfg(test)]
 mod tests {
     use evoclash_game::evolution::{MAX_RANK, SKILL_A_RANK, SKILL_B_RANK, xp_to_reach};
+    use evoclash_game::items::{AmmoKind, MELEE_SLOT};
     use evoclash_game::shop::RESPAWN_MAX_TICKS;
 
     use super::*;
+
+    #[test]
+    fn bots_bring_their_best_gun_with_ammo_to_the_hotbar() {
+        let evo = Evolution::default();
+        let mut loadout = Loadout::default();
+        for gun in [WeaponKind::Rifle, WeaponKind::Bow, WeaponKind::Laser] {
+            loadout.add_weapon(gun);
+        }
+        loadout.add_ammo(AmmoKind::Cell, 10, &evo);
+        loadout.add_ammo(AmmoKind::Arrow, 10, &evo);
+        assert_eq!(loadout.bag[0], Some(WeaponKind::Laser));
+        arrange(&mut loadout);
+        assert!(loadout.guns.contains(&Some(WeaponKind::Laser)));
+        assert!(loadout.guns.contains(&Some(WeaponKind::Bow)));
+        assert_eq!(loadout.weapon(), WeaponKind::Laser);
+        loadout.ammo = [0; 4];
+        arrange(&mut loadout);
+        assert_eq!(loadout.selected, MELEE_SLOT);
+    }
+
+    #[test]
+    fn bots_chase_ammo_for_guns_they_carry() {
+        let evo = Evolution::default();
+        let vitals = Vitals::default();
+        let mut loadout = Loadout::default();
+        loadout.add_weapon(WeaponKind::Rifle);
+        let bullets = Item::ammo(AmmoKind::Bullet);
+        let arrows = Item::ammo(AmmoKind::Arrow);
+        let keen = interest(&bullets, None, &vitals, &loadout, &evo).unwrap();
+        assert!(keen < 0.5, "dry rifle: bullets are urgent");
+        assert_eq!(interest(&arrows, None, &vitals, &loadout, &evo), None);
+        let bag = BagContents(vec![arrows, bullets]);
+        assert!(interest(&Item::Bag, Some(&bag), &vitals, &loadout, &evo).unwrap() < keen);
+    }
 
     #[test]
     fn build_orders_reach_both_skills_on_time() {

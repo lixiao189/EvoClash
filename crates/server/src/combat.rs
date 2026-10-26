@@ -1,11 +1,9 @@
-//! Weapons, projectiles, EMPs and pickups — all resolved with lag compensation:
+//! Weapons, projectiles and EMPs — all resolved with lag compensation:
 //! targets are rewound to where the shooter saw them on screen.
-
-use std::collections::HashSet;
 
 use bevy::prelude::*;
 use evoclash_game::evolution::{Evolution, SkillState};
-use evoclash_game::items::{Arm, ArmorKind, Item, MAX_EMPS, RangedWeapon, WeaponKind};
+use evoclash_game::items::{Arm, RangedWeapon, THROW_SLOT, WeaponKind};
 use evoclash_game::map::segment_circle;
 use evoclash_game::protocol::*;
 use evoclash_game::sim::{Arena, DT, PLAYER_RADIUS};
@@ -14,12 +12,10 @@ use lightyear::prelude::*;
 use crate::connections::Human;
 use crate::gameplay::{
     Cooldowns, CurrentInput, Damage, DamageQueue, Outbox, PosHistory, Rewind, SimSet, SimTick,
-    spawn_pickup,
 };
 use crate::monsters::spawn_puddle;
 use crate::skills::TurretBrain;
 
-const PICKUP_RADIUS: f32 = 46.0;
 const EMP_SPEED: f32 = 760.0;
 const EMP_FUSE_TICKS: u16 = 36;
 const EMP_RADIUS: f32 = 180.0;
@@ -31,7 +27,7 @@ impl Plugin for CombatPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             FixedUpdate,
-            (fire_weapons, throw_emps, step_projectiles, pickups)
+            (fire_weapons, throw_emps, step_projectiles)
                 .chain()
                 .in_set(SimSet::Combat),
         );
@@ -141,7 +137,7 @@ pub fn projectile_replication(human: Option<&Human>) -> (Replicate, Interpolatio
 }
 
 #[allow(clippy::type_complexity)]
-fn fire_weapons(
+pub(crate) fn fire_weapons(
     mut commands: Commands,
     tick: Res<SimTick>,
     state: Single<&MatchState>,
@@ -180,15 +176,23 @@ fn fire_weapons(
         if !vitals.alive || !input.fire || cd.fire > 0 {
             continue;
         }
+        // A click never does nothing: a dry gun gives way to the best weapon that can attack.
+        if loadout.stuck() {
+            loadout.auto_switch();
+        }
+        if loadout.selected == THROW_SLOT {
+            // `throw_emps` throws instead.
+            continue;
+        }
+        let kind = loadout.weapon();
         let aim = input.aim.normalize_or(Vec2::X);
-        let weapon = loadout.weapon.spec();
+        let weapon = kind.spec();
         cd.fire = evo.fire_cooldown(weapon.cooldown());
         // Perks (利爪, 能量聚焦) and 狂暴.
-        let damage_amount =
-            weapon.damage() * evo.weapon_damage_mult(loadout.weapon) * skills.damage_mult();
-        let armor_mult = weapon.armor_mult() + evo.armor_mult_bonus(loadout.weapon);
+        let damage_amount = weapon.damage() * evo.weapon_damage_mult(kind) * skills.damage_mult();
+        let armor_mult = weapon.armor_mult() + evo.armor_mult_bonus(kind);
 
-        let gun = match loadout.weapon.arm() {
+        let gun = match kind.arm() {
             Arm::Ranged(gun) => gun,
             Arm::Melee(club) => {
                 for (target, target_pos, target_vitals, history, monster, prop) in &targets {
@@ -208,7 +212,7 @@ fn fire_weapons(
                         attacker: Some(entity),
                         amount: damage_amount,
                         armor_mult,
-                        weapon: Some(loadout.weapon),
+                        weapon: Some(kind),
                         emp: false,
                         cause: None,
                     });
@@ -225,7 +229,7 @@ fn fire_weapons(
             commands.spawn((
                 Name::new("Projectile"),
                 Projectile {
-                    kind: ProjectileKind::Shot(loadout.weapon),
+                    kind: ProjectileKind::Shot(kind),
                     vel: dir * gun.muzzle_speed(),
                 },
                 Pos(pos.0 + dir * (PLAYER_RADIUS + 4.0)),
@@ -244,10 +248,10 @@ fn fire_weapons(
                 projectile_replication(human),
             ));
         }
-        loadout.ammo = loadout.ammo.saturating_sub(1);
-        if loadout.ammo == 0 {
-            // Out of ammo: back to the stone age.
-            loadout.weapon = WeaponKind::Stick;
+        loadout.spend(kind);
+        // Out of ammo: the gun stays in the backpack, and the next best weapon comes out.
+        if loadout.stuck() {
+            loadout.auto_switch();
         }
     }
 }
@@ -270,11 +274,15 @@ fn throw_emps(
         return;
     }
     for (entity, pos, input, vitals, mut loadout, mut cd, human, evo) in &mut throwers {
-        if !vitals.alive || !input.0.throw || cd.throw > 0 || loadout.emps == 0 {
+        let wants = input.0.throw || (input.0.fire && loadout.throwing());
+        if !vitals.alive || !wants || cd.throw > 0 || loadout.emps == 0 {
             continue;
         }
         cd.throw = 30;
         loadout.emps -= 1;
+        if loadout.stuck() {
+            loadout.auto_switch();
+        }
         let dir = input.0.aim.normalize_or(Vec2::X);
         commands.spawn((
             Name::new("Emp"),
@@ -418,126 +426,6 @@ pub(crate) fn step_projectiles(
                 } else {
                     pos.0 = to;
                 }
-            }
-        }
-    }
-}
-
-/// Would a player grab this automatically just by walking over it?
-pub fn auto_wants(item: &Item, vitals: &Vitals, loadout: &Loadout, evo: &Evolution) -> bool {
-    match *item {
-        Item::Weapon { kind, .. } => {
-            kind.spec().tier() > loadout.weapon.spec().tier()
-                || (kind == loadout.weapon
-                    && kind != WeaponKind::Stick
-                    && loadout.ammo < evo.max_ammo(kind))
-        }
-        Item::Armor { points, .. } => points > vitals.armor_points,
-        Item::Emp => loadout.emps < evo.emp_cap(MAX_EMPS),
-        Item::Medkit => vitals.hp < vitals.max_hp,
-        Item::Ammo => {
-            loadout.weapon != WeaponKind::Stick && loadout.ammo < evo.max_ammo(loadout.weapon)
-        }
-    }
-}
-
-/// Equip `item`, returning whatever had to be put down to make room.
-pub(crate) fn take(
-    item: Item,
-    vitals: &mut Vitals,
-    loadout: &mut Loadout,
-    evo: &Evolution,
-) -> Option<Item> {
-    match item {
-        Item::Weapon { kind, ammo } => {
-            if kind == loadout.weapon {
-                loadout.ammo = (loadout.ammo + ammo).min(evo.max_ammo(kind));
-                return None;
-            }
-            let old =
-                (loadout.weapon != WeaponKind::Stick && loadout.ammo > 0).then_some(Item::Weapon {
-                    kind: loadout.weapon,
-                    ammo: loadout.ammo,
-                });
-            loadout.weapon = kind;
-            loadout.ammo = ammo;
-            old
-        }
-        Item::Armor { kind, points } => {
-            let old = (vitals.armor != ArmorKind::None && vitals.armor_points > 0.0).then_some(
-                Item::Armor {
-                    kind: vitals.armor,
-                    points: vitals.armor_points,
-                },
-            );
-            vitals.armor = kind;
-            // 复合装甲 raises the cap and tops fresh armor up to it.
-            let bonus = evo.armor_cap(kind) - kind.max_points();
-            vitals.armor_points = (points + bonus).min(evo.armor_cap(kind)).max(points);
-            old
-        }
-        Item::Emp => {
-            loadout.emps = (loadout.emps + 1).min(evo.emp_cap(MAX_EMPS));
-            None
-        }
-        Item::Medkit => {
-            vitals.hp = (vitals.hp + 50.0).min(vitals.max_hp);
-            None
-        }
-        Item::Ammo => {
-            let kind = loadout.weapon;
-            loadout.ammo = (loadout.ammo + kind.ammo_box()).min(evo.max_ammo(kind));
-            None
-        }
-    }
-}
-
-fn pickups(
-    mut commands: Commands,
-    mut players: Query<(
-        &Pos,
-        &CurrentInput,
-        &mut Vitals,
-        &mut Loadout,
-        &mut Cooldowns,
-        &Evolution,
-    )>,
-    items: Query<(Entity, &Pos, &Pickup)>,
-) {
-    let mut taken = HashSet::new();
-    for (pos, input, mut vitals, mut loadout, mut cd, evo) in &mut players {
-        if !vitals.alive {
-            continue;
-        }
-        let mut near: Vec<(f32, Entity, Item)> = items
-            .iter()
-            .filter(|(e, ..)| !taken.contains(e))
-            .map(|(e, p, pickup)| (p.0.distance(pos.0), e, pickup.item))
-            .filter(|(d, ..)| *d <= PICKUP_RADIUS)
-            .collect();
-        if near.is_empty() {
-            continue;
-        }
-        near.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let forced = input.0.interact && cd.interact == 0;
-        for (_, entity, item) in near {
-            if !forced && !auto_wants(&item, &vitals, &loadout, evo) {
-                continue;
-            }
-            taken.insert(entity);
-            commands.entity(entity).despawn();
-            if let Some(dropped) = take(item, &mut vitals, &mut loadout, evo) {
-                spawn_pickup(
-                    &mut commands,
-                    dropped,
-                    pos.0 + Vec2::new(0.0, -18.0),
-                    Some(30 * 64),
-                );
-            }
-            if forced {
-                // One deliberate swap per press.
-                cd.interact = 20;
-                break;
             }
         }
     }

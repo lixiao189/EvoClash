@@ -14,6 +14,7 @@ mod connections;
 mod environment;
 mod evolution;
 mod gameplay;
+mod inventory;
 mod monsters;
 mod ops;
 mod skills;
@@ -66,6 +67,7 @@ fn main() {
         connections::ConnectionsPlugin,
         gameplay::GameplayPlugin,
         combat::CombatPlugin,
+        inventory::InventoryPlugin,
         environment::EnvironmentPlugin,
         bots::BotsPlugin,
         monsters::MonstersPlugin,

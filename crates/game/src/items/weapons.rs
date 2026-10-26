@@ -19,6 +19,68 @@ pub enum WeaponKind {
     Railgun,
 }
 
+/// Ammunition families. Guns hold no rounds of their own: each draws from its family's stack in
+/// the owner's ammo pouch, so a gun with an empty pouch is kept, not thrown away.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, Reflect)]
+pub enum AmmoKind {
+    Arrow,
+    Shell,
+    Bullet,
+    Cell,
+}
+
+impl AmmoKind {
+    pub const ALL: [AmmoKind; 4] = [
+        AmmoKind::Arrow,
+        AmmoKind::Shell,
+        AmmoKind::Bullet,
+        AmmoKind::Cell,
+    ];
+
+    /// Index into `Loadout::ammo`.
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            AmmoKind::Arrow => "箭矢",
+            AmmoKind::Shell => "霰弹",
+            AmmoKind::Bullet => "步枪弹",
+            AmmoKind::Cell => "能量电池",
+        }
+    }
+
+    /// Pouch capacity before 弹药回收.
+    pub fn base_cap(self) -> u16 {
+        match self {
+            AmmoKind::Arrow => 42,
+            AmmoKind::Shell => 30,
+            AmmoKind::Bullet => 135,
+            AmmoKind::Cell => 108,
+        }
+    }
+
+    /// Rounds in a box: one full load of the family's basic gun.
+    pub fn box_rounds(self) -> u16 {
+        match self {
+            AmmoKind::Arrow => 14,
+            AmmoKind::Shell => 10,
+            AmmoKind::Bullet => 45,
+            AmmoKind::Cell => 36,
+        }
+    }
+
+    /// Tier of the cheapest gun that fires it, for loot colors.
+    pub fn tier(self) -> u8 {
+        match self {
+            AmmoKind::Arrow | AmmoKind::Shell => 1,
+            AmmoKind::Bullet => 2,
+            AmmoKind::Cell => 3,
+        }
+    }
+}
+
 /// What every weapon has, whether it swings or shoots.
 pub trait Weapon {
     fn name(&self) -> &'static str;
@@ -63,8 +125,12 @@ pub trait RangedWeapon: Weapon {
     fn muzzle_speed(&self) -> f32;
     /// Projectile lifetime in ticks.
     fn lifetime(&self) -> u16;
-    /// Rounds in a fresh pickup.
-    fn max_ammo(&self) -> u16;
+    /// The pouch stack it draws from.
+    fn ammo(&self) -> AmmoKind;
+    /// Rounds used per trigger pull.
+    fn ammo_cost(&self) -> u16 {
+        1
+    }
     /// Projectiles per trigger pull.
     fn pellets(&self) -> u8 {
         1
@@ -147,18 +213,18 @@ impl WeaponKind {
         }
     }
 
-    /// Rounds in a fresh pickup; 0 for a melee weapon, which never runs dry.
-    pub fn max_ammo(self) -> u16 {
-        self.ranged().map_or(0, |w| w.max_ammo())
+    /// The ammo a gun draws from; `None` for a melee weapon, which never runs dry.
+    pub fn ammo(self) -> Option<AmmoKind> {
+        self.ranged().map(|w| w.ammo())
     }
 
-    /// Rounds in a box of ammo: half a fresh pickup, rounded up.
-    pub fn ammo_box(self) -> u16 {
-        self.max_ammo().div_ceil(2)
+    /// Rounds one trigger pull uses (0 for melee).
+    pub fn ammo_cost(self) -> u16 {
+        self.ranged().map_or(0, |w| w.ammo_cost())
     }
 }
 
-/// T0: what you spawn with and fall back to when the ammo runs out.
+/// T0: always in the melee slot, so nobody is ever unarmed.
 pub struct Stick;
 
 impl Weapon for Stick {
@@ -215,8 +281,8 @@ impl RangedWeapon for Bow {
     fn lifetime(&self) -> u16 {
         60
     }
-    fn max_ammo(&self) -> u16 {
-        14
+    fn ammo(&self) -> AmmoKind {
+        AmmoKind::Arrow
     }
 }
 
@@ -247,8 +313,8 @@ impl RangedWeapon for PipeShotgun {
     fn lifetime(&self) -> u16 {
         22
     }
-    fn max_ammo(&self) -> u16 {
-        10
+    fn ammo(&self) -> AmmoKind {
+        AmmoKind::Shell
     }
     fn pellets(&self) -> u8 {
         7
@@ -285,8 +351,8 @@ impl RangedWeapon for Rifle {
     fn lifetime(&self) -> u16 {
         50
     }
-    fn max_ammo(&self) -> u16 {
-        45
+    fn ammo(&self) -> AmmoKind {
+        AmmoKind::Bullet
     }
     fn spread(&self) -> f32 {
         0.06
@@ -323,8 +389,8 @@ impl RangedWeapon for Laser {
     fn lifetime(&self) -> u16 {
         34
     }
-    fn max_ammo(&self) -> u16 {
-        36
+    fn ammo(&self) -> AmmoKind {
+        AmmoKind::Cell
     }
     fn energy(&self) -> bool {
         true
@@ -361,7 +427,10 @@ impl RangedWeapon for Railgun {
     fn lifetime(&self) -> u16 {
         24
     }
-    fn max_ammo(&self) -> u16 {
+    fn ammo(&self) -> AmmoKind {
+        AmmoKind::Cell
+    }
+    fn ammo_cost(&self) -> u16 {
         6
     }
     fn piercing(&self) -> bool {

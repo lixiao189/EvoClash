@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::evolution::{Evolution, Skill, SkillState};
 use crate::items::{ArmorKind, Item, WeaponKind};
+pub use crate::items::{InventoryMove, Loadout};
 use crate::map::PropKind;
 use crate::shop::{PlayerCommand, Wallet};
 
@@ -27,6 +28,9 @@ pub struct PlayerInput {
     /// Skill A (R) / skill B (T) held.
     pub skill_a: bool,
     pub skill_b: bool,
+    /// Hotbar selection request, `(sequence << 2) | slot`. The server selects `slot` when the
+    /// value changes, so a request survives resends and never fights auto-switching.
+    pub select: u8,
 }
 
 impl PlayerInput {
@@ -143,13 +147,6 @@ impl Default for Vitals {
             revealed: 0,
         }
     }
-}
-
-#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Reflect, Default)]
-pub struct Loadout {
-    pub weapon: WeaponKind,
-    pub ammo: u16,
-    pub emps: u8,
 }
 
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Reflect)]
@@ -510,7 +507,7 @@ pub enum GameEvent {
     },
 }
 
-/// Kill feed and announcements: must arrive.
+/// Kill feed, announcements and backpack moves: must arrive.
 pub struct ReliableChannel;
 /// Cosmetic feedback (hits, swings, explosions): latest-wins, never retransmitted.
 pub struct FastChannel;
@@ -557,11 +554,13 @@ impl Plugin for ProtocolPlugin {
 
         app.register_message::<GameEvent>()
             .add_direction(NetworkDirection::ServerToClient);
+        app.register_message::<InventoryMove>()
+            .add_direction(NetworkDirection::ClientToServer);
         app.add_channel::<ReliableChannel>(ChannelSettings {
             mode: ChannelMode::OrderedReliable(ReliableSettings::default()),
             ..default()
         })
-        .add_direction(NetworkDirection::ServerToClient);
+        .add_direction(NetworkDirection::Bidirectional);
         app.add_channel::<FastChannel>(ChannelSettings {
             mode: ChannelMode::UnorderedUnreliable,
             ..default()

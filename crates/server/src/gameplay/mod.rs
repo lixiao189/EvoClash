@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 
 use bevy::prelude::*;
 use evoclash_game::evolution::{Evolution, Skill, SkillState, player_kill_xp};
-use evoclash_game::items::{ArmorKind, Item, WeaponKind, roll_loot};
+use evoclash_game::items::{AmmoKind, ArmorKind, Item, WeaponKind, roll_loot};
 use evoclash_game::map::{ArenaMap, VAULT_CENTER};
 use evoclash_game::protocol::*;
 use evoclash_game::shop::{DeathRecap, RESPAWN_MAX_TICKS, Wallet, can_deploy, player_kill_scrap};
@@ -13,11 +13,11 @@ use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
-use crate::combat::take;
 use crate::config::ServerConfig;
 use crate::connections::Human;
 use crate::environment::{Blasts, PropSlots};
 use crate::evolution::{Dealt, LifeLog, Recovery, XpAward, XpQueue};
+use crate::inventory::{Selecting, spawn_bag, spawn_loot, take};
 use crate::ops::OpsState;
 use crate::skills::HiddenFrom;
 

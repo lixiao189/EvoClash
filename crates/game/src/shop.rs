@@ -9,7 +9,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::evolution::{EvoPath, Evolution, Perk};
-use crate::items::{ArmorKind, Item, MAX_EMPS, WeaponKind};
+use crate::items::{AmmoKind, ArmorKind, Item, MAX_EMPS, WeaponKind};
 use crate::protocol::MonsterKind;
 
 const SEC: u16 = 64;
@@ -72,8 +72,7 @@ pub enum ShopItem {
     /// Not in `STOCK` yet: at respawn you are at full health, so a medkit only makes sense
     /// once the backpack can carry one.
     Medkit,
-    /// Not in `STOCK` yet: a bought gun comes full, so a box only makes sense once ammo is
-    /// carried separately (backpack).
+    /// Not in `STOCK` yet: a bought gun already comes with a box of its ammo.
     Ammo,
 }
 
@@ -112,7 +111,7 @@ impl ShopItem {
             ShopItem::Kevlar => Item::armor(ArmorKind::Kevlar),
             ShopItem::Emp => Item::Emp,
             ShopItem::Medkit => Item::Medkit,
-            ShopItem::Ammo => Item::Ammo,
+            ShopItem::Ammo => Item::ammo(AmmoKind::Bullet),
         }
     }
 
@@ -136,7 +135,7 @@ impl ShopItem {
     /// Items that share a cart slot: one gun, one armor; the rest stack.
     fn slot(self) -> Slot {
         match self.item() {
-            Item::Weapon { .. } => Slot::Weapon,
+            Item::Weapon(_) => Slot::Weapon,
             Item::Armor { .. } => Slot::Armor,
             _ => Slot::Stack,
         }
@@ -244,12 +243,17 @@ impl Wallet {
     }
 
     /// Hand the cart over at respawn: returns the items in grant order and remembers them.
+    /// A gun comes with a box of its ammo, like one found in the world.
     pub fn take_cart(&mut self) -> Vec<Item> {
         let cart = std::mem::take(&mut self.cart);
         if !cart.is_empty() {
             self.last_cart = cart.clone();
         }
-        cart.into_iter().map(ShopItem::item).collect()
+        cart.into_iter()
+            .map(ShopItem::item)
+            .flat_map(|item| [Some(item), item.matching_ammo()])
+            .flatten()
+            .collect()
     }
 }
 
@@ -338,7 +342,7 @@ mod tests {
         let mut w = rich(150);
         w.buy(ShopItem::Rifle, &evo);
         w.buy(ShopItem::Kevlar, &evo);
-        assert_eq!(w.take_cart().len(), 2);
+        assert_eq!(w.take_cart().len(), 3, "rifle, its bullets and kevlar");
         assert!(w.cart.is_empty());
         w.scrap = 80;
         w.buy(ShopItem::Emp, &evo);

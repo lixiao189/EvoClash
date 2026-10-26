@@ -4,7 +4,7 @@
 
 use bevy::prelude::*;
 use evoclash_game::evolution::{Evolution, VAULT_SAFE_XP, crate_xp, safe_xp};
-use evoclash_game::items::{ArmorKind, Item, roll_container};
+use evoclash_game::items::{ArmorKind, Item, roll_ammo, roll_container};
 use evoclash_game::map::{Biome, PropKind};
 use evoclash_game::protocol::*;
 use evoclash_game::shop::{VAULT_SAFE_SCRAP, crate_scrap, safe_scrap};
@@ -17,6 +17,7 @@ use crate::gameplay::{
     CurrentInput, Damage, DamageQueue, Outbox, PosHistory, SimSet, SimTick, TICKS_PER_SEC,
     resolve_damage, spawn_pickup,
 };
+use crate::inventory::spawn_loot;
 
 const CRATE_RESPAWN_TICKS: u32 = 40 * TICKS_PER_SEC;
 const BARREL_RESPAWN_TICKS: u32 = 45 * TICKS_PER_SEC;
@@ -284,14 +285,19 @@ fn crack_safes(
                     let toward = (cracker_pos.0 - pos.0).normalize_or(Vec2::NEG_Y);
                     let drop_at = pos.0 + toward * (prop.kind.radius() + 18.0);
                     let tier = (prop.tier + 1).min(4);
-                    spawn_pickup(
+                    spawn_loot(
                         &mut commands,
                         roll_container(tier, SAFE_GUN_PCT, &mut rng),
                         drop_at,
                         Some(LOOT_TTL),
                     );
                     let side = toward.perp() * 26.0;
-                    spawn_pickup(&mut commands, Item::Ammo, drop_at + side, Some(LOOT_TTL));
+                    spawn_pickup(
+                        &mut commands,
+                        roll_ammo(tier, &mut rng),
+                        drop_at + side,
+                        Some(LOOT_TTL),
+                    );
                     if rng.random_bool(0.5) {
                         spawn_pickup(&mut commands, Item::Emp, drop_at - side, Some(LOOT_TTL));
                     }
@@ -369,7 +375,7 @@ fn resolve_prop_damage(
                     None
                 };
                 if let Some(item) = item {
-                    spawn_pickup(&mut commands, item, pos.0, Some(LOOT_TTL));
+                    spawn_loot(&mut commands, item, pos.0, Some(LOOT_TTL));
                 }
             }
             PropKind::Barrel => blasts.0.push(Blast {

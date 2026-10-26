@@ -144,7 +144,7 @@ fn deploy_last_waits_for_4s_and_brings_the_last_cart() {
     app.update();
     assert!(alive(&app, p));
     let world = app.world();
-    assert_eq!(world.get::<Loadout>(p).unwrap().weapon, WeaponKind::Bow);
+    assert_eq!(world.get::<Loadout>(p).unwrap().weapon(), WeaponKind::Bow);
     let wallet = world.get::<Wallet>(p).unwrap();
     assert_eq!((wallet.scrap, wallet.cart.len()), (15, 0));
     assert!(!world.get::<LifeLog>(p).unwrap().deploy_asap);
@@ -233,8 +233,15 @@ fn scrap_and_perks_survive_death_and_the_cart_is_equipped() {
         vec![ShopItem::Rifle, ShopItem::ScrapArmor]
     );
     let loadout = world.get::<Loadout>(p).unwrap();
-    assert_eq!(loadout.weapon, WeaponKind::Rifle);
-    assert!(loadout.ammo > 0);
+    assert_eq!(
+        loadout.weapon(),
+        WeaponKind::Rifle,
+        "the bought gun comes with its ammo"
+    );
+    assert_eq!(
+        loadout.rounds(AmmoKind::Bullet),
+        AmmoKind::Bullet.box_rounds()
+    );
     let vitals = world.get::<Vitals>(p).unwrap();
     assert_eq!(vitals.armor, ArmorKind::Scrap);
     assert_eq!(world.get::<Evolution>(p).unwrap().rank(Perk::Overclock), 1);

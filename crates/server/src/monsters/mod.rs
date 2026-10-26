@@ -10,7 +10,7 @@ use std::f32::consts::{PI, TAU};
 
 use bevy::prelude::*;
 use evoclash_game::evolution::{STEALTH_SIGHT, seen_from};
-use evoclash_game::items::{ArmorKind, Item, WeaponKind, roll_loot};
+use evoclash_game::items::{ArmorKind, Item, WeaponKind, roll_ammo, roll_loot};
 use evoclash_game::map::{ARENA_HALF, Biome, Block, MARGIN, VAULT_CENTER};
 use evoclash_game::nav::{next_waypoint, steer_clear};
 use evoclash_game::protocol::*;
@@ -25,8 +25,9 @@ use crate::config::ServerConfig;
 use crate::evolution::{Dealt, Hit, XpAward, XpQueue};
 use crate::gameplay::{
     Damage, DamageQueue, Outbox, PosHistory, ResetRequested, SimSet, SimTick, TICKS_PER_SEC,
-    match_flow, reset_match, resolve_damage, spawn_pickup,
+    match_flow, reset_match, resolve_damage,
 };
+use crate::inventory::spawn_loot;
 
 mod attacks;
 mod damage;

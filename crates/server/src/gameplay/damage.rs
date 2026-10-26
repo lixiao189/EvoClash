@@ -48,7 +48,7 @@ pub fn resolve_damage(
     for dmg in queue.0.drain(..) {
         let attacker = dmg.attacker.and_then(|a| players.get(a).ok());
         let attacker_id = attacker.map_or(0, |(p, ..)| p.client_id);
-        let attacker_tier = attacker.map(|(_, _, _, loadout, ..)| loadout.weapon.spec().tier());
+        let attacker_tier = attacker.map(|(_, _, _, loadout, ..)| loadout.weapon().spec().tier());
         let Ok((_, pos, mut vitals, mut loadout, _, evo, mut skills, mut recovery, ..)) =
             players.get_mut(dmg.target)
         else {
@@ -73,10 +73,8 @@ pub fn resolve_damage(
                 vitals.armor = ArmorKind::None;
             }
             vitals.emp_slow = 3 * TICKS_PER_SEC as u16;
-            // Energy weapons short out too.
-            if matches!(loadout.weapon, WeaponKind::Laser | WeaponKind::Railgun) {
-                loadout.ammo /= 2;
-            }
+            // Energy cells short out too.
+            loadout.ammo[AmmoKind::Cell.index()] /= 2;
         }
         // 能量护盾 soaks damage before armor does.
         let mut soaked = 0.0;
@@ -141,40 +139,17 @@ pub fn resolve_damage(
         stats.deaths += 1;
         stats.streak = 0;
 
-        // Everything you carried is up for grabs: killing the strong is how the weak catch up.
+        // Everything you carried is up for grabs, in one bag: killing the strong is how the
+        // weak catch up.
         let drop_at = pos.0;
-        if loadout.weapon != WeaponKind::Stick && loadout.ammo > 0 {
-            let item = Item::Weapon {
-                kind: loadout.weapon,
-                ammo: loadout.ammo,
-            };
-            spawn_pickup(
-                &mut commands,
-                item,
-                drop_at + Vec2::new(-14.0, 0.0),
-                Some(DROP_TTL_TICKS),
-            );
-        }
+        let mut belongings = loadout.contents();
         if vitals.armor != ArmorKind::None && vitals.armor_points > 0.0 {
-            let item = Item::Armor {
+            belongings.push(Item::Armor {
                 kind: vitals.armor,
                 points: vitals.armor_points,
-            };
-            spawn_pickup(
-                &mut commands,
-                item,
-                drop_at + Vec2::new(14.0, 0.0),
-                Some(DROP_TTL_TICKS),
-            );
+            });
         }
-        if loadout.emps > 0 {
-            spawn_pickup(
-                &mut commands,
-                Item::Emp,
-                drop_at + Vec2::new(0.0, 14.0),
-                Some(DROP_TTL_TICKS),
-            );
-        }
+        spawn_bag(&mut commands, belongings, drop_at, DROP_TTL_TICKS);
         *loadout = Loadout::default();
         vitals.armor = ArmorKind::None;
         vitals.armor_points = 0.0;
@@ -198,7 +173,7 @@ pub fn resolve_damage(
                     killer_life.kills += 1;
                     killer_stats.streak += 1;
                     killer_stats.score += if had_bounty { 3 } else { 1 };
-                    let killer_tier = killer_loadout.weapon.spec().tier();
+                    let killer_tier = killer_loadout.weapon().spec().tier();
                     let giant_slayer = victim_tier >= killer_tier + GIANT_SLAYER_GAP;
                     xp.0.push(XpAward {
                         to: killer.expect("killer"),
@@ -207,12 +182,14 @@ pub fn resolve_damage(
                         loot: false,
                         scrap: player_kill_scrap(had_bounty),
                     });
-                    // Every kill salvages a quarter magazine; 弹药回收 adds to it.
-                    let weapon = killer_loadout.weapon;
-                    let refill = killer_evo.ammo_per_kill() + weapon.ammo_box() / 2;
-                    if refill > 0 && weapon != WeaponKind::Stick {
-                        killer_loadout.ammo =
-                            (killer_loadout.ammo + refill).min(killer_evo.max_ammo(weapon));
+                    // Every kill salvages a quarter box for the selected gun (or the best one
+                    // on the hotbar); 弹药回收 adds shots to it.
+                    if let Some(gun) = salvage_target(&killer_loadout)
+                        && let Some(kind) = gun.ammo()
+                    {
+                        let refill =
+                            kind.box_rounds() / 4 + killer_evo.ammo_per_kill() * gun.ammo_cost();
+                        killer_loadout.add_ammo(kind, refill, killer_evo);
                     }
                     if giant_slayer {
                         killer_stats.score += 1;
@@ -267,6 +244,21 @@ pub fn resolve_damage(
             bounty: had_bounty,
         });
     }
+}
+
+/// The gun whose ammo a kill salvages: the selected one, else the best on the hotbar.
+pub(super) fn salvage_target(loadout: &Loadout) -> Option<WeaponKind> {
+    loadout
+        .slot(loadout.selected)
+        .filter(|w| w.ammo().is_some())
+        .or_else(|| {
+            loadout
+                .guns
+                .iter()
+                .flatten()
+                .copied()
+                .max_by_key(|w| w.spec().tier())
+        })
 }
 
 /// Bring the dead back: when the timer runs out, or once 沿用上次配置 may go. Whatever was

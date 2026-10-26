@@ -27,8 +27,9 @@ use crate::connections::Human;
 use crate::evolution::{XpAward, XpQueue, grant_xp};
 use crate::gameplay::{
     Damage, DamageQueue, MATCH_TICKS, Outbox, ResetRequested, SimSet, TICKS_PER_SEC, match_flow,
-    reset_match, resolve_damage, spawn_pickup,
+    reset_match, resolve_damage,
 };
+use crate::inventory::spawn_loot;
 use crate::monsters::{
     Brain, MAX_LIVE, nearest, over_building, prey, set_state, shoot, spawn_monster, spawn_puddle,
 };
@@ -472,7 +473,7 @@ fn reward(
         (Item::armor(ArmorKind::PowerArmor), Vec2::new(40.0, 0.0)),
         (Item::Medkit, Vec2::new(0.0, 40.0)),
     ] {
-        spawn_pickup(&mut commands, item, at + offset, Some(DROP_TTL));
+        spawn_loot(&mut commands, item, at + offset, Some(DROP_TTL));
     }
     outbox.fast.push(GameEvent::Boom {
         pos: at,

@@ -21,7 +21,7 @@ use lightyear::prelude::input::native::ActionState;
 use rand::Rng;
 
 use crate::assets::PendingAssets;
-use crate::input::{CursorWorld, GUN_HEIGHT, LocalPlayer};
+use crate::input::{CursorWorld, GUN_HEIGHT, LocalPlayer, Selection};
 use crate::lpc;
 use crate::predict::TickSamples;
 use crate::textures::{self, Facing, PIXEL, Textures};

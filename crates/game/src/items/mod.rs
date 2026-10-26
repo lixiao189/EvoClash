@@ -5,8 +5,10 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+mod inventory;
 mod weapons;
 
+pub use inventory::*;
 pub use weapons::*;
 
 /// EMPs a combatant can carry before 电磁专家.
@@ -24,18 +26,21 @@ pub enum ArmorKind {
 /// Something lying on the ground that can be picked up.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Reflect)]
 pub enum Item {
-    Weapon {
-        kind: WeaponKind,
-        ammo: u16,
-    },
+    /// Just the gun: it fires from the matching stack in the ammo pouch.
+    Weapon(WeaponKind),
     Armor {
         kind: ArmorKind,
         points: f32,
     },
     Emp,
     Medkit,
-    /// A box of rounds for whatever gun is in hand, `WeaponKind::ammo_box` of them.
-    Ammo,
+    /// Rounds for the ammo pouch.
+    Ammo {
+        kind: AmmoKind,
+        rounds: u16,
+    },
+    /// Everything a fallen combatant carried. Only the server knows what is inside.
+    Bag,
 }
 
 impl ArmorKind {
@@ -78,19 +83,21 @@ impl ArmorKind {
 impl Item {
     pub fn tier(self) -> u8 {
         match self {
-            Item::Weapon { kind, .. } => kind.spec().tier(),
+            Item::Weapon(kind) => kind.spec().tier(),
             Item::Armor { kind, .. } => kind.tier(),
-            Item::Emp | Item::Medkit | Item::Ammo => 1,
+            Item::Ammo { kind, .. } => kind.tier(),
+            Item::Emp | Item::Medkit | Item::Bag => 1,
         }
     }
 
     pub fn label(self) -> String {
         match self {
-            Item::Weapon { kind, ammo } => format!("{} ({ammo})", kind.spec().name()),
+            Item::Weapon(kind) => kind.spec().name().into(),
             Item::Armor { kind, points } => format!("{} ({points:.0})", kind.name()),
             Item::Emp => "电磁脉冲雷".into(),
             Item::Medkit => "医疗包".into(),
-            Item::Ammo => "弹药箱".into(),
+            Item::Ammo { kind, rounds } => format!("{} ×{rounds}", kind.name()),
+            Item::Bag => "遗落的背包".into(),
         }
     }
 
@@ -99,9 +106,22 @@ impl Item {
     }
 
     pub fn weapon(kind: WeaponKind) -> Self {
-        Item::Weapon {
+        Item::Weapon(kind)
+    }
+
+    /// A box of `kind`: `AmmoKind::box_rounds` of them.
+    pub fn ammo(kind: AmmoKind) -> Self {
+        Item::Ammo {
             kind,
-            ammo: kind.max_ammo(),
+            rounds: kind.box_rounds(),
+        }
+    }
+
+    /// The box of ammo that comes with a gun found in the world, so it can be fired at once.
+    pub fn matching_ammo(self) -> Option<Item> {
+        match self {
+            Item::Weapon(kind) => kind.ammo().map(Item::ammo),
+            _ => None,
         }
     }
 
@@ -128,31 +148,53 @@ pub fn roll_loot(zone_tier: u8, rng: &mut impl rand::Rng) -> Item {
     let table: &[(Item, u32)] = match zone_tier {
         0 => &[(Item::Medkit, 70), (Item::Emp, 30)],
         1 => &[
-            (Item::weapon(WeaponKind::Bow), 30),
-            (Item::weapon(WeaponKind::PipeShotgun), 30),
+            (Item::weapon(WeaponKind::Bow), 25),
+            (Item::weapon(WeaponKind::PipeShotgun), 25),
             (Item::armor(ArmorKind::Scrap), 25),
             (Item::Medkit, 20),
             (Item::Emp, 12),
-            (Item::Ammo, 15),
+            (Item::ammo(AmmoKind::Arrow), 20),
+            (Item::ammo(AmmoKind::Shell), 20),
         ],
         2 => &[
             (Item::weapon(WeaponKind::Rifle), 30),
-            (Item::weapon(WeaponKind::PipeShotgun), 15),
+            (Item::weapon(WeaponKind::PipeShotgun), 12),
             (Item::armor(ArmorKind::Kevlar), 25),
             (Item::Emp, 15),
             (Item::Medkit, 15),
-            (Item::Ammo, 28),
+            (Item::ammo(AmmoKind::Bullet), 35),
+            (Item::ammo(AmmoKind::Shell), 12),
         ],
         3 => &[
             (Item::weapon(WeaponKind::Laser), 40),
             (Item::weapon(WeaponKind::Rifle), 20),
             (Item::armor(ArmorKind::Kevlar), 25),
             (Item::Emp, 15),
-            (Item::Ammo, 28),
+            (Item::ammo(AmmoKind::Cell), 35),
+            (Item::ammo(AmmoKind::Bullet), 15),
         ],
         _ => &[
             (Item::armor(ArmorKind::PowerArmor), 50),
             (Item::weapon(WeaponKind::Railgun), 50),
+        ],
+    };
+    pick(table, rng)
+}
+
+/// A loose box of ammo of a family found in a zone of this tier.
+pub fn roll_ammo(zone_tier: u8, rng: &mut impl rand::Rng) -> Item {
+    let table: &[(Item, u32)] = match zone_tier {
+        0 | 1 => &[
+            (Item::ammo(AmmoKind::Arrow), 50),
+            (Item::ammo(AmmoKind::Shell), 50),
+        ],
+        2 => &[
+            (Item::ammo(AmmoKind::Bullet), 70),
+            (Item::ammo(AmmoKind::Shell), 30),
+        ],
+        _ => &[
+            (Item::ammo(AmmoKind::Cell), 60),
+            (Item::ammo(AmmoKind::Bullet), 40),
         ],
     };
     pick(table, rng)
@@ -206,7 +248,7 @@ mod tests {
         let mut rng = rand::rng();
         for tier in 0..=4 {
             let guns = (0..400)
-                .filter(|_| matches!(roll_container(tier, 40, &mut rng), Item::Weapon { .. }))
+                .filter(|_| matches!(roll_container(tier, 40, &mut rng), Item::Weapon(_)))
                 .count();
             assert!(guns > 100, "tier {tier}: only {guns}/400 guns");
         }
@@ -215,7 +257,7 @@ mod tests {
     #[test]
     fn the_vault_never_drops_ammo_and_lab_safes_can_give_power_armor() {
         let mut rng = rand::rng();
-        assert!((0..500).all(|_| roll_loot(4, &mut rng) != Item::Ammo));
+        assert!((0..500).all(|_| !matches!(roll_loot(4, &mut rng), Item::Ammo { .. })));
         let armor = (0..400)
             .filter(|_| matches!(roll_container(4, 50, &mut rng), Item::Armor { .. }))
             .count();
@@ -223,9 +265,33 @@ mod tests {
     }
 
     #[test]
-    fn ammo_boxes_refill_half_a_magazine() {
-        assert_eq!(WeaponKind::Rifle.ammo_box(), 23);
-        assert_eq!(WeaponKind::Railgun.ammo_box(), 3);
-        assert_eq!(WeaponKind::Stick.ammo_box(), 0);
+    fn found_guns_come_with_ammo_they_can_fire() {
+        for kind in [
+            WeaponKind::Bow,
+            WeaponKind::PipeShotgun,
+            WeaponKind::Rifle,
+            WeaponKind::Laser,
+            WeaponKind::Railgun,
+        ] {
+            let Some(Item::Ammo { kind: ammo, rounds }) = Item::weapon(kind).matching_ammo() else {
+                panic!("{kind:?} has no ammo box");
+            };
+            assert_eq!(Some(ammo), kind.ammo());
+            assert!(rounds >= 6 * kind.ammo_cost(), "{kind:?}: {rounds} rounds");
+            assert!(ammo.base_cap() >= 3 * rounds);
+        }
+        assert_eq!(Item::weapon(WeaponKind::Stick).matching_ammo(), None);
+        assert_eq!(WeaponKind::Railgun.ammo_cost(), 6);
+    }
+
+    #[test]
+    fn loose_ammo_matches_the_zone() {
+        let mut rng = rand::rng();
+        for _ in 0..200 {
+            let Item::Ammo { kind, .. } = roll_ammo(1, &mut rng) else {
+                panic!("not ammo");
+            };
+            assert!(matches!(kind, AmmoKind::Arrow | AmmoKind::Shell));
+        }
     }
 }
