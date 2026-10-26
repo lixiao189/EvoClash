@@ -91,7 +91,7 @@ pub fn visible(vitals: &Vitals, pos: Vec2, viewer_pos: Vec2) -> bool {
 }
 
 fn combat_allowed(state: &MatchState) -> bool {
-    state.phase != Phase::Intermission
+    !matches!(state.phase, Phase::Results | Phase::Recovering)
 }
 
 pub(crate) fn tick_skills(mut players: Query<&mut SkillState>) {

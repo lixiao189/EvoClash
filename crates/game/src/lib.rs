@@ -6,6 +6,7 @@ pub mod map;
 pub mod nav;
 pub mod net;
 pub mod protocol;
+pub mod rng;
 pub mod shop;
 pub mod sim;
 
@@ -31,6 +32,9 @@ pub mod api {
         /// Preferred region; the matchmaker falls back to any region with capacity.
         #[serde(default)]
         pub region: Option<String>,
+        /// Set when joining one match on purpose. Missing or unknown is a quick start.
+        #[serde(default)]
+        pub match_id: Option<String>,
     }
 
     #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -67,5 +71,22 @@ pub mod api {
         pub accepting: bool,
         /// Average simulation tick time in microseconds, for capacity planning.
         pub tick_us: u32,
+        /// `lobby` | `starting` | `playing` | `results` | `recovering`. Required; no default.
+        pub phase: String,
+        /// Seconds left in this phase. `None` while a lobby countdown has not started.
+        pub phase_left_secs: Option<u32>,
+        /// Connected and grace-period humans. `players` is the same count.
+        pub humans: u32,
+        pub bots: u32,
+        /// Always false until private rooms exist.
+        pub is_private: bool,
+        /// Always `None` until private rooms exist.
+        pub room_code: Option<String>,
+        pub room_seed: u64,
+        pub match_index: u32,
+        /// `none` | `lobby`. The matchmaker trusts this and does not re-derive it.
+        pub join_mode: String,
+        /// True on the last heartbeats before a normal exit.
+        pub exiting: bool,
     }
 }

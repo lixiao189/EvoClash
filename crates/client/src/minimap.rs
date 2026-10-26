@@ -163,11 +163,13 @@ fn repaint(
 }
 
 fn place_markers(
+    state: Query<&MatchState>,
     me: Query<(&Pos, &Vitals), With<LocalPlayer>>,
     players: Query<(&Pos, &Vitals, &Stats), (With<Player>, Without<LocalPlayer>)>,
     bosses: Query<(&Pos, &Monster, &Vitals)>,
     mut markers: Query<(&Marker, &mut Node, &mut Visibility)>,
 ) {
+    let practice = state.iter().any(|s| s.phase == Phase::Lobby);
     let at = |p: Vec2| {
         (
             (p.x + ARENA_HALF.x) * SCALE - 3.5,
@@ -176,7 +178,7 @@ fn place_markers(
     };
     let bounties: Vec<Vec2> = players
         .iter()
-        .filter(|(_, v, s)| v.alive && (s.has_bounty() || v.revealed > 0))
+        .filter(|(_, v, s)| v.alive && ((!practice && s.has_bounty()) || v.revealed > 0))
         .map(|(p, ..)| p.0)
         .take(BOUNTY_MARKERS)
         .collect();

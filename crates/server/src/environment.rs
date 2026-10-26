@@ -18,6 +18,7 @@ use crate::gameplay::{
     resolve_damage, spawn_pickup,
 };
 use crate::inventory::spawn_loot;
+use crate::rng::{SimRng, Stream};
 
 const CRATE_RESPAWN_TICKS: u32 = 40 * TICKS_PER_SEC;
 const BARREL_RESPAWN_TICKS: u32 = 45 * TICKS_PER_SEC;
@@ -102,7 +103,16 @@ fn spawn_props(
     mut slots: ResMut<PropSlots>,
     live: Query<(), With<Prop>>,
     players: Query<(&Pos, &Vitals), With<Player>>,
+    state: Query<&MatchState>,
 ) {
+    let phase = state
+        .iter()
+        .next()
+        .map(|s| s.phase)
+        .unwrap_or(Phase::Playing);
+    if matches!(phase, Phase::Starting | Phase::Recovering) {
+        return;
+    }
     if slots.0.len() != arena.props.len() {
         slots.0 = arena.props.iter().map(|_| Slot::default()).collect();
     }
@@ -119,6 +129,12 @@ fn spawn_props(
         }
         if slot.respawn_in > 0 {
             slot.respawn_in -= 1;
+            continue;
+        }
+        // Lobby keeps T0-T2 crates and barrels. Safes and T3+ crates wait for the match.
+        if phase == Phase::Lobby
+            && (spot.kind == PropKind::Safe || (spot.kind == PropKind::Crate && spot.tier >= 3))
+        {
             continue;
         }
         // Never pop up on top of someone.
@@ -166,9 +182,13 @@ fn track_obstacles(mut obstacles: ResMut<Obstacles>, props: Query<(&Pos, &Prop, 
 fn irradiate(
     tick: Res<SimTick>,
     arena: Res<Arena>,
+    state: Query<&MatchState>,
     players: Query<(Entity, &Pos, &Vitals), With<Player>>,
     mut damage: ResMut<DamageQueue>,
 ) {
+    if state.iter().all(|s| s.phase != Phase::Playing) {
+        return;
+    }
     if !tick.0.is_multiple_of(RAD_EVERY) || arena.hazards.is_empty() {
         return;
     }
@@ -230,95 +250,102 @@ fn crack_safes(
     mut commands: Commands,
     arena: Res<Arena>,
     mut xp: ResMut<XpQueue>,
+    state: Query<&MatchState>,
     mut safes: Query<(&mut Prop, &Pos, &mut Cracking)>,
     players: Query<(Entity, &Pos, &Vitals, &CurrentInput, &Evolution), With<Player>>,
+    rng: Res<SimRng>,
 ) {
-    let mut rng = rand::rng();
-    for (mut prop, pos, mut cracking) in &mut safes {
-        if prop.open {
-            cracking.reseal = cracking.reseal.saturating_sub(1);
-            if cracking.reseal == 0 {
-                prop.open = false;
-            }
-            continue;
-        }
-        let reach = prop.kind.radius() + PLAYER_RADIUS + SAFE_REACH;
-        let working = |(_, p, v, input, _): &(Entity, &Pos, &Vitals, &CurrentInput, &Evolution)| {
-            v.alive
-                && input.0.interact
-                && input.0.move_dir() == Vec2::ZERO
-                && p.0.distance(pos.0) <= reach
-        };
-        // Whoever started keeps going; otherwise the first one to try takes over.
-        let cracker = players
-            .iter()
-            .filter(&working)
-            .find(|(e, ..)| Some(*e) == cracking.by)
-            .or_else(|| players.iter().find(&working));
-        match cracker {
-            Some((entity, cracker_pos, _, _, evo)) => {
-                if cracking.by != Some(entity) {
-                    cracking.by = Some(entity);
-                    cracking.ticks = 0;
+    if state.iter().all(|s| s.phase != Phase::Playing) {
+        return;
+    }
+    rng.with(true, Stream::Loot, |mut rng| {
+        for (mut prop, pos, mut cracking) in &mut safes {
+            if prop.open {
+                cracking.reseal = cracking.reseal.saturating_sub(1);
+                if cracking.reseal == 0 {
+                    prop.open = false;
                 }
-                cracking.need = evo.crack_ticks();
-                cracking.ticks += 1;
-                if cracking.ticks >= cracking.need {
-                    let vault = arena
-                        .block_at(pos.0)
-                        .is_some_and(|b| b.biome == Biome::Vault);
-                    xp.0.push(XpAward {
-                        to: entity,
-                        base: if vault {
-                            VAULT_SAFE_XP
-                        } else {
-                            safe_xp(prop.tier)
-                        },
-                        pos: pos.0,
-                        loot: true,
-                        scrap: if vault {
-                            VAULT_SAFE_SCRAP
-                        } else {
-                            safe_scrap(prop.tier)
-                        },
-                    });
-                    let toward = (cracker_pos.0 - pos.0).normalize_or(Vec2::NEG_Y);
-                    let drop_at = pos.0 + toward * (prop.kind.radius() + 18.0);
-                    let tier = (prop.tier + 1).min(4);
-                    spawn_loot(
-                        &mut commands,
-                        roll_container(tier, SAFE_GUN_PCT, &mut rng),
-                        drop_at,
-                        Some(LOOT_TTL),
-                    );
-                    let side = toward.perp() * 26.0;
-                    spawn_pickup(
-                        &mut commands,
-                        roll_ammo(tier, &mut rng),
-                        drop_at + side,
-                        Some(LOOT_TTL),
-                    );
-                    if rng.random_bool(0.5) {
-                        spawn_pickup(&mut commands, Item::Emp, drop_at - side, Some(LOOT_TTL));
+                continue;
+            }
+            let reach = prop.kind.radius() + PLAYER_RADIUS + SAFE_REACH;
+            let working =
+                |(_, p, v, input, _): &(Entity, &Pos, &Vitals, &CurrentInput, &Evolution)| {
+                    v.alive
+                        && input.0.interact
+                        && input.0.move_dir() == Vec2::ZERO
+                        && p.0.distance(pos.0) <= reach
+                };
+            // Whoever started keeps going; otherwise the first one to try takes over.
+            let cracker = players
+                .iter()
+                .filter(&working)
+                .find(|(e, ..)| Some(*e) == cracking.by)
+                .or_else(|| players.iter().find(&working));
+            match cracker {
+                Some((entity, cracker_pos, _, _, evo)) => {
+                    if cracking.by != Some(entity) {
+                        cracking.by = Some(entity);
+                        cracking.ticks = 0;
                     }
-                    prop.open = true;
-                    prop.progress = 0;
+                    cracking.need = evo.crack_ticks();
+                    cracking.ticks += 1;
+                    if cracking.ticks >= cracking.need {
+                        let vault = arena
+                            .block_at(pos.0)
+                            .is_some_and(|b| b.biome == Biome::Vault);
+                        xp.0.push(XpAward {
+                            to: entity,
+                            base: if vault {
+                                VAULT_SAFE_XP
+                            } else {
+                                safe_xp(prop.tier)
+                            },
+                            pos: pos.0,
+                            loot: true,
+                            scrap: if vault {
+                                VAULT_SAFE_SCRAP
+                            } else {
+                                safe_scrap(prop.tier)
+                            },
+                        });
+                        let toward = (cracker_pos.0 - pos.0).normalize_or(Vec2::NEG_Y);
+                        let drop_at = pos.0 + toward * (prop.kind.radius() + 18.0);
+                        let tier = (prop.tier + 1).min(4);
+                        spawn_loot(
+                            &mut commands,
+                            roll_container(tier, SAFE_GUN_PCT, &mut rng),
+                            drop_at,
+                            Some(LOOT_TTL),
+                        );
+                        let side = toward.perp() * 26.0;
+                        spawn_pickup(
+                            &mut commands,
+                            roll_ammo(tier, &mut rng),
+                            drop_at + side,
+                            Some(LOOT_TTL),
+                        );
+                        if rng.random_bool(0.5) {
+                            spawn_pickup(&mut commands, Item::Emp, drop_at - side, Some(LOOT_TTL));
+                        }
+                        prop.open = true;
+                        prop.progress = 0;
+                        cracking.by = None;
+                        cracking.ticks = 0;
+                        cracking.reseal = SAFE_RESEAL_TICKS;
+                        continue;
+                    }
+                }
+                None => {
                     cracking.by = None;
                     cracking.ticks = 0;
-                    cracking.reseal = SAFE_RESEAL_TICKS;
-                    continue;
                 }
             }
-            None => {
-                cracking.by = None;
-                cracking.ticks = 0;
+            let progress = (cracking.ticks * 100 / cracking.need.max(1)) as u8;
+            if prop.progress != progress {
+                prop.progress = progress;
             }
         }
-        let progress = (cracking.ticks * 100 / cracking.need.max(1)) as u8;
-        if prop.progress != progress {
-            prop.progress = progress;
-        }
-    }
+    });
 }
 
 /// Props take damage here; everything aimed elsewhere is left for the other resolvers.
@@ -330,61 +357,65 @@ fn resolve_prop_damage(
     mut blasts: ResMut<Blasts>,
     mut props: Query<(&Prop, &Pos, &mut Vitals)>,
     players: Query<&Player>,
+    state: Query<&MatchState>,
+    rng: Res<SimRng>,
 ) {
-    let mut rng = rand::rng();
-    queue.0.retain(|dmg| {
-        let Ok((prop, pos, mut vitals)) = props.get_mut(dmg.target) else {
-            return true;
-        };
-        // Safes shrug everything off; EMPs don't bother crates.
-        if !vitals.alive || prop.kind == PropKind::Safe || dmg.emp {
-            return false;
-        }
-        let amount = dmg.amount.min(vitals.hp);
-        vitals.hp -= amount;
-        outbox.fast.push(GameEvent::Hit {
-            pos: pos.0,
-            amount,
-            armor: false,
-            attacker: dmg
-                .attacker
-                .and_then(|a| players.get(a).ok())
-                .map_or(0, |p| p.client_id),
-        });
-        if vitals.hp > 0.0 {
-            return false;
-        }
-        vitals.alive = false;
-        commands.entity(dmg.target).despawn();
-        match prop.kind {
-            PropKind::Crate => {
-                if let Some(by) = dmg.attacker {
-                    xp.0.push(XpAward {
-                        to: by,
-                        base: crate_xp(prop.tier),
-                        pos: pos.0,
-                        loot: true,
-                        scrap: crate_scrap(prop.tier),
-                    });
-                }
-                let item = if rng.random_bool(0.85) {
-                    Some(roll_container(prop.tier, CRATE_GUN_PCT, &mut rng))
-                } else if rng.random_bool(0.5) {
-                    Some(Item::Medkit)
-                } else {
-                    None
-                };
-                if let Some(item) = item {
-                    spawn_loot(&mut commands, item, pos.0, Some(LOOT_TTL));
-                }
+    let playing = state.iter().any(|s| s.phase == Phase::Playing);
+    rng.with(playing, Stream::Loot, |mut rng| {
+        queue.0.retain(|dmg| {
+            let Ok((prop, pos, mut vitals)) = props.get_mut(dmg.target) else {
+                return true;
+            };
+            // Safes shrug everything off; EMPs don't bother crates.
+            if !vitals.alive || prop.kind == PropKind::Safe || dmg.emp {
+                return false;
             }
-            PropKind::Barrel => blasts.0.push(Blast {
+            let amount = dmg.amount.min(vitals.hp);
+            vitals.hp -= amount;
+            outbox.fast.push(GameEvent::Hit {
                 pos: pos.0,
-                attacker: dmg.attacker,
-                fuse: BLAST_FUSE,
-            }),
-            PropKind::Safe => {}
-        }
-        false
+                amount,
+                armor: false,
+                attacker: dmg
+                    .attacker
+                    .and_then(|a| players.get(a).ok())
+                    .map_or(0, |p| p.client_id),
+            });
+            if vitals.hp > 0.0 {
+                return false;
+            }
+            vitals.alive = false;
+            commands.entity(dmg.target).despawn();
+            match prop.kind {
+                PropKind::Crate => {
+                    if playing && let Some(by) = dmg.attacker {
+                        xp.0.push(XpAward {
+                            to: by,
+                            base: crate_xp(prop.tier),
+                            pos: pos.0,
+                            loot: true,
+                            scrap: crate_scrap(prop.tier),
+                        });
+                    }
+                    let item = if rng.random_bool(0.85) {
+                        Some(roll_container(prop.tier, CRATE_GUN_PCT, &mut rng))
+                    } else if rng.random_bool(0.5) {
+                        Some(Item::Medkit)
+                    } else {
+                        None
+                    };
+                    if let Some(item) = item {
+                        spawn_loot(&mut commands, item, pos.0, Some(LOOT_TTL));
+                    }
+                }
+                PropKind::Barrel => blasts.0.push(Blast {
+                    pos: pos.0,
+                    attacker: dmg.attacker,
+                    fuse: BLAST_FUSE,
+                }),
+                PropKind::Safe => {}
+            }
+            false
+        });
     });
 }

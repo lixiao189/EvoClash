@@ -16,6 +16,7 @@ use crate::effects::{Banner, BossBar, KillFeed};
 use crate::evo_panel::EvoPanelOpen;
 use crate::input::{LocalPlayer, Selection};
 use crate::render::UiFont;
+use crate::session::JoinNotice;
 use crate::textures::Textures;
 
 pub struct HudPlugin;
@@ -44,6 +45,10 @@ enum HudText {
     /// Name and health numbers above the boss bar.
     BossName,
 }
+
+/// The XP meter (bar behind the fill). Hidden in the lobby.
+#[derive(Component)]
+struct HideInLobby;
 
 /// The boss bar's root, and the part of it that drains.
 #[derive(Component)]
@@ -487,6 +492,7 @@ fn spawn_bottom_center(commands: &mut Commands, font: &UiFont) {
                 ))
                 .with_child(ui_text(font, 16.0, EvoUi::Level, GOLD));
                 row.spawn((
+                    HideInLobby,
                     Node {
                         width: Val::Px(240.0),
                         height: Val::Px(10.0),
@@ -517,17 +523,29 @@ fn spawn_bottom_center(commands: &mut Commands, font: &UiFont) {
 fn update_evolution_hud(
     time: Res<Time>,
     panel_open: Res<EvoPanelOpen>,
+    state: Query<&MatchState>,
     me: Query<(&Evolution, &SkillState, &Vitals), With<LocalPlayer>>,
-    mut ui: Query<(
-        &EvoUi,
-        Option<&mut Text>,
-        Option<&mut TextColor>,
-        &mut Node,
-        Option<&mut BorderColor>,
-        Option<&mut BackgroundColor>,
-    )>,
+    mut xp_bar: Query<&mut Node, (With<HideInLobby>, Without<EvoUi>)>,
+    mut ui: Query<
+        (
+            &EvoUi,
+            Option<&mut Text>,
+            Option<&mut TextColor>,
+            &mut Node,
+            Option<&mut BorderColor>,
+            Option<&mut BackgroundColor>,
+        ),
+        Without<HideInLobby>,
+    >,
 ) {
     let now = time.elapsed_secs();
+    let lobby = state.iter().any(|s| s.phase == Phase::Lobby);
+    let bar = if lobby { Display::None } else { Display::Flex };
+    for mut node in &mut xp_bar {
+        if node.display != bar {
+            node.display = bar;
+        }
+    }
     let default_evo = Evolution::default();
     let (evo, skills, alive) = me
         .single()
@@ -562,6 +580,7 @@ fn update_evolution_hud(
                 node.width = Val::Percent(100.0 * frac.clamp(0.0, 1.0));
             }
             EvoUi::XpText => {
+                node.display = if lobby { Display::None } else { Display::Flex };
                 let value = if evo.level >= MAX_LEVEL {
                     format!("{} XP  满级", evo.xp)
                 } else {
@@ -570,9 +589,14 @@ fn update_evolution_hud(
                 set_text(value, None);
             }
             EvoUi::Pending => {
-                let value = match evo.points {
-                    n if n > 0 && !panel_open.0 && alive => format!("进化点 ×{n} · Tab 加点"),
-                    _ => String::new(),
+                node.display = if lobby { Display::None } else { Display::Flex };
+                let value = if lobby {
+                    String::new()
+                } else {
+                    match evo.points {
+                        n if n > 0 && !panel_open.0 && alive => format!("进化点 ×{n} · Tab 加点"),
+                        _ => String::new(),
+                    }
                 };
                 set_text(value, Some(GOLD.with_alpha(blink)));
             }
@@ -687,6 +711,7 @@ fn update_hud(
     mut fill: Query<(&mut Node, &mut BackgroundColor), With<BossFill>>,
     mut texts: Query<(&HudText, &mut Text, &mut TextColor)>,
     assets: Res<PendingAssets>,
+    notice: Res<JoinNotice>,
 ) {
     let now = time.elapsed_secs();
     let me = me.single().ok();
@@ -728,7 +753,8 @@ fn update_hud(
                 }
                 None => String::new(),
             },
-            HudText::BossEta => match state.filter(|s| s.boss_eta > 0) {
+            HudText::BossEta => match state.filter(|s| s.phase == Phase::Playing && s.boss_eta > 0)
+            {
                 Some(s) => {
                     let blink = if s.boss_eta < 64 * 10 {
                         0.7 + 0.3 * (now * 8.0).sin()
@@ -764,41 +790,52 @@ fn update_hud(
                         stats.streak,
                     )
                 }
-                None => match &assets.state {
-                    Loading::Waiting => "加载资源中…".to_string(),
-                    Loading::Failed(path) => format!("资源加载失败：{path}\n请刷新页面重试"),
-                    Loading::Ready => "连接中…".to_string(),
-                },
+                None => {
+                    let connecting = match &assets.state {
+                        Loading::Waiting => "加载资源中…".to_string(),
+                        Loading::Failed(path) => format!("资源加载失败：{path}\n请刷新页面重试"),
+                        Loading::Ready => "连接中…".to_string(),
+                    };
+                    if notice.0.is_empty() {
+                        connecting
+                    } else {
+                        notice.0.clone()
+                    }
+                }
             },
             HudText::Clock => match state {
                 Some(s) => match s.phase {
-                    Phase::Warmup => {
-                        format!("热身 {}  (至少 2 名玩家开局)", fmt_time(s.ticks_left))
-                    }
+                    Phase::Lobby | Phase::Starting | Phase::Recovering => String::new(),
                     Phase::Playing => format!(
                         "剩余 {}    地堡开启 {}",
                         fmt_time(s.ticks_left),
                         fmt_time(s.vault_in)
                     ),
-                    Phase::Intermission => format!("下一局 {}", fmt_time(s.ticks_left)),
+                    Phase::Results => format!("下一局 {}", fmt_time(s.ticks_left)),
                 },
                 None => String::new(),
             },
             HudText::Scoreboard => {
-                let mut rows: Vec<(&Player, &Stats)> = players.iter().collect();
-                rows.sort_by(|a, b| b.1.score.cmp(&a.1.score).then(a.1.deaths.cmp(&b.1.deaths)));
-                let mut out = String::from("等级  分数  击杀/阵亡\n");
-                for (player, stats) in rows {
-                    let you = me.is_some_and(|(p, ..)| p.client_id == player.client_id);
-                    let bounty = if stats.has_bounty() { "★" } else { "" };
-                    let bot = if player.bot { "·" } else { "" };
-                    let arrow = if you { "▶ " } else { "" };
-                    out.push_str(&format!(
-                        "{arrow}{bounty}{}{bot}  Lv{}  {}  {}/{}\n",
-                        player.name, stats.level, stats.score, stats.kills, stats.deaths
-                    ));
+                if state.is_some_and(|s| s.phase == Phase::Lobby) {
+                    String::new()
+                } else {
+                    let mut rows: Vec<(&Player, &Stats)> = players.iter().collect();
+                    rows.sort_by(|a, b| {
+                        b.1.score.cmp(&a.1.score).then(a.1.deaths.cmp(&b.1.deaths))
+                    });
+                    let mut out = String::from("等级  分数  击杀/阵亡\n");
+                    for (player, stats) in rows {
+                        let you = me.is_some_and(|(p, ..)| p.client_id == player.client_id);
+                        let bounty = if stats.has_bounty() { "★" } else { "" };
+                        let bot = if player.bot { "·" } else { "" };
+                        let arrow = if you { "▶ " } else { "" };
+                        out.push_str(&format!(
+                            "{arrow}{bounty}{}{bot}  Lv{}  {}  {}/{}\n",
+                            player.name, stats.level, stats.score, stats.kills, stats.deaths
+                        ));
+                    }
+                    out
                 }
-                out
             }
             HudText::Feed => feed
                 .0
@@ -858,13 +895,17 @@ fn update_hud(
                     None => String::new(),
                 }
             }
-            HudText::Center => {
-                if let Some(s) = state.filter(|s| s.phase == Phase::Intermission) {
-                    format!("{} 获胜", s.winner.as_deref().unwrap_or("无人"))
-                } else {
-                    String::new()
-                }
-            }
+            HudText::Center => match state {
+                Some(s) => match s.phase {
+                    Phase::Results => {
+                        format!("{} 获胜", s.winner.as_deref().unwrap_or("无人"))
+                    }
+                    Phase::Lobby | Phase::Starting | Phase::Playing | Phase::Recovering => {
+                        String::new()
+                    }
+                },
+                None => String::new(),
+            },
         };
         if text.0 != value {
             text.0 = value;

@@ -8,6 +8,10 @@ const SWING_SWEEP: f32 = 0.12;
 const SWING_RECOVER: f32 = 0.14;
 /// The whole swing.
 pub const SWING_SECS: f32 = SWING_WINDUP + SWING_SWEEP + SWING_RECOVER;
+/// Gray "BOT" tag above a bot. The host crown stays unused until a host id is replicated.
+#[derive(Component)]
+pub(super) struct BotTag;
+
 /// Radians behind and past the aim the swing reaches.
 const SWING_BACK: f32 = 1.2;
 const SWING_THROUGH: f32 = 1.1;
@@ -111,6 +115,17 @@ pub(super) fn dress_player(
             TextColor(Color::srgba(1.0, 1.0, 1.0, 0.85)),
             Transform::from_xyz(0.0, SURVIVOR_HEIGHT + 16.0, Z_LABEL),
         ));
+    if player.bot {
+        commands.entity(trigger.entity).with_child((
+            BotTag,
+            Sprite::from_image(textures.bot_tag.clone()),
+            Transform {
+                translation: Vec3::new(0.0, SURVIVOR_HEIGHT + 36.0, Z_LABEL + Z_STEP),
+                scale: Vec3::splat(PIXEL),
+                ..default()
+            },
+        ));
+    }
 }
 
 pub(super) fn dress_pickup(
@@ -478,7 +493,8 @@ pub(super) fn tint_players(
         &Children,
         Has<LocalPlayer>,
     )>,
-    mut sprites: Query<(&mut Sprite, Has<GroundShadow>), Without<Player>>,
+    mut sprites: Query<(&mut Sprite, Has<GroundShadow>), (Without<Player>, Without<BotTag>)>,
+    mut tags: Query<&mut Sprite, With<BotTag>>,
     mut labels: Query<&mut TextColor, With<NameLabel>>,
 ) {
     let t = time.elapsed_secs();
@@ -520,6 +536,14 @@ pub(super) fn tint_players(
             };
             if sprite.color != color {
                 sprite.color = color;
+            }
+        }
+        for child in children.iter() {
+            if let Ok(mut sprite) = tags.get_mut(child) {
+                let color = Color::WHITE.with_alpha(alpha);
+                if sprite.color != color {
+                    sprite.color = color;
+                }
             }
         }
         for child in children.iter() {

@@ -67,202 +67,206 @@ pub(super) fn roam(
         &Vitals,
     )>,
     players: Query<(Entity, &Pos, &Vitals), (With<Player>, Without<Monster>)>,
+    rng: Res<crate::rng::SimRng>,
+    state: Query<&MatchState>,
 ) {
     let alive = prey(players.iter());
-    let mut rng = rand::rng();
-
-    // Each dog pack follows its lowest-slot member: (slot, position, heading).
-    let mut packs: HashMap<u32, (u8, Vec2, Vec2)> = HashMap::new();
-    for (_, monster, pos, brain, _, vitals) in &monsters {
-        if monster.kind != MonsterKind::Dog || brain.pack == 0 || !vitals.alive {
-            continue;
-        }
-        let entry = packs
-            .entry(brain.pack)
-            .or_insert((brain.slot, pos.0, brain.heading));
-        if brain.slot < entry.0 {
-            *entry = (brain.slot, pos.0, brain.heading);
-        }
-    }
-    let pack_prey: HashMap<u32, Vec2> = packs
-        .iter()
-        .filter_map(|(id, (_, at, _))| {
-            nearest(&alive, *at)
-                .filter(|(_, p, d)| *d < DOG_NOTICE && arena.line_of_sight(*at, *p))
-                .map(|(_, p, _)| (*id, p))
-        })
-        .collect();
-
-    for (entity, monster, mut pos, mut brain, mut state, vitals) in &mut monsters {
-        let kind = monster.kind;
-        if !vitals.alive || matches!(kind, MonsterKind::Behemoth | MonsterKind::SporePod) {
-            continue;
-        }
-        let near = nearest(&alive, pos.0);
-        brain.far = near.is_none_or(|(_, _, d)| d > FAR);
-        let step = if brain.far {
-            if !(tick.0.wrapping_add(entity.to_bits() as u32)).is_multiple_of(FAR_STRIDE) {
+    let playing = state.iter().any(|s| s.phase == Phase::Playing);
+    rng.with(playing, crate::rng::Stream::Monsters, |mut rng| {
+        // Each dog pack follows its lowest-slot member: (slot, position, heading).
+        let mut packs: HashMap<u32, (u8, Vec2, Vec2)> = HashMap::new();
+        for (_, monster, pos, brain, _, vitals) in &monsters {
+            if monster.kind != MonsterKind::Dog || brain.pack == 0 || !vitals.alive {
                 continue;
             }
-            FAR_STRIDE
-        } else {
-            1
-        };
-        let dt = DT * step as f32;
-        let at = pos.0;
-        let sees = |range: f32| near.filter(|(_, p, d)| *d < range && arena.line_of_sight(at, *p));
-        let speed = brain.speed_mult;
-        let s16 = step as u16;
-
-        let velocity = match kind {
-            // No pathfinding on purpose: a roach that sees you runs straight at you.
-            MonsterKind::Roach => match sees(ROACH_NOTICE) {
-                Some((_, p, _)) => (p - at).normalize_or_zero() * ROACH_CHARGE * speed,
-                None => wander(&mut brain, &mut rng, s16) * ROACH_WANDER * speed,
-            },
-            MonsterKind::Dog => {
-                let leader = packs.get(&brain.pack).copied();
-                match (pack_prey.get(&brain.pack).copied(), leader) {
-                    (Some(q), Some((_, lead_at, _))) => {
-                        // Members fan out ±60° around the leader's line of attack.
-                        let base = (lead_at - q).normalize_or(Vec2::X);
-                        let flank = DOG_FLANK[brain.slot as usize % DOG_FLANK.len()];
-                        let target = if at.distance(q) > 110.0 {
-                            q + Vec2::from_angle(flank).rotate(base) * 70.0
-                        } else {
-                            q
-                        };
-                        (target - at).normalize_or_zero() * DOG_CHARGE * speed
-                    }
-                    (None, Some((slot, lead_at, heading))) if slot != brain.slot => {
-                        // Trot after the leader.
-                        brain.heading = heading;
-                        let spot = lead_at + Vec2::from_angle(brain.slot as f32 * 2.1) * 45.0;
-                        if spot.distance(at) > 30.0 {
-                            (spot - at).normalize_or_zero() * DOG_WANDER * speed
-                        } else {
-                            Vec2::ZERO
-                        }
-                    }
-                    _ => wander(&mut brain, &mut rng, s16) * DOG_WANDER * speed,
-                }
+            let entry = packs
+                .entry(brain.pack)
+                .or_insert((brain.slot, pos.0, brain.heading));
+            if brain.slot < entry.0 {
+                *entry = (brain.slot, pos.0, brain.heading);
             }
-            MonsterKind::Ghoul => {
-                let armed = state.action == MonsterAction::Arming;
-                match near.filter(|_| armed).or_else(|| sees(GHOUL_NOTICE)) {
-                    Some((_, p, _)) => {
-                        let s = if armed { 0.6 } else { 1.0 };
-                        (p - at).normalize_or_zero() * GHOUL_CHARGE * speed * s
-                    }
-                    None => wander(&mut brain, &mut rng, s16) * GHOUL_WANDER * speed,
-                }
-            }
-            MonsterKind::Spitter => match sees(SPITTER_RANGE) {
-                Some((_, p, d)) => {
-                    let to = (p - at).normalize_or_zero();
-                    if rng.random_bool(0.01) {
-                        brain.heading = -brain.heading;
-                    }
-                    let dir = if d < 260.0 {
-                        -to
-                    } else if d > 480.0 {
-                        to
-                    } else {
-                        to.perp() * brain.heading.x.signum() * 0.6
-                    };
-                    dir * SPITTER_SPEED * speed
-                }
-                None => wander(&mut brain, &mut rng, s16) * SPITTER_SPEED * speed,
-            },
-            MonsterKind::Crawler => {
-                let (want, max) = match sees(CRAWLER_NOTICE) {
-                    Some((_, p, _)) => ((p - at).normalize_or(brain.heading), CRAWLER_CHARGE),
-                    None => (wander(&mut brain, &mut rng, s16), CRAWLER_WANDER),
-                };
-                // Heavy shell: it turns slowly, so flanking it is the way in.
-                let diff = wrap_angle(want.to_angle() - brain.facing);
-                let turn = CRAWLER_TURN * dt;
-                brain.facing = wrap_angle(brain.facing + diff.clamp(-turn, turn));
-                Vec2::from_angle(brain.facing) * max * speed * diff.cos().max(0.2)
-            }
-            MonsterKind::Raider => {
-                raider_think(
-                    &mut brain,
-                    at,
-                    &alive,
-                    &arena,
-                    nav.as_deref(),
-                    &mut rng,
-                    s16,
-                );
-                brain.move_dir * RAIDER_SPEED
-            }
-            MonsterKind::Drone => match sees(DRONE_RANGE + 100.0) {
-                Some((_, p, d)) => {
-                    let to = (p - at).normalize_or_zero();
-                    let dir = if d > 300.0 {
-                        to
-                    } else if d < 200.0 {
-                        -to
-                    } else {
-                        to.perp() * brain.heading.y.signum()
-                    };
-                    dir * DRONE_SPEED * speed
-                }
-                None => wander(&mut brain, &mut rng, s16) * DRONE_SPEED * speed,
-            },
-            MonsterKind::SporePod | MonsterKind::Behemoth => continue,
-        };
-
-        let radius = kind.radius();
-        // Look ahead and turn along walls rather than into them (crawlers turn on their own).
-        let velocity = if kind.flies() || kind == MonsterKind::Crawler {
-            velocity
-        } else {
-            let steered = steer_clear(&arena, &obstacles.0, at, velocity, radius, 2.0 * radius);
-            // A wanderer keeps the new heading instead of swinging back into the wall.
-            if steered != velocity && velocity.normalize_or_zero().dot(brain.heading) > 0.99 {
-                brain.heading = steered.normalize_or(brain.heading);
-            }
-            steered
-        };
-        let want = at + velocity * dt;
-        let next = if kind.flies() {
-            // Flies over walls and props, but stays near home and never over a roof.
-            let leashed = brain.home + (want - brain.home).clamp_length_max(DRONE_LEASH);
-            let clamped = leashed.clamp(-ARENA_HALF + radius, ARENA_HALF - radius);
-            if over_building(&arena, clamped, radius) {
-                brain.turn_in = 0;
-                at
-            } else {
-                if clamped.distance_squared(want) > 1.0 {
-                    brain.turn_in = 0;
-                }
-                clamped
-            }
-        } else {
-            let next = arena.resolve_with(want, radius, &obstacles.0);
-            if next.distance_squared(want) > 1.0 {
-                // Bumped into something: head off away from it, not just anywhere.
-                let away = (next - want).normalize_or(-brain.heading);
-                brain.heading = Vec2::from_angle(rng.random_range(-1.2..1.2)).rotate(away);
-                brain.turn_in = rng.random_range(40..160);
-            }
-            next
-        };
-        if next != at {
-            pos.0 = next;
         }
-        let facing = match kind {
-            MonsterKind::Crawler => brain.facing,
-            MonsterKind::Raider => brain.aim.to_angle(),
-            _ if velocity.length_squared() > 1.0 => velocity.to_angle(),
-            _ => state.facing,
-        };
-        brain.facing = facing;
-        let new = MonsterState { facing, ..*state };
-        set_state(&mut state, new);
-    }
+        let pack_prey: HashMap<u32, Vec2> = packs
+            .iter()
+            .filter_map(|(id, (_, at, _))| {
+                nearest(&alive, *at)
+                    .filter(|(_, p, d)| *d < DOG_NOTICE && arena.line_of_sight(*at, *p))
+                    .map(|(_, p, _)| (*id, p))
+            })
+            .collect();
+
+        for (entity, monster, mut pos, mut brain, mut state, vitals) in &mut monsters {
+            let kind = monster.kind;
+            if !vitals.alive || matches!(kind, MonsterKind::Behemoth | MonsterKind::SporePod) {
+                continue;
+            }
+            let near = nearest(&alive, pos.0);
+            brain.far = near.is_none_or(|(_, _, d)| d > FAR);
+            let step = if brain.far {
+                if !(tick.0.wrapping_add(entity.to_bits() as u32)).is_multiple_of(FAR_STRIDE) {
+                    continue;
+                }
+                FAR_STRIDE
+            } else {
+                1
+            };
+            let dt = DT * step as f32;
+            let at = pos.0;
+            let sees =
+                |range: f32| near.filter(|(_, p, d)| *d < range && arena.line_of_sight(at, *p));
+            let speed = brain.speed_mult;
+            let s16 = step as u16;
+
+            let velocity = match kind {
+                // No pathfinding on purpose: a roach that sees you runs straight at you.
+                MonsterKind::Roach => match sees(ROACH_NOTICE) {
+                    Some((_, p, _)) => (p - at).normalize_or_zero() * ROACH_CHARGE * speed,
+                    None => wander(&mut brain, &mut rng, s16) * ROACH_WANDER * speed,
+                },
+                MonsterKind::Dog => {
+                    let leader = packs.get(&brain.pack).copied();
+                    match (pack_prey.get(&brain.pack).copied(), leader) {
+                        (Some(q), Some((_, lead_at, _))) => {
+                            // Members fan out ±60° around the leader's line of attack.
+                            let base = (lead_at - q).normalize_or(Vec2::X);
+                            let flank = DOG_FLANK[brain.slot as usize % DOG_FLANK.len()];
+                            let target = if at.distance(q) > 110.0 {
+                                q + Vec2::from_angle(flank).rotate(base) * 70.0
+                            } else {
+                                q
+                            };
+                            (target - at).normalize_or_zero() * DOG_CHARGE * speed
+                        }
+                        (None, Some((slot, lead_at, heading))) if slot != brain.slot => {
+                            // Trot after the leader.
+                            brain.heading = heading;
+                            let spot = lead_at + Vec2::from_angle(brain.slot as f32 * 2.1) * 45.0;
+                            if spot.distance(at) > 30.0 {
+                                (spot - at).normalize_or_zero() * DOG_WANDER * speed
+                            } else {
+                                Vec2::ZERO
+                            }
+                        }
+                        _ => wander(&mut brain, &mut rng, s16) * DOG_WANDER * speed,
+                    }
+                }
+                MonsterKind::Ghoul => {
+                    let armed = state.action == MonsterAction::Arming;
+                    match near.filter(|_| armed).or_else(|| sees(GHOUL_NOTICE)) {
+                        Some((_, p, _)) => {
+                            let s = if armed { 0.6 } else { 1.0 };
+                            (p - at).normalize_or_zero() * GHOUL_CHARGE * speed * s
+                        }
+                        None => wander(&mut brain, &mut rng, s16) * GHOUL_WANDER * speed,
+                    }
+                }
+                MonsterKind::Spitter => match sees(SPITTER_RANGE) {
+                    Some((_, p, d)) => {
+                        let to = (p - at).normalize_or_zero();
+                        if rng.random_bool(0.01) {
+                            brain.heading = -brain.heading;
+                        }
+                        let dir = if d < 260.0 {
+                            -to
+                        } else if d > 480.0 {
+                            to
+                        } else {
+                            to.perp() * brain.heading.x.signum() * 0.6
+                        };
+                        dir * SPITTER_SPEED * speed
+                    }
+                    None => wander(&mut brain, &mut rng, s16) * SPITTER_SPEED * speed,
+                },
+                MonsterKind::Crawler => {
+                    let (want, max) = match sees(CRAWLER_NOTICE) {
+                        Some((_, p, _)) => ((p - at).normalize_or(brain.heading), CRAWLER_CHARGE),
+                        None => (wander(&mut brain, &mut rng, s16), CRAWLER_WANDER),
+                    };
+                    // Heavy shell: it turns slowly, so flanking it is the way in.
+                    let diff = wrap_angle(want.to_angle() - brain.facing);
+                    let turn = CRAWLER_TURN * dt;
+                    brain.facing = wrap_angle(brain.facing + diff.clamp(-turn, turn));
+                    Vec2::from_angle(brain.facing) * max * speed * diff.cos().max(0.2)
+                }
+                MonsterKind::Raider => {
+                    raider_think(
+                        &mut brain,
+                        at,
+                        &alive,
+                        &arena,
+                        nav.as_deref(),
+                        &mut rng,
+                        s16,
+                    );
+                    brain.move_dir * RAIDER_SPEED
+                }
+                MonsterKind::Drone => match sees(DRONE_RANGE + 100.0) {
+                    Some((_, p, d)) => {
+                        let to = (p - at).normalize_or_zero();
+                        let dir = if d > 300.0 {
+                            to
+                        } else if d < 200.0 {
+                            -to
+                        } else {
+                            to.perp() * brain.heading.y.signum()
+                        };
+                        dir * DRONE_SPEED * speed
+                    }
+                    None => wander(&mut brain, &mut rng, s16) * DRONE_SPEED * speed,
+                },
+                MonsterKind::SporePod | MonsterKind::Behemoth => continue,
+            };
+
+            let radius = kind.radius();
+            // Look ahead and turn along walls rather than into them (crawlers turn on their own).
+            let velocity = if kind.flies() || kind == MonsterKind::Crawler {
+                velocity
+            } else {
+                let steered = steer_clear(&arena, &obstacles.0, at, velocity, radius, 2.0 * radius);
+                // A wanderer keeps the new heading instead of swinging back into the wall.
+                if steered != velocity && velocity.normalize_or_zero().dot(brain.heading) > 0.99 {
+                    brain.heading = steered.normalize_or(brain.heading);
+                }
+                steered
+            };
+            let want = at + velocity * dt;
+            let next = if kind.flies() {
+                // Flies over walls and props, but stays near home and never over a roof.
+                let leashed = brain.home + (want - brain.home).clamp_length_max(DRONE_LEASH);
+                let clamped = leashed.clamp(-ARENA_HALF + radius, ARENA_HALF - radius);
+                if over_building(&arena, clamped, radius) {
+                    brain.turn_in = 0;
+                    at
+                } else {
+                    if clamped.distance_squared(want) > 1.0 {
+                        brain.turn_in = 0;
+                    }
+                    clamped
+                }
+            } else {
+                let next = arena.resolve_with(want, radius, &obstacles.0);
+                if next.distance_squared(want) > 1.0 {
+                    // Bumped into something: head off away from it, not just anywhere.
+                    let away = (next - want).normalize_or(-brain.heading);
+                    brain.heading = Vec2::from_angle(rng.random_range(-1.2..1.2)).rotate(away);
+                    brain.turn_in = rng.random_range(40..160);
+                }
+                next
+            };
+            if next != at {
+                pos.0 = next;
+            }
+            let facing = match kind {
+                MonsterKind::Crawler => brain.facing,
+                MonsterKind::Raider => brain.aim.to_angle(),
+                _ if velocity.length_squared() > 1.0 => velocity.to_angle(),
+                _ => state.facing,
+            };
+            brain.facing = facing;
+            let new = MonsterState { facing, ..*state };
+            set_state(&mut state, new);
+        }
+    });
 }
 
 /// Raiders hold their block: fight whoever comes close or shoots them, otherwise patrol.

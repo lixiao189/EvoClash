@@ -225,8 +225,8 @@ impl Brain {
         turf: Rect,
         pack: u32,
         slot: u8,
+        rng: &mut impl Rng,
     ) -> Self {
-        let mut rng = rand::rng();
         let heading = Vec2::from_angle(rng.random_range(0.0..TAU));
         Self {
             heading,

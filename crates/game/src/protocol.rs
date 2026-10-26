@@ -427,17 +427,24 @@ pub struct Pickup {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Reflect, Default)]
 pub enum Phase {
     #[default]
-    Warmup,
+    Lobby,
+    Starting,
     Playing,
-    Intermission,
+    Results,
+    /// On the wire for crash recovery. The server never enters it in this phase.
+    Recovering,
 }
 
 /// Singleton describing the match clock.
 #[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Reflect, Default)]
 pub struct MatchState {
     pub phase: Phase,
-    /// Ticks left in the current phase.
+    /// Ticks left in the current phase. In a lobby this is the countdown (0 if it has not started).
     pub ticks_left: u32,
+    /// Lobby only: the public 20s countdown is running (the last 3s of it are `Starting`).
+    pub countdown_active: bool,
+    /// Round inside this room process. The first lobby is 0; each return from results adds 1.
+    pub match_index: u32,
     /// Ticks until the vault opens and spits out apex tech.
     pub vault_in: u32,
     pub winner: Option<String>,

@@ -32,6 +32,28 @@ pub struct MatchInfo {
     pub last_heartbeat: Option<Instant>,
     /// Join tokens issued recently, so concurrent joins don't overfill a match.
     reservations: Vec<Instant>,
+    pub phase: String,
+    pub phase_left_secs: Option<u32>,
+    pub humans: u32,
+    pub bots: u32,
+    pub is_private: bool,
+    pub room_code: Option<String>,
+    pub room_seed: u64,
+    pub match_index: u32,
+    /// `none` | `lobby`. Trusted from the server; not re-derived here.
+    pub join_mode: String,
+    pub exiting: bool,
+}
+
+/// What `POST /v1/join` should do with an optional `match_id`.
+pub enum JoinPlan {
+    Seat(String, SocketAddr),
+    Started,
+    Starting {
+        retry_after: u32,
+    },
+    /// Unknown id, or a lobby that is simply full: quick start.
+    Quick,
 }
 
 #[derive(Serialize)]
@@ -61,6 +83,17 @@ impl MatchInfo {
             launched_at: Instant::now(),
             last_heartbeat: None,
             reservations: Vec::new(),
+            // A process we just launched boots into a public lobby. Heartbeats overwrite this.
+            phase: "lobby".into(),
+            phase_left_secs: None,
+            humans: 0,
+            bots: 0,
+            is_private: false,
+            room_code: None,
+            room_seed: 0,
+            match_index: 0,
+            join_mode: "lobby".into(),
+            exiting: false,
         }
     }
 
@@ -87,6 +120,7 @@ impl MatchInfo {
             && self.accepting
             && !self.draining
             && !self.overloaded()
+            && self.join_mode == "lobby"
             && self.free_seats(now) > 0
     }
 
@@ -96,27 +130,69 @@ impl MatchInfo {
     }
 }
 
+/// Larger remaining time first. `None` (countdown not started) sorts last.
+fn cmp_time_left(a: Option<u32>, b: Option<u32>) -> std::cmp::Ordering {
+    match (a, b) {
+        (Some(x), Some(y)) => y.cmp(&x),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
 #[derive(Default)]
 pub struct Registry {
     pub matches: HashMap<String, MatchInfo>,
 }
 
 impl Registry {
-    /// Pick the fullest joinable match (fills lobbies quickly instead of spreading players thin)
-    /// and reserve a seat in it.
+    /// Quick start: open lobbies only. More humans first; equal humans, more time left;
+    /// a countdown that has not started sorts last among that human count.
     pub fn reserve_seat(&mut self) -> Option<(String, SocketAddr)> {
         let now = Instant::now();
-        let best = self
-            .matches
-            .values_mut()
-            .filter_map(|m| {
-                m.joinable(now)
-                    .then(|| (m.players + m.reservations.len() as u32, m))
-            })
-            .max_by_key(|(occupancy, _)| *occupancy)
-            .map(|(_, m)| m)?;
-        best.reservations.push(now);
-        Some((best.id.clone(), best.addr))
+        let mut ids: Vec<String> = self.matches.keys().cloned().collect();
+        ids.sort_by(|a, b| {
+            let (left_a, humans_a) = {
+                let m = &self.matches[a];
+                (m.phase_left_secs, m.humans)
+            };
+            let (left_b, humans_b) = {
+                let m = &self.matches[b];
+                (m.phase_left_secs, m.humans)
+            };
+            humans_b
+                .cmp(&humans_a)
+                .then_with(|| cmp_time_left(left_a, left_b))
+                .then_with(|| a.cmp(b))
+        });
+        let id = ids
+            .into_iter()
+            .find(|id| self.matches.get_mut(id).is_some_and(|m| m.joinable(now)))?;
+        let m = self.matches.get_mut(&id)?;
+        m.reservations.push(now);
+        Some((m.id.clone(), m.addr))
+    }
+
+    /// A named match. `started` / `starting` only when that match exists and is not a quick start.
+    pub fn plan_join(&mut self, match_id: Option<&str>) -> JoinPlan {
+        let now = Instant::now();
+        if let Some(id) = match_id.map(str::trim).filter(|id| !id.is_empty())
+            && let Some(m) = self.matches.get_mut(id)
+        {
+            if m.joinable(now) {
+                let addr = m.addr;
+                m.reservations.push(now);
+                return JoinPlan::Seat(id.to_string(), addr);
+            }
+            let retry_after = m.phase_left_secs.unwrap_or(0);
+            if m.phase == "starting" || (m.phase == "lobby" && m.join_mode != "lobby") {
+                return JoinPlan::Starting { retry_after };
+            }
+            if matches!(m.phase.as_str(), "playing" | "results" | "recovering") {
+                return JoinPlan::Started;
+            }
+        }
+        JoinPlan::Quick
     }
 
     pub fn reserve_in(&mut self, id: &str) -> Option<SocketAddr> {
@@ -148,6 +224,16 @@ impl Registry {
         entry.max_players = beat.max_players;
         entry.accepting = beat.accepting;
         entry.tick_us = beat.tick_us;
+        entry.phase = beat.phase.clone();
+        entry.phase_left_secs = beat.phase_left_secs;
+        entry.humans = beat.humans;
+        entry.bots = beat.bots;
+        entry.is_private = beat.is_private;
+        entry.room_code = beat.room_code.clone();
+        entry.room_seed = beat.room_seed;
+        entry.match_index = beat.match_index;
+        entry.join_mode = beat.join_mode.clone();
+        entry.exiting = beat.exiting;
         entry.last_heartbeat = Some(now);
         entry.draining
     }
@@ -218,6 +304,16 @@ mod tests {
             max_players: 2,
             accepting: true,
             tick_us: 100,
+            phase: "lobby".into(),
+            phase_left_secs: None,
+            humans: players,
+            bots: 0,
+            is_private: false,
+            room_code: None,
+            room_seed: 1,
+            match_index: 0,
+            join_mode: "lobby".into(),
+            exiting: false,
         }
     }
 
@@ -266,6 +362,62 @@ mod tests {
         assert_eq!(reg.idle_matches(), 1);
         reg.reserve_in("a");
         assert_eq!(reg.idle_matches(), 0, "a reserved seat means it is taken");
+    }
+
+    #[test]
+    fn quick_start_orders_humans_then_time_left_and_skips_closed_rooms() {
+        let mut reg = Registry::default();
+        let mut a = beat("a", 1);
+        a.phase_left_secs = Some(20);
+        a.max_players = 2;
+        let mut b = beat("b", 1);
+        b.phase_left_secs = Some(12);
+        b.max_players = 2;
+        let mut c = beat("c", 1);
+        c.phase_left_secs = None;
+        c.max_players = 2;
+        let mut d = beat("d", 2);
+        d.humans = 2;
+        d.phase_left_secs = Some(9);
+        d.max_players = 3;
+        let mut closed = beat("e", 3);
+        closed.humans = 3;
+        closed.join_mode = "none".into();
+        closed.phase = "playing".into();
+        closed.max_players = 8;
+        for beat in [a, b, c, d, closed] {
+            reg.heartbeat(&beat);
+        }
+        assert_eq!(reg.reserve_seat().unwrap().0, "d");
+        assert_eq!(reg.reserve_seat().unwrap().0, "a");
+        assert_eq!(reg.reserve_seat().unwrap().0, "b");
+        assert_eq!(reg.reserve_seat().unwrap().0, "c");
+        assert!(
+            reg.reserve_seat().is_none(),
+            "join_mode none is never a candidate"
+        );
+    }
+
+    #[test]
+    fn named_match_reports_started_or_starting_and_unknown_is_quick() {
+        let mut reg = Registry::default();
+        let mut playing = beat("play", 2);
+        playing.phase = "playing".into();
+        playing.join_mode = "none".into();
+        playing.phase_left_secs = Some(100);
+        let mut starting = beat("go", 1);
+        starting.phase = "starting".into();
+        starting.join_mode = "none".into();
+        starting.phase_left_secs = Some(2);
+        reg.heartbeat(&playing);
+        reg.heartbeat(&starting);
+        assert!(matches!(reg.plan_join(Some("play")), JoinPlan::Started));
+        assert!(matches!(
+            reg.plan_join(Some("go")),
+            JoinPlan::Starting { retry_after: 2 }
+        ));
+        assert!(matches!(reg.plan_join(Some("missing")), JoinPlan::Quick));
+        assert!(matches!(reg.plan_join(None), JoinPlan::Quick));
     }
 
     #[test]

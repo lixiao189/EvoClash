@@ -1,0 +1,6 @@
+disallowed-methods = [
+    { path = "rand::rng", reason = "use SimRng streams; the only OS draw is the startup room seed" },
+    { path = "rand::random", reason = "use SimRng streams; the only OS draw is the startup room seed" },
+    { path = "rand::thread_rng", reason = "use SimRng streams; the only OS draw is the startup room seed" },
+    { path = "rand::random_range", reason = "use SimRng streams; the only OS draw is the startup room seed" },
+]

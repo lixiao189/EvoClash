@@ -70,114 +70,122 @@ pub(super) fn resolve_monster_damage(
     positions: Query<&Pos>,
     mut blasts: ResMut<GhoulBlasts>,
     mut boss: ResMut<BossState>,
+    state: Query<&MatchState>,
+    rng: Res<crate::rng::SimRng>,
 ) {
-    let mut rng = rand::rng();
-    queue.0.retain(|dmg| {
-        let Ok((monster, pos, mut vitals, mut brain, mstate)) = monsters.get_mut(dmg.target) else {
-            return true;
-        };
-        if !vitals.alive {
-            return false;
-        }
-        let player_attacker = dmg.attacker.filter(|a| players.contains(*a));
-        let mut amount = dmg.amount;
-        match monster.kind {
-            MonsterKind::Crawler => {
-                if let Some(from) = dmg.attacker.and_then(|a| positions.get(a).ok()) {
-                    amount *= crawler_mult(mstate.facing, from.0 - pos.0);
-                }
-            }
-            MonsterKind::Raider => brain.provoked = RAIDER_PROVOKED,
-            MonsterKind::Behemoth => {
-                if let Some(attacker) = player_attacker {
-                    let mine = players.get(attacker).map_or(0, |(.., s)| s.score);
-                    let best_other = players
-                        .iter()
-                        .filter(|(e, ..)| *e != attacker)
-                        .map(|(.., s)| s.score)
-                        .max()
-                        .unwrap_or(0);
-                    amount *= boss::damage_mult(mine, best_other);
-                }
-            }
-            _ => {}
-        }
-        let amount = amount.min(vitals.hp);
-        vitals.hp -= amount;
-        if monster.kind == MonsterKind::Behemoth
-            && let Some(attacker) = player_attacker
-        {
-            boss.credit(attacker, amount);
-        }
-        outbox.fast.push(GameEvent::Hit {
-            pos: pos.0,
-            amount,
-            armor: false,
-            attacker: dmg
-                .attacker
-                .and_then(|a| players.get(a).ok())
-                .map_or(0, |(_, p, _)| p.client_id),
-        });
-        if let Some(by) = dmg.attacker {
-            let melee = dmg.cause.is_none() && dmg.weapon.is_some_and(|w| w.melee().is_some());
-            dealt.0.push(Hit {
-                attacker: by,
-                amount,
-                melee,
-            });
-        }
-        if vitals.hp > 0.0 {
-            return false;
-        }
-        vitals.alive = false;
-        commands.entity(dmg.target).despawn();
-        if monster.kind == MonsterKind::Behemoth {
-            // Rewards are handed out by `boss::reward`.
-            boss.slain(pos.0);
-            return false;
-        }
-        if monster.kind == MonsterKind::Ghoul {
-            blasts.0.push(PendingBlast {
-                pos: pos.0,
-                attacker: dmg.attacker,
-                source: dmg.target,
-                damage: GHOUL_BLAST * brain.damage_mult,
-            });
-        }
-        let items = drops(*monster, &brain, &mut rng);
-        let n = items.len();
-        for (i, item) in items.into_iter().enumerate() {
-            let offset = if n > 1 {
-                Vec2::from_angle(i as f32 * TAU / n as f32) * 16.0
-            } else {
-                Vec2::ZERO
+    let playing = state.iter().any(|s| s.phase == Phase::Playing);
+    rng.with(playing, crate::rng::Stream::Monsters, |mut rng| {
+        queue.0.retain(|dmg| {
+            let Ok((monster, pos, mut vitals, mut brain, mstate)) = monsters.get_mut(dmg.target)
+            else {
+                return true;
             };
-            spawn_loot(&mut commands, item, pos.0 + offset, Some(LOOT_TTL));
-        }
-        if let Some(by) = dmg.attacker {
-            // Non-players (raiders) are skipped by `grant_xp`.
-            xp.0.push(XpAward {
-                to: by,
-                base: monster.xp(),
-                pos: pos.0,
-                loot: false,
-                scrap: monster_scrap(monster.kind) * if monster.elite { ELITE_XP_MULT } else { 1 },
-            });
-        }
-        if let Some(killer) = player_attacker
-            && let Ok((_, player, mut stats)) = players.get_mut(killer)
-        {
-            let points = monster.score();
-            if points > 0 {
-                stats.score += points;
-                outbox.announce(format!(
-                    "{} 击杀了{}，+{points} 分",
-                    player.name,
-                    monster.display_name()
-                ));
+            if !vitals.alive {
+                return false;
             }
-        }
-        false
+            let player_attacker = dmg.attacker.filter(|a| players.contains(*a));
+            let mut amount = dmg.amount;
+            match monster.kind {
+                MonsterKind::Crawler => {
+                    if let Some(from) = dmg.attacker.and_then(|a| positions.get(a).ok()) {
+                        amount *= crawler_mult(mstate.facing, from.0 - pos.0);
+                    }
+                }
+                MonsterKind::Raider => brain.provoked = RAIDER_PROVOKED,
+                MonsterKind::Behemoth => {
+                    if let Some(attacker) = player_attacker {
+                        let mine = players.get(attacker).map_or(0, |(.., s)| s.score);
+                        let best_other = players
+                            .iter()
+                            .filter(|(e, ..)| *e != attacker)
+                            .map(|(.., s)| s.score)
+                            .max()
+                            .unwrap_or(0);
+                        amount *= boss::damage_mult(mine, best_other);
+                    }
+                }
+                _ => {}
+            }
+            let amount = amount.min(vitals.hp);
+            vitals.hp -= amount;
+            if monster.kind == MonsterKind::Behemoth
+                && let Some(attacker) = player_attacker
+            {
+                boss.credit(attacker, amount);
+            }
+            outbox.fast.push(GameEvent::Hit {
+                pos: pos.0,
+                amount,
+                armor: false,
+                attacker: dmg
+                    .attacker
+                    .and_then(|a| players.get(a).ok())
+                    .map_or(0, |(_, p, _)| p.client_id),
+            });
+            if let Some(by) = dmg.attacker {
+                let melee = dmg.cause.is_none() && dmg.weapon.is_some_and(|w| w.melee().is_some());
+                dealt.0.push(Hit {
+                    attacker: by,
+                    amount,
+                    melee,
+                });
+            }
+            if vitals.hp > 0.0 {
+                return false;
+            }
+            vitals.alive = false;
+            commands.entity(dmg.target).despawn();
+            if monster.kind == MonsterKind::Behemoth {
+                // Rewards are handed out by `boss::reward`.
+                boss.slain(pos.0);
+                return false;
+            }
+            if monster.kind == MonsterKind::Ghoul {
+                blasts.0.push(PendingBlast {
+                    pos: pos.0,
+                    attacker: dmg.attacker,
+                    source: dmg.target,
+                    damage: GHOUL_BLAST * brain.damage_mult,
+                });
+            }
+            let items = drops(*monster, &brain, &mut rng);
+            let n = items.len();
+            for (i, item) in items.into_iter().enumerate() {
+                let offset = if n > 1 {
+                    Vec2::from_angle(i as f32 * TAU / n as f32) * 16.0
+                } else {
+                    Vec2::ZERO
+                };
+                spawn_loot(&mut commands, item, pos.0 + offset, Some(LOOT_TTL));
+            }
+            if playing {
+                if let Some(by) = dmg.attacker {
+                    // Non-players (raiders) are skipped by `grant_xp`.
+                    xp.0.push(XpAward {
+                        to: by,
+                        base: monster.xp(),
+                        pos: pos.0,
+                        loot: false,
+                        scrap: monster_scrap(monster.kind)
+                            * if monster.elite { ELITE_XP_MULT } else { 1 },
+                    });
+                }
+                if let Some(killer) = player_attacker
+                    && let Ok((_, player, mut stats)) = players.get_mut(killer)
+                {
+                    let points = monster.score();
+                    if points > 0 {
+                        stats.score += points;
+                        outbox.announce(format!(
+                            "{} 击杀了{}，+{points} 分",
+                            player.name,
+                            monster.display_name()
+                        ));
+                    }
+                }
+            }
+            false
+        });
     });
 }
 

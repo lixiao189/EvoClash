@@ -2,7 +2,7 @@
 
 use bevy::prelude::*;
 use evoclash_game::evolution::{Evolution, SkillState};
-use evoclash_game::protocol::{Dash, PlayerInput, Pos, Prop, Vitals};
+use evoclash_game::protocol::{Dash, MatchState, Phase, PlayerInput, Pos, Prop, Vitals};
 use evoclash_game::sim::{self, Arena, Obstacles};
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::*;
@@ -47,6 +47,7 @@ fn track_obstacles(
 fn predicted_movement(
     arena: Res<Arena>,
     obstacles: Res<Obstacles>,
+    state: Query<&MatchState>,
     mut players: Query<
         (
             &mut Pos,
@@ -59,14 +60,28 @@ fn predicted_movement(
         With<Predicted>,
     >,
 ) {
+    // Starting freezes everyone. Zero the same axes the server clears before `step_movement`
+    // (`gameplay/movement.rs`); a copy so the input we send is unchanged.
+    let frozen = state.iter().any(|s| s.phase == Phase::Starting);
     // Perks and skills change speed; use the server's numbers or a speed perk would rubber-band.
     for (pos, dash, action, vitals, evo, skills) in &mut players {
         let evo = evo.cloned().unwrap_or_default();
         let skills = skills.copied().unwrap_or_default();
+        let mut input = action.0.clone();
+        if frozen {
+            input.move_x = 0;
+            input.move_y = 0;
+            input.fire = false;
+            input.dash = false;
+            input.interact = false;
+            input.throw = false;
+            input.skill_a = false;
+            input.skill_b = false;
+        }
         sim::step_movement(
             pos,
             dash,
-            &action.0,
+            &input,
             vitals,
             &evo,
             &skills,

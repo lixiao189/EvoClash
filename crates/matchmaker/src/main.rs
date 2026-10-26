@@ -35,7 +35,7 @@ use serde_json::json;
 use tower_http::services::ServeDir;
 
 use crate::fleet::{Fleet, FleetConfig};
-use crate::registry::{MatchInfo, Registry};
+use crate::registry::{JoinPlan, MatchInfo, Registry};
 
 struct AppState {
     registry: Mutex<Registry>,
@@ -51,9 +51,34 @@ struct AppState {
 
 type Shared = Arc<AppState>;
 
-fn error(status: StatusCode, message: impl Into<String>) -> Response {
-    (status, Json(json!({ "error": message.into() }))).into_response()
+fn error(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
+    (
+        status,
+        Json(json!({ "error": code, "message": message.into() })),
+    )
+        .into_response()
 }
+
+fn error_retry(
+    status: StatusCode,
+    code: &str,
+    message: impl Into<String>,
+    retry_after: u32,
+) -> Response {
+    (
+        status,
+        Json(json!({
+            "error": code,
+            "message": message.into(),
+            "retry_after": retry_after,
+        })),
+    )
+        .into_response()
+}
+
+const BUSY: &str = "服务器繁忙，请稍后再试。";
+const STARTED: &str = "这局已经开始，正在为你寻找新的房间…";
+const STARTING: &str = "房间正在开局，请稍候。";
 
 /// A freshly launched server has no certificate hash until its first heartbeat (well under a
 /// second after start); browsers can't connect without it, so hold the reply until it arrives.
@@ -82,10 +107,7 @@ async fn issue(
     name: &str,
 ) -> Response {
     let Some(cert_digest) = cert_digest(state, &match_id).await else {
-        return error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "match server did not start",
-        );
+        return error(StatusCode::SERVICE_UNAVAILABLE, "busy", BUSY);
     };
     match tokens::connect_token(&state.key, addr, client_id, name) {
         Ok(connect_token) => Json(JoinResponse {
@@ -97,7 +119,7 @@ async fn issue(
             connect_token,
         })
         .into_response(),
-        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal", e),
     }
 }
 
@@ -122,28 +144,50 @@ async fn join(State(state): State<Shared>, Json(request): Json<JoinRequest>) -> 
     // Ids below the bot range, never zero.
     let client_id = rand::random_range(1..u64::MAX - (1 << 32));
 
+    enum Seat {
+        Ready(String, SocketAddr),
+        Deny(Response),
+        Busy,
+    }
     let seat = {
         let mut registry = state.registry.lock().expect("registry lock");
-        match registry.reserve_seat() {
-            Some(seat) => Ok(seat),
-            None => match &state.fleet {
-                Some(fleet) => launch(&mut registry, fleet).map(|(id, addr)| {
-                    registry.reserve_in(&id);
-                    (id, addr)
-                }),
-                None => Err("no match with free seats".to_string()),
+        match registry.plan_join(request.match_id.as_deref()) {
+            JoinPlan::Seat(id, addr) => Seat::Ready(id, addr),
+            JoinPlan::Started => Seat::Deny(error(StatusCode::CONFLICT, "started", STARTED)),
+            JoinPlan::Starting { retry_after } => Seat::Deny(error_retry(
+                StatusCode::CONFLICT,
+                "starting",
+                STARTING,
+                retry_after,
+            )),
+            JoinPlan::Quick => match registry.reserve_seat() {
+                Some((id, addr)) => Seat::Ready(id, addr),
+                None => match &state.fleet {
+                    Some(fleet) => match launch(&mut registry, fleet) {
+                        Ok((id, addr)) => {
+                            registry.reserve_in(&id);
+                            Seat::Ready(id, addr)
+                        }
+                        Err(_) => Seat::Busy,
+                    },
+                    None => Seat::Busy,
+                },
             },
         }
     };
     match seat {
-        Ok((match_id, addr)) => {
+        Seat::Ready(match_id, addr) => {
             println!("{name} ({client_id}) → {match_id}");
             state.joins.fetch_add(1, Ordering::Relaxed);
             issue(&state, match_id, addr, client_id, &name).await
         }
-        Err(e) => {
+        Seat::Deny(response) => {
             state.join_failures.fetch_add(1, Ordering::Relaxed);
-            error(StatusCode::SERVICE_UNAVAILABLE, e)
+            response
+        }
+        Seat::Busy => {
+            state.join_failures.fetch_add(1, Ordering::Relaxed);
+            error(StatusCode::SERVICE_UNAVAILABLE, "busy", BUSY)
         }
     }
 }
@@ -155,7 +199,7 @@ async fn rejoin(State(state): State<Shared>, Json(request): Json<RejoinRequest>)
         request.client_id,
         &request.reconnect_key,
     ) {
-        return error(StatusCode::FORBIDDEN, "bad reconnect key");
+        return error(StatusCode::FORBIDDEN, "forbidden", "bad reconnect key");
     }
     let addr = {
         let mut registry = state.registry.lock().expect("registry lock");
@@ -164,7 +208,7 @@ async fn rejoin(State(state): State<Shared>, Json(request): Json<RejoinRequest>)
             .get(&request.match_id)
             .is_some_and(|m| m.healthy(std::time::Instant::now()));
         if !healthy {
-            return error(StatusCode::GONE, "match is over or unreachable");
+            return error(StatusCode::GONE, "gone", "match is over or unreachable");
         }
         registry.reserve_in(&request.match_id)
     };
@@ -172,7 +216,7 @@ async fn rejoin(State(state): State<Shared>, Json(request): Json<RejoinRequest>)
     match addr {
         // The server knows the name from the original token; the body is kept on its side.
         Some(addr) => issue(&state, request.match_id, addr, request.client_id, "").await,
-        None => error(StatusCode::GONE, "match not found"),
+        None => error(StatusCode::GONE, "gone", "match not found"),
     }
 }
 
@@ -282,7 +326,7 @@ async fn drain(State(state): State<Shared>, Path(id): Path<String>) -> Response 
             m.draining = true;
             Json(json!({ "draining": id })).into_response()
         }
-        None => error(StatusCode::NOT_FOUND, "no such match"),
+        None => error(StatusCode::NOT_FOUND, "not_found", "no such match"),
     }
 }
 

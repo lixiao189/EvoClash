@@ -268,7 +268,8 @@ mod tests {
             .init_resource::<XpQueue>()
             .init_resource::<Dealt>()
             .init_resource::<SimTick>()
-            .init_resource::<Arena>();
+            .init_resource::<Arena>()
+            .insert_resource(crate::rng::SimRng::from_match_seed(1));
         app.world_mut().spawn(MatchState {
             phase: Phase::Playing,
             ..default()

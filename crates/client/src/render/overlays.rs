@@ -152,7 +152,9 @@ pub(super) fn draw_overlays(
     images: Res<Assets<Image>>,
     arena: Res<Arena>,
     indoors: Res<Indoors>,
+    state: Query<&MatchState>,
 ) {
+    let practice = state.iter().any(|s| s.phase == Phase::Lobby);
     for entity in &old {
         commands.entity(entity).despawn();
     }
@@ -368,7 +370,7 @@ pub(super) fn draw_overlays(
             let center = p + Vec2::Y * (SURVIVOR_HEIGHT / 2.0 - FOOT_INSET);
             paint.frame(center, Vec2::new(72.0, SURVIVOR_HEIGHT + 16.0), bubble);
         }
-        if stats.has_bounty() {
+        if stats.has_bounty() && !practice {
             let pulse = 0.6 + 0.4 * (t * 6.0).sin();
             paint.ring(
                 p,

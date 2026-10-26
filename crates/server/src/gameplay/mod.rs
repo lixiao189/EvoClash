@@ -7,6 +7,7 @@ use evoclash_game::evolution::{Evolution, Skill, SkillState, player_kill_xp};
 use evoclash_game::items::{AmmoKind, ArmorKind, Item, WeaponKind, roll_loot};
 use evoclash_game::map::{ArenaMap, VAULT_CENTER};
 use evoclash_game::protocol::*;
+use evoclash_game::rng::mix;
 use evoclash_game::shop::{DeathRecap, RESPAWN_MAX_TICKS, Wallet, can_deploy, player_kill_scrap};
 use evoclash_game::sim::{self, Arena, Obstacles, gear_tier, underdog_mult};
 use lightyear::prelude::input::native::ActionState;
@@ -19,6 +20,7 @@ use crate::environment::{Blasts, PropSlots};
 use crate::evolution::{Dealt, LifeLog, Recovery, XpAward, XpQueue};
 use crate::inventory::{Selecting, spawn_bag, spawn_loot, take};
 use crate::ops::OpsState;
+use crate::rng::SimRng;
 use crate::skills::HiddenFrom;
 
 mod damage;
@@ -34,9 +36,18 @@ pub use movement::*;
 pub use spawning::*;
 
 pub const TICKS_PER_SEC: u32 = 64;
-const WARMUP_TICKS: u32 = 4 * TICKS_PER_SEC;
+/// Lobby portion of the public 20s countdown. The last 3s are `Phase::Starting`.
+pub const LOBBY_COUNTDOWN_TICKS: u32 = 17 * TICKS_PER_SEC;
+pub const STARTING_TICKS: u32 = 3 * TICKS_PER_SEC;
 pub const MATCH_TICKS: u32 = 8 * 60 * TICKS_PER_SEC;
-const INTERMISSION_TICKS: u32 = 8 * TICKS_PER_SEC;
+pub const RESULTS_TICKS: u32 = 12 * TICKS_PER_SEC;
+/// Quick start stops once fewer than this many ticks remain until Playing
+/// (lobby time left plus the 3s Starting). Exactly 8s still accepts.
+pub const JOIN_CUTOFF_TICKS: u32 = 8 * TICKS_PER_SEC;
+const EMPTY_LOBBY_TICKS: u32 = 30 * TICKS_PER_SEC;
+const EMPTY_MATCH_TICKS: u32 = 10 * TICKS_PER_SEC;
+/// Lobby deaths stand back up after this, with no death bag.
+pub(super) const LOBBY_RESPAWN_TICKS: u16 = (2 * TICKS_PER_SEC) as u16;
 const FIRST_VAULT_TICKS: u32 = 60 * TICKS_PER_SEC;
 const VAULT_INTERVAL_TICKS: u32 = 90 * TICKS_PER_SEC;
 pub const SCORE_TO_WIN: u32 = 25;
@@ -62,13 +73,21 @@ pub struct GameplayPlugin;
 
 impl Plugin for GameplayPlugin {
     fn build(&self, app: &mut App) {
-        // Every match is played on a freshly generated layout.
-        app.insert_resource(Arena(ArenaMap::generate(rand::random())));
+        let room_seed = app
+            .world()
+            .get_resource::<ServerConfig>()
+            .map(|config| config.room_seed)
+            .unwrap_or(0);
+        // First lobby of the process is match_index 0. Later rounds remix the same room seed.
+        let map_seed = mix(room_seed, 0);
+        app.insert_resource(Arena(ArenaMap::generate(map_seed)));
+        app.insert_resource(SimRng::from_match_seed(map_seed));
         app.init_resource::<SimTick>()
             .init_resource::<Outbox>()
             .init_resource::<DamageQueue>()
             .init_resource::<LootState>()
-            .init_resource::<ResetRequested>();
+            .init_resource::<ResetRequested>()
+            .init_resource::<PendingStart>();
         app.configure_sets(
             FixedUpdate,
             (
@@ -97,7 +116,14 @@ impl Plugin for GameplayPlugin {
                 (resolve_damage, respawn, expire_drops)
                     .chain()
                     .in_set(SimSet::Resolve),
-                (loot_spawner, match_flow, reset_match, flush_outbox)
+                (
+                    loot_spawner,
+                    match_flow,
+                    reset_match,
+                    place_starters,
+                    empty_close,
+                    flush_outbox,
+                )
                     .chain()
                     .in_set(SimSet::Flow),
             ),
@@ -141,6 +167,41 @@ pub struct DamageQueue(pub Vec<Damage>);
 
 #[derive(Resource, Default)]
 pub struct ResetRequested(pub bool);
+
+/// Entering Starting: after `reset_match`, stand everyone on a spawn, alive and unshielded.
+#[derive(Resource, Default)]
+pub struct PendingStart(pub bool);
+
+/// Humans who have hurt this bot during the lobby. Lobby bots only fight back against these.
+#[derive(Component, Default)]
+pub struct Aggressors(pub Vec<Entity>);
+
+/// Public lobby still offered by quick start. The 20s clock is lobby time plus Starting;
+/// a seat is offered while that clock has not started, or still has at least 8s left.
+pub fn lobby_open(state: &MatchState) -> bool {
+    state.phase == Phase::Lobby
+        && (!state.countdown_active
+            || state.ticks_left.saturating_add(STARTING_TICKS) >= JOIN_CUTOFF_TICKS)
+}
+
+pub fn phase_name(phase: Phase) -> &'static str {
+    match phase {
+        Phase::Lobby => "lobby",
+        Phase::Starting => "starting",
+        Phase::Playing => "playing",
+        Phase::Results => "results",
+        Phase::Recovering => "recovering",
+    }
+}
+
+/// Seconds left in the phase. `None` until a lobby countdown starts.
+pub fn phase_left_secs(state: &MatchState) -> Option<u32> {
+    if state.phase == Phase::Lobby && !state.countdown_active {
+        None
+    } else {
+        Some(state.ticks_left / TICKS_PER_SEC)
+    }
+}
 
 /// The input applied this tick, whether it came from the network or a bot brain.
 #[derive(Component, Default)]

@@ -1,4 +1,5 @@
-//! Local process fleet: launches one `evoclash-server --single-match` per match on this host.
+//! Local process fleet: launches one `evoclash-server` per room on this host.
+//! Rooms return to the lobby after results, so this does not pass `--single-match`.
 //!
 //! In production this is the piece you swap for an orchestrator allocation call
 //! (Agones `GameServerAllocation`, Edgegap, Hathora, …); the rest of the matchmaker only
@@ -62,6 +63,7 @@ impl Fleet {
             .ok_or("no free ports")?;
         let addr = SocketAddr::new(self.config.public_host, port);
         let id = format!("m{port}-{:06x}", rand::random::<u32>() & 0xff_ffff);
+        let room_seed: u64 = rand::random();
 
         std::fs::create_dir_all(&self.config.log_dir).map_err(|e| format!("log dir: {e}"))?;
         let log = std::fs::File::create(self.config.log_dir.join(format!("{id}.log")))
@@ -80,7 +82,8 @@ impl Fleet {
             .arg(self.config.bots.to_string())
             .arg("--matchmaker")
             .arg(self.config.matchmaker_urls.join(","))
-            .arg("--single-match")
+            .arg("--room-seed")
+            .arg(room_seed.to_string())
             .stdin(Stdio::null())
             .stdout(log.try_clone().map_err(|e| e.to_string())?)
             .stderr(log)

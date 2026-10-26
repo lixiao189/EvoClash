@@ -341,8 +341,11 @@ fn local_fire(
         return;
     };
     let input = &action.0;
-    let intermission = state.iter().any(|s| s.phase == Phase::Intermission);
-    if !input.fire || !vitals.alive || intermission || gun.cooldown > 0.0 {
+    // Lobby practice still shoots. Starting, results and recovery do not (the server drops them).
+    let shooting = state
+        .iter()
+        .any(|s| matches!(s.phase, Phase::Lobby | Phase::Playing));
+    if !input.fire || !vitals.alive || !shooting || gun.cooldown > 0.0 {
         return;
     }
     let loadout = &selection.apply(loadout);

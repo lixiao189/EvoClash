@@ -14,6 +14,7 @@ use evoclash_game::items::{AmmoKind, ArmorKind, Item, WeaponKind};
 use evoclash_game::map::Floor;
 
 mod arena;
+mod badges;
 mod canvas;
 mod city;
 mod effects;
@@ -26,6 +27,7 @@ mod tests;
 mod weapons;
 
 use arena::*;
+use badges::*;
 use canvas::*;
 use city::*;
 use effects::*;
@@ -91,6 +93,10 @@ pub struct Textures {
     pub turret_head: Handle<Image>,
     /// 陷阱: a bear trap lying open on the ground, seen from above.
     pub trap: Handle<Image>,
+    /// Gold crown over the match host. 11×8 texels; about 22×16 world px at [`PIXEL`].
+    pub host_crown: Handle<Image>,
+    /// Gray rounded "BOT" tag. 14×7 texels; 28×14 world px at [`PIXEL`].
+    pub bot_tag: Handle<Image>,
 }
 
 #[derive(Clone)]
@@ -245,5 +251,7 @@ pub fn build(images: &mut Assets<Image>) -> Textures {
         turret_base: add(paint_turret_base(), true),
         turret_head: add(paint_turret_head(), true),
         trap: add(paint_trap(), true),
+        host_crown: add(paint_host_crown(), true),
+        bot_tag: add(paint_bot_tag(), true),
     }
 }

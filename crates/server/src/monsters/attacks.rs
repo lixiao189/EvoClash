@@ -21,142 +21,148 @@ pub(super) fn attack(
     players: Query<(Entity, &Pos, &Vitals), With<Player>>,
     mut damage: ResMut<DamageQueue>,
     mut blasts: ResMut<GhoulBlasts>,
+    rng: Res<crate::rng::SimRng>,
 ) {
-    if state.phase == Phase::Intermission {
+    if matches!(
+        state.phase,
+        Phase::Results | Phase::Recovering | Phase::Starting
+    ) {
         return;
     }
     let alive = prey(players.iter());
-    let mut rng = rand::rng();
-    for (entity, monster, pos, mut brain, mut mstate, mut vitals) in &mut monsters {
-        let kind = monster.kind;
-        if !vitals.alive || kind == MonsterKind::Behemoth {
-            continue;
-        }
-        brain.attack_cd = brain.attack_cd.saturating_sub(1);
-        if brain.far {
-            continue;
-        }
-        let mult = brain.damage_mult;
-        let at = pos.0;
-        let reach = kind.radius() + PLAYER_RADIUS + 4.0;
-        let bite = |amount: f32, damage: &mut DamageQueue, cause| {
-            let victim = alive.iter().find(|(_, p, _)| p.distance(at) <= reach);
-            if let Some((target, ..)) = victim {
-                damage.0.push(Damage {
-                    target: *target,
-                    attacker: Some(entity),
-                    amount: amount * mult,
-                    armor_mult: 1.0,
-                    weapon: None,
-                    emp: false,
-                    cause: Some(cause),
-                });
+    let playing = state.phase == Phase::Playing;
+    rng.with(playing, crate::rng::Stream::Monsters, |mut rng| {
+        for (entity, monster, pos, mut brain, mut mstate, mut vitals) in &mut monsters {
+            let kind = monster.kind;
+            if !vitals.alive || kind == MonsterKind::Behemoth {
+                continue;
             }
-            victim.is_some()
-        };
-        if kind == MonsterKind::Ghoul && mstate.action == MonsterAction::Arming {
-            let fuse = mstate.fuse.saturating_sub(1);
-            if fuse == 0 {
-                blasts.0.push(PendingBlast {
-                    pos: at,
-                    attacker: Some(entity),
-                    source: entity,
-                    damage: GHOUL_BLAST * mult,
-                });
-                vitals.alive = false;
-                commands.entity(entity).insert(Dying);
+            brain.attack_cd = brain.attack_cd.saturating_sub(1);
+            if brain.far {
+                continue;
             }
-            let new = MonsterState { fuse, ..*mstate };
-            set_state(&mut mstate, new);
-            continue;
-        }
-        if brain.attack_cd > 0 {
-            continue;
-        }
-        let sees = |range: f32| {
-            nearest(&alive, at).filter(|(_, p, d)| *d < range && arena.line_of_sight(at, *p))
-        };
-        let muzzle = |dir: Vec2| at + dir * (kind.radius() + 6.0);
-        match kind {
-            MonsterKind::Roach => {
-                if bite(ROACH_BITE, &mut damage, "撕咬") {
-                    brain.attack_cd = ROACH_BITE_CD;
+            let mult = brain.damage_mult;
+            let at = pos.0;
+            let reach = kind.radius() + PLAYER_RADIUS + 4.0;
+            let bite = |amount: f32, damage: &mut DamageQueue, cause| {
+                let victim = alive.iter().find(|(_, p, _)| p.distance(at) <= reach);
+                if let Some((target, ..)) = victim {
+                    damage.0.push(Damage {
+                        target: *target,
+                        attacker: Some(entity),
+                        amount: amount * mult,
+                        armor_mult: 1.0,
+                        weapon: None,
+                        emp: false,
+                        cause: Some(cause),
+                    });
                 }
-            }
-            MonsterKind::Dog => {
-                if bite(DOG_BITE, &mut damage, "撕咬") {
-                    brain.attack_cd = DOG_BITE_CD;
+                victim.is_some()
+            };
+            if kind == MonsterKind::Ghoul && mstate.action == MonsterAction::Arming {
+                let fuse = mstate.fuse.saturating_sub(1);
+                if fuse == 0 {
+                    blasts.0.push(PendingBlast {
+                        pos: at,
+                        attacker: Some(entity),
+                        source: entity,
+                        damage: GHOUL_BLAST * mult,
+                    });
+                    vitals.alive = false;
+                    commands.entity(entity).insert(Dying);
                 }
+                let new = MonsterState { fuse, ..*mstate };
+                set_state(&mut mstate, new);
+                continue;
             }
-            MonsterKind::Crawler => {
-                if bite(CRAWLER_HIT, &mut damage, "钳击") {
-                    brain.attack_cd = CRAWLER_HIT_CD;
+            if brain.attack_cd > 0 {
+                continue;
+            }
+            let sees = |range: f32| {
+                nearest(&alive, at).filter(|(_, p, d)| *d < range && arena.line_of_sight(at, *p))
+            };
+            let muzzle = |dir: Vec2| at + dir * (kind.radius() + 6.0);
+            match kind {
+                MonsterKind::Roach => {
+                    if bite(ROACH_BITE, &mut damage, "撕咬") {
+                        brain.attack_cd = ROACH_BITE_CD;
+                    }
                 }
-            }
-            MonsterKind::Ghoul => {
-                let close = GHOUL_ARM_RANGE + kind.radius();
-                if alive.iter().any(|(_, p, _)| p.distance(at) <= close) {
-                    let new = MonsterState {
-                        action: MonsterAction::Arming,
-                        fuse: GHOUL_FUSE,
-                        ..*mstate
+                MonsterKind::Dog => {
+                    if bite(DOG_BITE, &mut damage, "撕咬") {
+                        brain.attack_cd = DOG_BITE_CD;
+                    }
+                }
+                MonsterKind::Crawler => {
+                    if bite(CRAWLER_HIT, &mut damage, "钳击") {
+                        brain.attack_cd = CRAWLER_HIT_CD;
+                    }
+                }
+                MonsterKind::Ghoul => {
+                    let close = GHOUL_ARM_RANGE + kind.radius();
+                    if alive.iter().any(|(_, p, _)| p.distance(at) <= close) {
+                        let new = MonsterState {
+                            action: MonsterAction::Arming,
+                            fuse: GHOUL_FUSE,
+                            ..*mstate
+                        };
+                        set_state(&mut mstate, new);
+                    }
+                }
+                MonsterKind::SporePod => {
+                    if sees(POD_WAKE).is_none() {
+                        continue;
+                    }
+                    brain.attack_cd = POD_VOLLEY_EVERY;
+                    brain.spiral += 0.23;
+                    let step = TAU / POD_GLOBS as f32;
+                    for i in 0..POD_GLOBS {
+                        let dir = Vec2::from_angle(brain.spiral + i as f32 * step);
+                        let flight = Flight::fauna(entity, SPORE_TTL, SPORE_DAMAGE * mult, "孢子");
+                        let kind = ProjectileKind::Spore;
+                        shoot(&mut commands, kind, muzzle(dir), dir, SPORE_SPEED, flight);
+                    }
+                }
+                MonsterKind::Spitter => {
+                    if let Some((_, p, _)) = sees(SPITTER_RANGE) {
+                        brain.attack_cd = SPITTER_CD;
+                        let dir = (p - at).normalize_or(Vec2::X);
+                        let flight = Flight::fauna(entity, ACID_TTL, ACID_DAMAGE * mult, "酸液");
+                        let kind = ProjectileKind::Acid;
+                        shoot(&mut commands, kind, muzzle(dir), dir, ACID_SPEED, flight);
+                    }
+                }
+                MonsterKind::Drone => {
+                    if let Some((_, p, _)) = sees(DRONE_RANGE) {
+                        brain.attack_cd = DRONE_CD;
+                        let dir = (p - at).normalize_or(Vec2::X);
+                        let flight = Flight::fauna(entity, BOLT_TTL, BOLT_DAMAGE * mult, "电弧");
+                        let kind = ProjectileKind::Bolt;
+                        shoot(&mut commands, kind, muzzle(dir), dir, BOLT_SPEED, flight);
+                    }
+                }
+                MonsterKind::Raider => {
+                    if !brain.fire {
+                        continue;
+                    }
+                    let weapon = brain.weapon;
+                    // Raiders only ever carry guns.
+                    let Some(gun) = weapon.ranged() else {
+                        continue;
                     };
-                    set_state(&mut mstate, new);
+                    // Slower trigger finger than a player, or a rifle squad would shred everyone.
+                    brain.attack_cd = (gun.cooldown() * 2).max(14);
+                    for dir in gun.volley(brain.aim, &mut rng) {
+                        let flight = Flight::raider_shot(entity, gun);
+                        let kind = ProjectileKind::Shot(weapon);
+                        let speed = gun.muzzle_speed();
+                        shoot(&mut commands, kind, muzzle(dir), dir, speed, flight);
+                    }
                 }
+                MonsterKind::Behemoth => {}
             }
-            MonsterKind::SporePod => {
-                if sees(POD_WAKE).is_none() {
-                    continue;
-                }
-                brain.attack_cd = POD_VOLLEY_EVERY;
-                brain.spiral += 0.23;
-                let step = TAU / POD_GLOBS as f32;
-                for i in 0..POD_GLOBS {
-                    let dir = Vec2::from_angle(brain.spiral + i as f32 * step);
-                    let flight = Flight::fauna(entity, SPORE_TTL, SPORE_DAMAGE * mult, "孢子");
-                    let kind = ProjectileKind::Spore;
-                    shoot(&mut commands, kind, muzzle(dir), dir, SPORE_SPEED, flight);
-                }
-            }
-            MonsterKind::Spitter => {
-                if let Some((_, p, _)) = sees(SPITTER_RANGE) {
-                    brain.attack_cd = SPITTER_CD;
-                    let dir = (p - at).normalize_or(Vec2::X);
-                    let flight = Flight::fauna(entity, ACID_TTL, ACID_DAMAGE * mult, "酸液");
-                    let kind = ProjectileKind::Acid;
-                    shoot(&mut commands, kind, muzzle(dir), dir, ACID_SPEED, flight);
-                }
-            }
-            MonsterKind::Drone => {
-                if let Some((_, p, _)) = sees(DRONE_RANGE) {
-                    brain.attack_cd = DRONE_CD;
-                    let dir = (p - at).normalize_or(Vec2::X);
-                    let flight = Flight::fauna(entity, BOLT_TTL, BOLT_DAMAGE * mult, "电弧");
-                    let kind = ProjectileKind::Bolt;
-                    shoot(&mut commands, kind, muzzle(dir), dir, BOLT_SPEED, flight);
-                }
-            }
-            MonsterKind::Raider => {
-                if !brain.fire {
-                    continue;
-                }
-                let weapon = brain.weapon;
-                // Raiders only ever carry guns.
-                let Some(gun) = weapon.ranged() else {
-                    continue;
-                };
-                // Slower trigger finger than a player, or a rifle squad would shred everyone.
-                brain.attack_cd = (gun.cooldown() * 2).max(14);
-                for dir in gun.volley(brain.aim, &mut rng) {
-                    let flight = Flight::raider_shot(entity, gun);
-                    let kind = ProjectileKind::Shot(weapon);
-                    let speed = gun.muzzle_speed();
-                    shoot(&mut commands, kind, muzzle(dir), dir, speed, flight);
-                }
-            }
-            MonsterKind::Behemoth => {}
         }
-    }
+    });
 }
 
 /// Everyone caught in a ghoul blast, once each, with the damage they take.
