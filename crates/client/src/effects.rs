@@ -552,7 +552,7 @@ fn receive_events(
                         1.6,
                     );
                     if me.is_some_and(|(p, _)| p.client_id == client) {
-                        banner.0 = Some((format!("升到 {level} 级 — 按 1/2/3 选择进化"), now));
+                        banner.0 = Some((format!("升到 {level} 级 — 按 Tab 加点"), now));
                     }
                 }
                 GameEvent::SkillUsed {
