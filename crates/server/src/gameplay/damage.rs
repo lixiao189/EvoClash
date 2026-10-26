@@ -190,9 +190,9 @@ pub fn resolve_damage(
                     pos: drop_at,
                     loot: false,
                 });
-                // 弹药回收: every kill tops the magazine up a little.
-                let refill = killer_evo.ammo_per_kill();
+                // Every kill salvages a quarter magazine; 弹药回收 adds to it.
                 let weapon = killer_loadout.weapon;
+                let refill = killer_evo.ammo_per_kill() + weapon.ammo_box() / 2;
                 if refill > 0 && weapon != WeaponKind::Stick {
                     killer_loadout.ammo =
                         (killer_loadout.ammo + refill).min(killer_evo.max_ammo(weapon));

@@ -70,6 +70,7 @@ pub struct Textures {
     weapons: [WeaponSprite; 6],
     armors: [Handle<Image>; 3],
     pub medkit: Handle<Image>,
+    pub ammo: Handle<Image>,
     pub emp: Handle<Image>,
     /// Bullet streak: white, fading tail on the left, bright round head on the right.
     pub bolt: Handle<Image>,
@@ -116,6 +117,7 @@ impl Textures {
             Item::Armor { kind, .. } => self.armors[armor_index(kind)].clone(),
             Item::Emp => self.emp.clone(),
             Item::Medkit => self.medkit.clone(),
+            Item::Ammo => self.ammo.clone(),
         }
     }
 }
@@ -223,6 +225,7 @@ pub fn build(images: &mut Assets<Image>) -> Textures {
         armors: [ArmorKind::Scrap, ArmorKind::Kevlar, ArmorKind::PowerArmor]
             .map(|kind| add(paint_armor(kind), true)),
         medkit: add(paint_medkit(), true),
+        ammo: add(paint_ammo(), true),
         emp: add(paint_emp(), true),
         bolt: add(paint_bolt(), false),
         muzzle: add(paint_muzzle(), false),

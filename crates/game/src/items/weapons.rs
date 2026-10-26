@@ -151,6 +151,11 @@ impl WeaponKind {
     pub fn max_ammo(self) -> u16 {
         self.ranged().map_or(0, |w| w.max_ammo())
     }
+
+    /// Rounds in a box of ammo: half a fresh pickup, rounded up.
+    pub fn ammo_box(self) -> u16 {
+        self.max_ammo().div_ceil(2)
+    }
 }
 
 /// T0: what you spawn with and fall back to when the ammo runs out.

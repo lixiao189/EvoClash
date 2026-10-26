@@ -52,6 +52,24 @@ pub(super) fn paint_medkit() -> Canvas {
     c
 }
 
+pub(super) fn paint_ammo() -> Canvas {
+    let mut c = Canvas::new(14, 11);
+    let olive = rgb(0.34, 0.4, 0.22);
+    c.rect(1, 3, 12, 9, olive);
+    c.rect(1, 3, 12, 3, shade(olive, 1.3));
+    c.rect(1, 9, 12, 9, shade(olive, 0.7));
+    c.rect(1, 5, 12, 5, shade(olive, 0.8));
+    // Handle and a row of brass cartridge tips peeking out of the lid.
+    c.rect(5, 1, 8, 2, rgb(0.4, 0.4, 0.38));
+    let brass = rgb(0.85, 0.65, 0.2);
+    for x in [3, 5, 7, 9] {
+        c.rect(x, 6, x + 1, 8, brass);
+        c.put(x, 6, shade(brass, 1.35));
+    }
+    c.outline(OUTLINE);
+    c
+}
+
 pub(super) fn paint_emp() -> Canvas {
     let mut c = Canvas::new(13, 13);
     c.disc(6.5, 7.0, 5.0, rgb(0.22, 0.24, 0.28));
