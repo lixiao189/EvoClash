@@ -1,4 +1,4 @@
-//! In-match evolution: XP, levels 1-10, perks along three paths and the skills a path grants.
+//! In-match evolution: XP, levels 1-15, perks along three paths and the skills a path grants.
 //!
 //! Everything here is plain data and arithmetic shared by server (authority) and client (HUD,
 //! prediction). Only the movement multiplier feeds the deterministic sim (`sim::speed_mult`).
@@ -13,10 +13,13 @@ use crate::sim::MAX_HP;
 
 const SEC: u16 = 64;
 
-pub const MAX_LEVEL: u8 = 10;
+pub const MAX_LEVEL: u8 = 15;
 pub const MAX_RANK: u8 = 3;
-/// Cumulative XP needed to reach levels 2..=10.
-pub const LEVEL_XP: [u32; 9] = [60, 150, 270, 420, 600, 820, 1080, 1380, 1720];
+/// Cumulative XP needed to reach levels 2..=15. Paced so most players end a match around
+/// level 12 and only the leader gets near the cap.
+pub const LEVEL_XP: [u32; 14] = [
+    100, 250, 450, 700, 1000, 1360, 1780, 2260, 2800, 3410, 4090, 4840, 5660, 6560,
+];
 pub const CATCH_UP_PER_LEVEL: f32 = 0.1;
 pub const CATCH_UP_MAX: f32 = 1.5;
 /// Cap on the combined perk/skill movement multiplier (armor and EMP stack on top).
@@ -277,7 +280,7 @@ impl Skill {
 pub struct Evolution {
     pub level: u8,
     pub xp: u32,
-    /// Cumulative XP of the next level (equal to the L10 threshold at max level).
+    /// Cumulative XP of the next level (equal to the max-level threshold at max level).
     pub xp_next: u32,
     /// Rank 0..=3 of each perk, indexed by `Perk::index()`.
     pub ranks: [u8; 12],
@@ -581,13 +584,13 @@ mod tests {
     #[test]
     fn xp_table_maps_to_levels() {
         assert_eq!(level_for_xp(0), 1);
-        assert_eq!(level_for_xp(59), 1);
-        assert_eq!(level_for_xp(60), 2);
-        assert_eq!(level_for_xp(149), 2);
-        assert_eq!(level_for_xp(150), 3);
-        assert_eq!(level_for_xp(1719), 9);
-        assert_eq!(level_for_xp(1720), 10);
-        assert_eq!(level_for_xp(u32::MAX), 10);
+        assert_eq!(level_for_xp(99), 1);
+        assert_eq!(level_for_xp(100), 2);
+        assert_eq!(level_for_xp(249), 2);
+        assert_eq!(level_for_xp(250), 3);
+        assert_eq!(level_for_xp(6559), 14);
+        assert_eq!(level_for_xp(6560), 15);
+        assert_eq!(level_for_xp(u32::MAX), MAX_LEVEL);
         for level in 2..=MAX_LEVEL {
             assert_eq!(level_for_xp(xp_to_reach(level)), level);
             assert_eq!(level_for_xp(xp_to_reach(level) - 1), level - 1);
@@ -597,12 +600,12 @@ mod tests {
     #[test]
     fn add_xp_grants_one_point_per_level() {
         let mut evo = Evolution::default();
-        assert_eq!(evo.xp_next, 60);
-        assert_eq!(evo.add_xp(59), 0);
-        assert_eq!(evo.add_xp(100), 2);
-        assert_eq!((evo.level, evo.points, evo.xp_next), (3, 2, 270));
-        evo.add_xp(10_000);
-        assert_eq!((evo.level, evo.points, evo.xp_next), (10, 9, 1720));
+        assert_eq!(evo.xp_next, 100);
+        assert_eq!(evo.add_xp(99), 0);
+        assert_eq!(evo.add_xp(200), 2);
+        assert_eq!((evo.level, evo.points, evo.xp_next), (3, 2, 450));
+        evo.add_xp(100_000);
+        assert_eq!((evo.level, evo.points, evo.xp_next), (15, 14, 6560));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use evoclash_game::evolution::Perk;
+use evoclash_game::evolution::{Perk, xp_to_reach};
 use evoclash_game::shop::{PlayerCommand, RESPAWN_MIN_TICKS, ShopItem};
 
 use super::*;
@@ -118,7 +118,7 @@ fn deploy_is_allowed_after_4s_and_automatic_at_8s() {
 fn deploy_last_waits_for_4s_and_brings_the_last_cart() {
     let mut app = respawn_app();
     let mut evo = Evolution::default();
-    evo.add_xp(60);
+    evo.add_xp(xp_to_reach(2));
     let mut last_ranks = [0; 12];
     last_ranks[Perk::Claws.index()] = 1;
     let wallet = Wallet {
@@ -165,7 +165,7 @@ fn scrap_and_perks_survive_death_and_the_cart_is_equipped() {
     });
     app.add_systems(Update, (resolve_damage, respawn).chain());
     let mut evo = Evolution::default();
-    evo.add_xp(60);
+    evo.add_xp(xp_to_reach(2));
     evo.spend(Perk::Overclock);
     let p = app
         .world_mut()
