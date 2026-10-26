@@ -22,7 +22,7 @@ const BARREL_RESPAWN_TICKS: u32 = 45 * TICKS_PER_SEC;
 const LOOT_TTL: u32 = 30 * TICKS_PER_SEC;
 /// Percent of crate and safe loot that is a gun, before the zone's usual table.
 const CRATE_GUN_PCT: u32 = 40;
-const SAFE_GUN_PCT: u32 = 70;
+const SAFE_GUN_PCT: u32 = 50;
 const SAFE_REACH: f32 = 40.0;
 /// A cracked safe stays empty this long.
 const SAFE_RESEAL_TICKS: u32 = 90 * TICKS_PER_SEC;

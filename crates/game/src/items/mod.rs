@@ -131,7 +131,7 @@ pub fn roll_loot(zone_tier: u8, rng: &mut impl rand::Rng) -> Item {
             (Item::armor(ArmorKind::Scrap), 25),
             (Item::Medkit, 20),
             (Item::Emp, 12),
-            (Item::Ammo, 28),
+            (Item::Ammo, 15),
         ],
         2 => &[
             (Item::weapon(WeaponKind::Rifle), 30),
@@ -151,7 +151,6 @@ pub fn roll_loot(zone_tier: u8, rng: &mut impl rand::Rng) -> Item {
         _ => &[
             (Item::armor(ArmorKind::PowerArmor), 50),
             (Item::weapon(WeaponKind::Railgun), 50),
-            (Item::Ammo, 25),
         ],
     };
     pick(table, rng)
@@ -209,6 +208,16 @@ mod tests {
                 .count();
             assert!(guns > 100, "tier {tier}: only {guns}/400 guns");
         }
+    }
+
+    #[test]
+    fn the_vault_never_drops_ammo_and_lab_safes_can_give_power_armor() {
+        let mut rng = rand::rng();
+        assert!((0..500).all(|_| roll_loot(4, &mut rng) != Item::Ammo));
+        let armor = (0..400)
+            .filter(|_| matches!(roll_container(4, 50, &mut rng), Item::Armor { .. }))
+            .count();
+        assert!(armor >= 60, "only {armor}/400 power armor");
     }
 
     #[test]
