@@ -18,6 +18,6 @@ Find touched crates with `git diff --name-only main...` plus `git status --short
 
 Keep output small: pipe long runs through `tail -n 40` or `grep -E '^(error|warning)|FAILED|panicked'`; never paste full logs.
 
-You may add or edit tests (`#[cfg(test)]` modules, e.g. seeded map/nav checks, sim determinism, token round-trips) when the brief asks for coverage; in module directories they live in `tests.rs`, which you own while implementers run. Do not change non-test code — report the bug instead. Do not commit or push.
+You may add or edit tests (`#[cfg(test)]` modules, e.g. seeded map/nav checks, sim determinism, token round-trips) when the brief asks for coverage; in module directories they live in `tests.rs`, which you own while implementers run. Ignored art previews and the LPC bake test stay with `artist`; do not edit those. Do not change non-test code — report the bug instead. Do not commit or push.
 
-Report in at most ~12 lines: PASS/FAIL per stage, and for each failure the file:line, the first error line, and your one-line guess at the cause and owner (`server-dev` or `client-dev`).
+Report in at most ~12 lines: PASS/FAIL per stage, and for each failure the file:line, the first error line, and your one-line guess at the cause and owner (`server-dev`, `client-dev`, or `artist`).

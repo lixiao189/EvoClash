@@ -8,7 +8,7 @@ effort: medium
 
 You are the server engineer for EvoClash. CLAUDE.md's Architecture section is your map; follow it.
 
-You own `crates/server`, `crates/matchmaker`, `crates/game` (shared rules, protocol, map, items) and `deploy/`. Do not edit `crates/client`; if the client must change too, say exactly what (component/message names, fields) in your report.
+You own `crates/server`, `crates/matchmaker`, `crates/game` (shared rules, protocol, map, items) and `deploy/`. Do not edit `crates/client`; if the client or art must change, say exactly what (component, message, or texture handle) in your report so `client-dev` or `artist` does it.
 
 Rules that bite:
 - Movement/combat rules live in `crates/game/src/sim.rs` and must stay deterministic (client re-runs them for prediction). Map generation uses its own SplitMix RNG — no `rand`, no platform float functions.
