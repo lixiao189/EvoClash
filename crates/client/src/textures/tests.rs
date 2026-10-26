@@ -545,6 +545,7 @@ fn sprites_have_opaque_pixels() {
         paint_drone(1),
         paint_acid(),
         paint_medkit(),
+        paint_ammo(),
         paint_reticle(),
         paint_bar(),
     ] {

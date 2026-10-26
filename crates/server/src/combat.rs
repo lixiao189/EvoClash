@@ -436,6 +436,9 @@ pub fn auto_wants(item: &Item, vitals: &Vitals, loadout: &Loadout, evo: &Evoluti
         Item::Armor { points, .. } => points > vitals.armor_points,
         Item::Emp => loadout.emps < evo.emp_cap(MAX_EMPS),
         Item::Medkit => vitals.hp < vitals.max_hp,
+        Item::Ammo => {
+            loadout.weapon != WeaponKind::Stick && loadout.ammo < evo.max_ammo(loadout.weapon)
+        }
     }
 }
 
@@ -475,6 +478,11 @@ fn take(item: Item, vitals: &mut Vitals, loadout: &mut Loadout, evo: &Evolution)
         }
         Item::Medkit => {
             vitals.hp = (vitals.hp + 50.0).min(vitals.max_hp);
+            None
+        }
+        Item::Ammo => {
+            let kind = loadout.weapon;
+            loadout.ammo = (loadout.ammo + kind.ammo_box()).min(evo.max_ammo(kind));
             None
         }
     }

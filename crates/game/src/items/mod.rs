@@ -21,10 +21,18 @@ pub enum ArmorKind {
 /// Something lying on the ground that can be picked up.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Reflect)]
 pub enum Item {
-    Weapon { kind: WeaponKind, ammo: u16 },
-    Armor { kind: ArmorKind, points: f32 },
+    Weapon {
+        kind: WeaponKind,
+        ammo: u16,
+    },
+    Armor {
+        kind: ArmorKind,
+        points: f32,
+    },
     Emp,
     Medkit,
+    /// A box of rounds for whatever gun is in hand, `WeaponKind::ammo_box` of them.
+    Ammo,
 }
 
 impl ArmorKind {
@@ -69,7 +77,7 @@ impl Item {
         match self {
             Item::Weapon { kind, .. } => kind.spec().tier(),
             Item::Armor { kind, .. } => kind.tier(),
-            Item::Emp | Item::Medkit => 1,
+            Item::Emp | Item::Medkit | Item::Ammo => 1,
         }
     }
 
@@ -79,6 +87,7 @@ impl Item {
             Item::Armor { kind, points } => format!("{} ({points:.0})", kind.name()),
             Item::Emp => "电磁脉冲雷".into(),
             Item::Medkit => "医疗包".into(),
+            Item::Ammo => "弹药箱".into(),
         }
     }
 
@@ -122,6 +131,7 @@ pub fn roll_loot(zone_tier: u8, rng: &mut impl rand::Rng) -> Item {
             (Item::armor(ArmorKind::Scrap), 25),
             (Item::Medkit, 20),
             (Item::Emp, 12),
+            (Item::Ammo, 28),
         ],
         2 => &[
             (Item::weapon(WeaponKind::Rifle), 30),
@@ -129,18 +139,52 @@ pub fn roll_loot(zone_tier: u8, rng: &mut impl rand::Rng) -> Item {
             (Item::armor(ArmorKind::Kevlar), 25),
             (Item::Emp, 15),
             (Item::Medkit, 15),
+            (Item::Ammo, 28),
         ],
         3 => &[
             (Item::weapon(WeaponKind::Laser), 40),
             (Item::weapon(WeaponKind::Rifle), 20),
             (Item::armor(ArmorKind::Kevlar), 25),
             (Item::Emp, 15),
+            (Item::Ammo, 28),
         ],
         _ => &[
             (Item::armor(ArmorKind::PowerArmor), 50),
             (Item::weapon(WeaponKind::Railgun), 50),
+            (Item::Ammo, 25),
         ],
     };
+    pick(table, rng)
+}
+
+/// Loot from a crate or safe: `weapon_pct` percent of the time a gun from the tier's table
+/// (crates in a medical cache zone still hold tier-1 guns), otherwise the zone's usual loot.
+pub fn roll_container(zone_tier: u8, weapon_pct: u32, rng: &mut impl rand::Rng) -> Item {
+    if rng.random_range(0..100) >= weapon_pct {
+        return roll_loot(zone_tier, rng);
+    }
+    let table: &[(Item, u32)] = match zone_tier {
+        0 | 1 => &[
+            (Item::weapon(WeaponKind::Bow), 45),
+            (Item::weapon(WeaponKind::PipeShotgun), 55),
+        ],
+        2 => &[
+            (Item::weapon(WeaponKind::Rifle), 65),
+            (Item::weapon(WeaponKind::PipeShotgun), 35),
+        ],
+        3 => &[
+            (Item::weapon(WeaponKind::Laser), 65),
+            (Item::weapon(WeaponKind::Rifle), 35),
+        ],
+        _ => &[
+            (Item::weapon(WeaponKind::Railgun), 60),
+            (Item::weapon(WeaponKind::Laser), 40),
+        ],
+    };
+    pick(table, rng)
+}
+
+fn pick(table: &[(Item, u32)], rng: &mut impl rand::Rng) -> Item {
     let total: u32 = table.iter().map(|(_, w)| w).sum();
     let mut roll = rng.random_range(0..total);
     for (item, weight) in table {
@@ -150,4 +194,27 @@ pub fn roll_loot(zone_tier: u8, rng: &mut impl rand::Rng) -> Item {
         roll -= weight;
     }
     table[0].0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn containers_hold_guns_in_every_zone() {
+        let mut rng = rand::rng();
+        for tier in 0..=4 {
+            let guns = (0..400)
+                .filter(|_| matches!(roll_container(tier, 40, &mut rng), Item::Weapon { .. }))
+                .count();
+            assert!(guns > 100, "tier {tier}: only {guns}/400 guns");
+        }
+    }
+
+    #[test]
+    fn ammo_boxes_refill_half_a_magazine() {
+        assert_eq!(WeaponKind::Rifle.ammo_box(), 23);
+        assert_eq!(WeaponKind::Railgun.ammo_box(), 3);
+        assert_eq!(WeaponKind::Stick.ammo_box(), 0);
+    }
 }

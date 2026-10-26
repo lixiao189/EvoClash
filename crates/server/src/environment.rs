@@ -4,7 +4,7 @@
 
 use bevy::prelude::*;
 use evoclash_game::evolution::{Evolution, VAULT_SAFE_XP, crate_xp, safe_xp};
-use evoclash_game::items::{ArmorKind, Item, roll_loot};
+use evoclash_game::items::{ArmorKind, Item, roll_container};
 use evoclash_game::map::{Biome, PropKind};
 use evoclash_game::protocol::*;
 use evoclash_game::sim::{Arena, Obstacles, PLAYER_RADIUS};
@@ -20,6 +20,9 @@ use crate::gameplay::{
 const CRATE_RESPAWN_TICKS: u32 = 40 * TICKS_PER_SEC;
 const BARREL_RESPAWN_TICKS: u32 = 45 * TICKS_PER_SEC;
 const LOOT_TTL: u32 = 30 * TICKS_PER_SEC;
+/// Percent of crate and safe loot that is a gun, before the zone's usual table.
+const CRATE_GUN_PCT: u32 = 40;
+const SAFE_GUN_PCT: u32 = 70;
 const SAFE_REACH: f32 = 40.0;
 /// A cracked safe stays empty this long.
 const SAFE_RESEAL_TICKS: u32 = 90 * TICKS_PER_SEC;
@@ -277,13 +280,14 @@ fn crack_safes(
                     let tier = (prop.tier + 1).min(4);
                     spawn_pickup(
                         &mut commands,
-                        roll_loot(tier, &mut rng),
+                        roll_container(tier, SAFE_GUN_PCT, &mut rng),
                         drop_at,
                         Some(LOOT_TTL),
                     );
+                    let side = toward.perp() * 26.0;
+                    spawn_pickup(&mut commands, Item::Ammo, drop_at + side, Some(LOOT_TTL));
                     if rng.random_bool(0.5) {
-                        let side = toward.perp() * 26.0;
-                        spawn_pickup(&mut commands, Item::Emp, drop_at + side, Some(LOOT_TTL));
+                        spawn_pickup(&mut commands, Item::Emp, drop_at - side, Some(LOOT_TTL));
                     }
                     prop.open = true;
                     prop.progress = 0;
@@ -350,8 +354,8 @@ fn resolve_prop_damage(
                         loot: true,
                     });
                 }
-                let item = if rng.random_bool(0.75) {
-                    Some(roll_loot(prop.tier, &mut rng))
+                let item = if rng.random_bool(0.85) {
+                    Some(roll_container(prop.tier, CRATE_GUN_PCT, &mut rng))
                 } else if rng.random_bool(0.5) {
                     Some(Item::Medkit)
                 } else {

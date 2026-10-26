@@ -13,8 +13,9 @@ const SWING_BACK: f32 = 1.2;
 const SWING_THROUGH: f32 = 1.1;
 /// How far the hands thrust toward the target mid-swing, in world pixels.
 const SWING_LUNGE: f32 = 6.0;
-/// Guns are drawn at one texture pixel per world pixel, like the LPC characters holding them.
-const GUN_SCALE: f32 = 1.0;
+/// Guns are drawn a bit larger than one texture pixel per world pixel so they read as full-length
+/// weapons next to the 64 px LPC characters holding them.
+const GUN_SCALE: f32 = 1.6;
 /// Muzzle flash lifetime and its size for a rifle, in world pixels.
 const FLASH_SECS: f32 = 0.06;
 const FLASH_SIZE: Vec2 = Vec2::new(22.0, 14.0);

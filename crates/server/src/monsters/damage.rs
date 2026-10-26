@@ -25,10 +25,10 @@ pub(super) fn drops(monster: Monster, brain: &Brain, rng: &mut impl Rng) -> Vec<
             vec![roll_loot(tier, rng)]
         }
         MonsterKind::Drone if rng.random_bool(0.4) => {
-            vec![if rng.random_bool(0.5) {
-                Item::Emp
-            } else {
-                Item::Medkit
+            vec![match rng.random_range(0..3) {
+                0 => Item::Emp,
+                1 => Item::Medkit,
+                _ => Item::Ammo,
             }]
         }
         MonsterKind::Raider => {
@@ -37,6 +37,9 @@ pub(super) fn drops(monster: Monster, brain: &Brain, rng: &mut impl Rng) -> Vec<
                 kind: brain.weapon,
                 ammo: brain.weapon.max_ammo() / 2,
             }];
+            if rng.random_bool(0.5) {
+                items.push(Item::Ammo);
+            }
             if rng.random_bool(0.35) {
                 items.push(Item::Armor {
                     kind: ArmorKind::Kevlar,
