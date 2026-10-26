@@ -30,7 +30,7 @@ pub(super) fn loot_spawner(
             continue;
         }
         let item = roll_loot(spot.tier, &mut rng);
-        state.entity = Some(spawn_pickup(&mut commands, item, spot.pos, None));
+        state.entity = Some(spawn_loot(&mut commands, item, spot.pos, None));
     }
 }
 
@@ -70,7 +70,7 @@ pub fn match_flow(
                 let mut rng = rand::rng();
                 for offset in [Vec2::new(-45.0, 0.0), Vec2::new(45.0, 0.0)] {
                     let item = roll_loot(4, &mut rng);
-                    spawn_pickup(
+                    spawn_loot(
                         &mut commands,
                         item,
                         VAULT_CENTER + offset,

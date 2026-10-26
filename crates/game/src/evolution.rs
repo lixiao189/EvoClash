@@ -7,7 +7,7 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::items::{Arm, ArmorKind, WeaponKind};
+use crate::items::{AmmoKind, Arm, ArmorKind, WeaponKind};
 use crate::sim::MAX_HP;
 
 const SEC: u16 = 64;
@@ -454,11 +454,13 @@ impl Evolution {
         1.0 + 0.05 * self.r(Perk::LightFoot)
     }
 
-    pub fn max_ammo(&self, weapon: WeaponKind) -> u16 {
-        let base = weapon.max_ammo();
+    /// Ammo pouch capacity for one family.
+    pub fn ammo_cap(&self, kind: AmmoKind) -> u16 {
+        let base = kind.base_cap();
         (base as f32 * (1.0 + 0.2 * self.r(Perk::AmmoRecycler))).round() as u16
     }
 
+    /// Extra trigger pulls of ammo salvaged per kill.
     pub fn ammo_per_kill(&self) -> u16 {
         2 * self.rank(Perk::AmmoRecycler) as u16
     }
@@ -684,7 +686,7 @@ mod tests {
         assert_eq!(evo.fire_cooldown(7), 5);
         assert_eq!(evo.fire_cooldown(5), 4);
         assert_eq!(evo.fire_cooldown(3), 3);
-        assert_eq!(evo.max_ammo(WeaponKind::Rifle), 72);
+        assert_eq!(evo.ammo_cap(AmmoKind::Bullet), 216);
         assert_eq!(evo.ammo_per_kill(), 6);
         assert_eq!(evo.crack_ticks(), 85);
     }

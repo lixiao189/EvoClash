@@ -31,6 +31,7 @@ pub fn spawn_combatant(commands: &mut Commands, player: Player, peer: Option<Pee
             Evolving::default(),
             Recovery::default(),
             HiddenFrom::default(),
+            Selecting::default(),
         ),
         Replicate::to_clients(NetworkTarget::All),
         InterpolationTarget::to_clients(interpolate),

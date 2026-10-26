@@ -28,18 +28,16 @@ pub(super) fn drops(monster: Monster, brain: &Brain, rng: &mut impl Rng) -> Vec<
             vec![match rng.random_range(0..3) {
                 0 => Item::Emp,
                 1 => Item::Medkit,
-                _ => Item::Ammo,
+                _ => roll_ammo(tier, rng),
             }]
         }
         MonsterKind::Raider => {
-            // Whatever it carried, like any fallen fighter.
-            let mut items = vec![Item::Weapon {
-                kind: brain.weapon,
-                ammo: brain.weapon.max_ammo() / 2,
-            }];
-            if rng.random_bool(0.5) {
-                items.push(Item::Ammo);
-            }
+            // Whatever it carried, like any fallen fighter: the gun and its ammo.
+            let gun = Item::weapon(brain.weapon);
+            let mut items: Vec<Item> = [Some(gun), gun.matching_ammo()]
+                .into_iter()
+                .flatten()
+                .collect();
             if rng.random_bool(0.35) {
                 items.push(Item::Armor {
                     kind: ArmorKind::Kevlar,
@@ -147,7 +145,7 @@ pub(super) fn resolve_monster_damage(
             } else {
                 Vec2::ZERO
             };
-            spawn_pickup(&mut commands, item, pos.0 + offset, Some(LOOT_TTL));
+            spawn_loot(&mut commands, item, pos.0 + offset, Some(LOOT_TTL));
         }
         if let Some(by) = dmg.attacker {
             // Non-players (raiders) are skipped by `grant_xp`.

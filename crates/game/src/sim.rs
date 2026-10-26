@@ -21,14 +21,14 @@ pub const BOUNTY_STREAK: u32 = 3;
 pub const UNDERDOG_BONUS_PER_TIER: f32 = 0.2;
 pub const UNDERDOG_BONUS_MAX: f32 = 1.8;
 
-/// How advanced someone's kit is: the better of their weapon and armor tiers.
+/// How advanced someone's kit is: the best of their weapons and armor.
 pub fn gear_tier(vitals: &Vitals, loadout: &crate::protocol::Loadout) -> u8 {
     let armor = if vitals.armor_points > 0.0 {
         vitals.armor.tier()
     } else {
         0
     };
-    loadout.weapon.spec().tier().max(armor)
+    loadout.best_tier().max(armor)
 }
 
 /// Damage multiplier when a weaker weapon hits better-equipped gear: the stone age can
