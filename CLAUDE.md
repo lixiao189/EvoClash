@@ -62,34 +62,37 @@ Workspace lints allow clippy `type_complexity` and `too_many_arguments` (normal 
 
 ## Sub-agent team
 
-Four project agents live in `.claude/agents/`. The main session is the lead: it talks to the user, splits the work, briefs agents, merges their results, and alone does git (branch/commit/PR).
+The main session is the lead: it talks to the user, splits the work, briefs agents, merges their results, and alone does git (branch/commit/PR).
 
-| Agent | Model | Owns | Use for |
-|---|---|---|---|
-| `game-designer` | sonnet | README `## 玩法` (no code) | rules, numbers, balance → short spec |
-| `server-dev` | sonnet | `crates/server`, `crates/matchmaker`, `crates/game`, `deploy/` | authoritative rules, protocol, bots, monsters, matchmaking |
-| `client-dev` | sonnet | `crates/client` | rendering, sprites, effects, HUD, input, prediction |
-| `game-tester` | haiku | `#[cfg(test)]` code only | fmt/clippy/tests, missing tests, failure triage |
+The same five roles live in two places. Pi discovers `.pi/agents/*.md` (`advertise: true`; aliases `策划` / `服务端` / `客户端` / `美术` / `测试`). Those agents inherit the session model; thinking is `medium` for `game-designer` and `artist`, `high` for `server-dev` and `client-dev`, `low` for `game-tester`. Claude Code uses `.claude/agents/`: designer, server, client, and artist on sonnet, tester on haiku.
+
+| Agent | Owns | Use for |
+|---|---|---|
+| `game-designer` | README `## 玩法` (no code) | rules, numbers, balance → short spec |
+| `server-dev` | `crates/server`, `crates/matchmaker`, `crates/game`, `deploy/` | authoritative rules, protocol, bots, monsters, matchmaking |
+| `client-dev` | `crates/client` except the art paths below | rendering, effects, HUD, input, prediction, session |
+| `artist` | `crates/client/src/textures/`, `crates/client/src/lpc/`, art under `crates/client/assets/` (`lpc/`, `lpc-src/`, credits) | LPC sheets, procedural sprites, poses, art credits |
+| `game-tester` | `#[cfg(test)]` code only | fmt/clippy/tests, missing tests, failure triage |
 
 Keep it cheap:
 
 - Don't spawn for small things. One-file fixes, questions and quick reads stay in the main session; agents are for multi-file features or a long noisy step (a full CI run).
-- Pipeline only as far as needed: `game-designer` only when rules/numbers are undecided → `server-dev` (shared `crates/game` first, since the client builds on it) → `client-dev` → `game-tester`. Server and client may run in parallel only when the protocol is already settled and they touch no shared file.
+- Pipeline only as far as needed: `game-designer` only when rules/numbers are undecided → `server-dev` (shared `crates/game` first, since the client builds on it) → `client-dev` and `artist` → `game-tester`. `artist` settles a new `Textures` field or LPC frame API before `client-dev` draws it. Server and client may run in parallel only when the protocol is already settled and they touch no shared file; client and artist may run in parallel only on disjoint files.
 - Briefs are short and self-contained: goal, exact files/symbols, acceptance check, and the spec lines that matter — not the whole conversation. Agents already get this file, so don't repeat it.
-- Follow up with `SendMessage` to the agent that has the context instead of spawning a fresh one.
+- Follow up with the agent that has the context (Pi: resume that child; Claude Code: `SendMessage`) instead of spawning a fresh one.
 - Agents run scoped, quiet checks (`-p <crate>`, `-q`, `--message-format=short`); the full `make check` runs once, in `game-tester`, before the PR.
 - Reports are capped (≈15 lines, file:line refs, no code dumps); relay only what the user needs.
 
 Avoid edit conflicts between agents:
 
 - Split work by file ownership, not by feature step. Every brief lists the files the agent may edit; agents running at the same time never share a file. Agents edit only their files and put any change needed elsewhere in their report for the lead to apply.
-- Hub files have one writer: `crates/game/src/protocol.rs` and `PROTOCOL_ID` in `net.rs`, plugin registration (`build` in `render/mod.rs`, `gameplay/mod.rs`, `monsters/mod.rs`, both `main.rs`/`config.rs`), `textures/mod.rs` (`Textures` fields and `build`), `Cargo.toml`/`Cargo.lock`, and docs (`CLAUDE.md`, `README.md`, `.claude/`). The lead (or one named agent) makes these edits first, before fanning out, so later agents build against a settled interface.
+- Hub files have one writer: `crates/game/src/protocol.rs` and `PROTOCOL_ID` in `net.rs`, plugin registration (`build` in `render/mod.rs`, `gameplay/mod.rs`, `monsters/mod.rs`, both `main.rs`/`config.rs`), `textures/mod.rs` (`Textures` fields and `build`, `artist`) and `lpc/mod.rs` (sheet layout, `artist`), `Cargo.toml`/`Cargo.lock`, and docs (`CLAUDE.md`, `README.md`, `.claude/`, `.pi/`). The lead (or one named agent) makes these edits first, before fanning out, so later agents build against a settled interface.
 - Big areas are module directories (`client/src/render/`, `client/src/textures/`, `game/src/map/`, `server/src/gameplay/`, `server/src/monsters/`): `mod.rs` holds shared types, constants and the plugin; each child file is one concern (`use super::*;`, items `pub(super)`). Put new code in the child it belongs to, or a new child file, rather than growing `mod.rs`, so parallel agents land in different files.
-- Each such directory's `tests.rs` (and other `#[cfg(test)]` code) belongs to `game-tester` while implementers run in parallel.
+- Each such directory's `tests.rs` (and other `#[cfg(test)]` code) belongs to `game-tester` while implementers run in parallel. Ignored art previews and the LPC bake test stay with `artist`; do not let both edit the same `tests.rs`.
 - Agents sharing this checkout may run together only with disjoint file sets. If overlap can't be avoided, run them one after another, or give each `isolation: "worktree"` and the lead merges the branches.
 - When a file passes ~600 lines, or two tasks collided in it, split it into a module directory as above in its own refactor PR before the feature work.
 
-Escalate the model per call (Agent `model: "opus"`), not by editing the agent files, when a task touches:
+Escalate the model per call (Claude Code: `model: "opus"`; Pi: a stronger `model` from that session's registry), not by editing the agent files, when a task touches:
 
 - `sim.rs` or client prediction/rollback — a mismatch doesn't fail the build, it shows up as rubber-banding under lag;
 - lag compensation (`combat.rs` position history) or `SimSet` ordering (when damage and events land);
@@ -97,7 +100,7 @@ Escalate the model per call (Agent `model: "opus"`), not by editing the agent fi
 - unfamiliar Bevy 0.20 / lightyear 0.31 APIs, where a weaker model guesses old signatures;
 - one feature spanning protocol + server + client.
 
-Alternatively the lead writes the interface/design for such work, a sonnet agent implements it, and the lead reviews the diff. Also escalate (don't retry) when an agent fails the same build or test twice, or comes back with a wrong or vague result — a few failed sonnet rounds cost more than one opus run. If `game-tester` misreads failures, rerun it on sonnet.
+Alternatively the lead writes the interface/design for such work, a default implementer writes it, and the lead reviews the diff. Also escalate (don't retry) when an agent fails the same build or test twice, or comes back with a wrong or vague result — a few failed default-model rounds cost more than one stronger run. If `game-tester` misreads failures, rerun it on a stronger model.
 
 ## Releases
 
