@@ -386,8 +386,6 @@ impl Evolution {
         Some(perk)
     }
 
-    // ---- perk effects
-
     pub fn max_hp(&self) -> f32 {
         MAX_HP + 12.0 * self.r(Perk::Constitution)
     }

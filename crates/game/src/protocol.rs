@@ -11,8 +11,6 @@ use crate::evolution::{Evolution, Skill, SkillState};
 use crate::items::{ArmorKind, Item, WeaponKind};
 use crate::map::PropKind;
 
-// ---------------------------------------------------------------- inputs
-
 /// One tick of player intent. Sent redundantly every tick (UDP, unreliable) so a lost
 /// packet never drops a shot; the server replays the newest input it has if one is late.
 #[derive(Serialize, Deserialize, Debug, Default, PartialEq, Clone, Reflect)]
@@ -42,8 +40,6 @@ impl PlayerInput {
 impl MapEntities for PlayerInput {
     fn map_entities<M: EntityMapper>(&mut self, _entity_mapper: &mut M) {}
 }
-
-// ---------------------------------------------------------------- components
 
 /// Identity of a combatant (human or server bot).
 #[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -455,8 +451,6 @@ pub struct MatchState {
     pub boss_eta: u32,
 }
 
-// ---------------------------------------------------------------- messages
-
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum GameEvent {
     Kill {
@@ -519,8 +513,6 @@ pub enum GameEvent {
 pub struct ReliableChannel;
 /// Cosmetic feedback (hits, swings, explosions): latest-wins, never retransmitted.
 pub struct FastChannel;
-
-// ---------------------------------------------------------------- registration
 
 pub struct ProtocolPlugin;
 
