@@ -36,8 +36,6 @@ pub enum Loading {
 }
 
 impl PendingAssets {
-    // The first sheets to register here are the LPC characters (next migration step).
-    #[allow(dead_code)]
     pub fn add(&mut self, handle: impl Into<UntypedHandle>) {
         self.handles.push(handle.into());
     }

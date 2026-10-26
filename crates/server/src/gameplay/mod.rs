@@ -105,8 +105,6 @@ impl Plugin for GameplayPlugin {
     }
 }
 
-// ---------------------------------------------------------------- resources & components
-
 #[derive(Resource, Default)]
 pub struct SimTick(pub u32);
 
