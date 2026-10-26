@@ -10,7 +10,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::image::ImageSampler;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use evoclash_game::items::{ArmorKind, Item, WeaponKind};
+use evoclash_game::items::{AmmoKind, ArmorKind, Item, WeaponKind};
 use evoclash_game::map::Floor;
 
 mod arena;
@@ -70,7 +70,9 @@ pub struct Textures {
     weapons: [WeaponSprite; 6],
     armors: [Handle<Image>; 3],
     pub medkit: Handle<Image>,
-    pub ammo: Handle<Image>,
+    /// Ammo boxes per `AmmoKind::index`.
+    ammo: [Handle<Image>; 4],
+    bag: Handle<Image>,
     pub emp: Handle<Image>,
     /// Bullet streak: white, fading tail on the left, bright round head on the right.
     pub bolt: Handle<Image>,
@@ -113,11 +115,12 @@ impl Textures {
 
     pub fn item(&self, item: Item) -> Handle<Image> {
         match item {
-            Item::Weapon { kind, .. } => self.weapon(kind).icon.clone(),
+            Item::Weapon(kind) => self.weapon(kind).icon.clone(),
             Item::Armor { kind, .. } => self.armors[armor_index(kind)].clone(),
             Item::Emp => self.emp.clone(),
             Item::Medkit => self.medkit.clone(),
-            Item::Ammo => self.ammo.clone(),
+            Item::Ammo { kind, .. } => self.ammo[kind.index()].clone(),
+            Item::Bag => self.bag.clone(),
         }
     }
 }
@@ -225,7 +228,13 @@ pub fn build(images: &mut Assets<Image>) -> Textures {
         armors: [ArmorKind::Scrap, ArmorKind::Kevlar, ArmorKind::PowerArmor]
             .map(|kind| add(paint_armor(kind), true)),
         medkit: add(paint_medkit(), true),
-        ammo: add(paint_ammo(), true),
+        ammo: [
+            add(paint_ammo_kind(AmmoKind::Arrow), true),
+            add(paint_ammo_kind(AmmoKind::Shell), true),
+            add(paint_ammo(), true),
+            add(paint_ammo_kind(AmmoKind::Cell), true),
+        ],
+        bag: add(paint_bag(), true),
         emp: add(paint_emp(), true),
         bolt: add(paint_bolt(), false),
         muzzle: add(paint_muzzle(), false),

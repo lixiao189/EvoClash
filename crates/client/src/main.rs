@@ -7,6 +7,7 @@
 #![cfg_attr(not(target_family = "wasm"), allow(dead_code, unused_imports))]
 
 mod assets;
+mod backpack;
 mod effects;
 mod hud;
 mod input;
@@ -87,6 +88,7 @@ fn main() {
         render::RenderPlugin,
         effects::EffectsPlugin,
         hud::HudPlugin,
+        backpack::BackpackPlugin,
         minimap::MinimapPlugin,
     ));
     app.run();

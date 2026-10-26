@@ -210,7 +210,7 @@ pub(super) fn strike_on_shot(
         // By the time it replicates the shot has flown a little way down the line of fire.
         let shooter = players
             .iter()
-            .filter(|(_, _, vitals, loadout)| vitals.alive && loadout.weapon == weapon)
+            .filter(|(_, _, vitals, loadout)| vitals.alive && loadout.weapon() == weapon)
             .filter_map(|(entity, pos, _, _)| {
                 let back = shot.0 - pos.0;
                 let along = back.dot(dir);
@@ -321,6 +321,7 @@ pub(super) fn pose_players(
     cursor: Res<CursorWorld>,
     fixed: Res<Time<Fixed>>,
     time: Res<Time>,
+    selection: Res<Selection>,
     mut players: Query<(
         &Pos,
         Option<&TickSamples>,
@@ -345,6 +346,12 @@ pub(super) fn pose_players(
         }
     };
     for (pos, samples, aim, loadout, vitals, strike, mut parts, local) in &mut players {
+        // Your own hand follows your hotbar request without waiting for the server.
+        let loadout = &if local {
+            selection.apply(loadout)
+        } else {
+            *loadout
+        };
         let p = visual_pos(pos, samples, &fixed);
         let gun_at = p + Vec2::Y * GUN_HEIGHT;
         // Your own body follows the cursor directly instead of waiting for the server's aim.
@@ -370,7 +377,7 @@ pub(super) fn pose_players(
 
         let (facing, flip) = Facing::from_aim(aim);
         let row = lpc::row(facing, flip);
-        let melee = loadout.weapon.melee().is_some();
+        let melee = loadout.weapon().melee().is_some();
         let since = strike.map_or(f32::INFINITY, |s| now - s.0);
         let action = match parts.died {
             Some(died) => lpc::Action::Fall(now - died),
@@ -409,7 +416,7 @@ pub(super) fn pose_players(
         // body, out of sight.
         let gun = !melee && parts.died.is_none();
         show(parts.weapon, gun);
-        let attack = attack_pose(loadout.weapon, aim, since);
+        let attack = attack_pose(loadout.weapon(), aim, since);
         let lit = gun && attack.flash_alpha > 0.0;
         show(parts.flash, lit);
         if !gun {
@@ -417,7 +424,7 @@ pub(super) fn pose_players(
         }
         let held = Vec2::from_angle(aim.to_angle() + attack.swing);
         let left = held.x < 0.0;
-        let sprite_info = tex.weapon(loadout.weapon);
+        let sprite_info = tex.weapon(loadout.weapon());
         let grip = lpc::gun_grip(row) + attack.push;
         let center = textures::held_layout(
             grip,
@@ -433,7 +440,7 @@ pub(super) fn pose_players(
             3.0 * Z_STEP
         };
         if let Ok((mut sprite, mut transform)) = parts_q.get_mut(parts.weapon) {
-            if parts.shown != Some(loadout.weapon) {
+            if parts.shown != Some(loadout.weapon()) {
                 sprite.image = sprite_info.held.clone();
             }
             // Keep the gun upright when it points left.
@@ -442,13 +449,13 @@ pub(super) fn pose_players(
             transform.rotation = Quat::from_rotation_z(held.to_angle());
             transform.scale = Vec3::new(GUN_SCALE, GUN_SCALE, 1.0);
         }
-        parts.shown = Some(loadout.weapon);
+        parts.shown = Some(loadout.weapon());
         // Drawn over everything, even a gun held behind the body.
         if lit && let Ok((mut sprite, mut transform)) = parts_q.get_mut(parts.flash) {
             let muzzle = center + held * (sprite_info.size.x / 2.0 - 1.0) * GUN_SCALE;
             sprite.custom_size = Some(attack.flash);
             sprite.color = loadout
-                .weapon
+                .weapon()
                 .spec()
                 .color()
                 .mix(&Color::WHITE, 0.45)

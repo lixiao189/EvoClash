@@ -15,7 +15,7 @@ use lightyear::prelude::*;
 use rand::Rng;
 
 use crate::hud::path_color;
-use crate::input::{GUN_HEIGHT, LocalPlayer};
+use crate::input::{GUN_HEIGHT, LocalPlayer, Selection};
 use crate::render::{CameraShake, Strike, UiFont, swing_side, tracer_size};
 use crate::textures::Textures;
 
@@ -322,6 +322,7 @@ fn local_fire(
     textures: Res<Textures>,
     time: Res<Time>,
     mut gun: ResMut<LocalGun>,
+    selection: Res<Selection>,
     state: Query<&MatchState>,
     me: Query<
         (
@@ -344,16 +345,20 @@ fn local_fire(
     if !input.fire || !vitals.alive || intermission || gun.cooldown > 0.0 {
         return;
     }
-    let weapon = loadout.weapon.spec();
+    let loadout = &selection.apply(loadout);
+    if loadout.throwing() {
+        return;
+    }
+    let weapon = loadout.weapon().spec();
     // 超频扳机 shortens the interval on the server; match it so tracers don't lag behind.
     let cooldown = evo.map_or(weapon.cooldown(), |e| e.fire_cooldown(weapon.cooldown()));
     gun.cooldown = cooldown as f32 / 64.0;
     commands.entity(entity).insert(Strike(time.elapsed_secs()));
     let aim = input.aim.normalize_or(Vec2::X);
-    let shooter = match loadout.weapon.arm() {
+    let shooter = match loadout.weapon().arm() {
         Arm::Ranged(shooter) => shooter,
         Arm::Melee(_) => {
-            spawn_swing(&mut commands, &textures, pos.0, aim, loadout.weapon, evo);
+            spawn_swing(&mut commands, &textures, pos.0, aim, loadout.weapon(), evo);
             return;
         }
     };
@@ -364,12 +369,12 @@ fn local_fire(
                 pos: start,
                 vel: dir * shooter.muzzle_speed(),
                 ttl: shooter.lifetime() as f32 / 64.0,
-                weapon: loadout.weapon,
+                weapon: loadout.weapon(),
             },
             Sprite {
                 image: textures.bolt.clone(),
                 color: shooter.color(),
-                custom_size: Some(tracer_size(loadout.weapon)),
+                custom_size: Some(tracer_size(loadout.weapon())),
                 ..default()
             },
             Anchor::CENTER_RIGHT,
@@ -495,7 +500,7 @@ fn receive_events(
                         Some((entity, false, _)) => {
                             commands.entity(entity).insert(Strike(now));
                             gear.get(entity)
-                                .map_or((WeaponKind::Stick, None), |(l, e)| (l.weapon, e))
+                                .map_or((WeaponKind::Stick, None), |(l, e)| (l.weapon(), e))
                         }
                         None => (WeaponKind::Stick, None),
                     };

@@ -53,19 +53,43 @@ pub(super) fn paint_medkit() -> Canvas {
 }
 
 pub(super) fn paint_ammo() -> Canvas {
+    paint_ammo_kind(AmmoKind::Bullet)
+}
+
+/// An ammo box whose lid and contents say which stack it feeds.
+pub(super) fn paint_ammo_kind(kind: AmmoKind) -> Canvas {
     let mut c = Canvas::new(14, 11);
-    let olive = rgb(0.34, 0.4, 0.22);
-    c.rect(1, 3, 12, 9, olive);
-    c.rect(1, 3, 12, 3, shade(olive, 1.3));
-    c.rect(1, 9, 12, 9, shade(olive, 0.7));
-    c.rect(1, 5, 12, 5, shade(olive, 0.8));
-    // Handle and a row of brass cartridge tips peeking out of the lid.
+    let (body, tip) = match kind {
+        AmmoKind::Arrow => (rgb(0.45, 0.32, 0.18), rgb(0.7, 0.72, 0.75)),
+        AmmoKind::Shell => (rgb(0.4, 0.2, 0.16), rgb(0.85, 0.2, 0.15)),
+        AmmoKind::Bullet => (rgb(0.34, 0.4, 0.22), rgb(0.85, 0.65, 0.2)),
+        AmmoKind::Cell => (rgb(0.2, 0.26, 0.36), rgb(0.35, 0.9, 1.0)),
+    };
+    c.rect(1, 3, 12, 9, body);
+    c.rect(1, 3, 12, 3, shade(body, 1.3));
+    c.rect(1, 9, 12, 9, shade(body, 0.7));
+    c.rect(1, 5, 12, 5, shade(body, 0.8));
+    // Handle and a row of rounds peeking out of the lid.
     c.rect(5, 1, 8, 2, rgb(0.4, 0.4, 0.38));
-    let brass = rgb(0.85, 0.65, 0.2);
     for x in [3, 5, 7, 9] {
-        c.rect(x, 6, x + 1, 8, brass);
-        c.put(x, 6, shade(brass, 1.35));
+        c.rect(x, 6, x + 1, 8, tip);
+        c.put(x, 6, shade(tip, 1.35));
     }
+    c.outline(OUTLINE);
+    c
+}
+
+/// A dead player's belongings: a stuffed canvas sack.
+pub(super) fn paint_bag() -> Canvas {
+    let mut c = Canvas::new(14, 14);
+    let cloth = rgb(0.5, 0.4, 0.26);
+    c.disc(7.0, 8.5, 5.5, cloth);
+    c.bevel(7.0, 8.5, 5.5, 0.8);
+    c.rect(4, 2, 9, 4, shade(cloth, 0.85));
+    c.rect(4, 4, 9, 4, rgb(0.62, 0.5, 0.3));
+    c.rect(5, 8, 8, 11, shade(cloth, 1.2));
+    c.rect(5, 11, 8, 11, shade(cloth, 0.7));
+    c.put(6, 9, rgb(0.8, 0.7, 0.35));
     c.outline(OUTLINE);
     c
 }

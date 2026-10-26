@@ -5,22 +5,24 @@ use bevy::prelude::*;
 use evoclash_game::evolution::{
     EvoPath, Evolution, MAX_LEVEL, MAX_RANK, SKILL_A_RANK, SKILL_B_RANK, SkillState, xp_to_reach,
 };
-use evoclash_game::items::{ArmorKind, tier_color};
+use evoclash_game::items::{ArmorKind, HOTBAR_SLOTS, THROW_SLOT};
 use evoclash_game::map::PropKind;
 use evoclash_game::protocol::*;
 use evoclash_game::sim::{Arena, DASH_COOLDOWN, PLAYER_RADIUS};
 
 use crate::assets::{Loading, PendingAssets};
+use crate::backpack::{shots_left, slot_image};
 use crate::effects::{Banner, BossBar, KillFeed};
-use crate::input::LocalPlayer;
+use crate::input::{LocalPlayer, Selection};
 use crate::render::UiFont;
+use crate::textures::Textures;
 
 pub struct HudPlugin;
 
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_hud);
-        app.add_systems(Update, (update_hud, update_evolution_hud));
+        app.add_systems(Update, (update_hud, update_evolution_hud, update_hotbar));
     }
 }
 
@@ -61,6 +63,14 @@ pub fn path_color(path: EvoPath) -> Color {
 const PANEL_BG: Color = Color::srgba(0.0, 0.0, 0.0, 0.6);
 const LOCKED: Color = Color::srgba(0.5, 0.5, 0.5, 0.6);
 const GOLD: Color = Color::srgb(1.0, 0.85, 0.35);
+
+/// Parts of hotbar slot `i`: the box, its picture and its count line.
+#[derive(Component)]
+enum HotbarUi {
+    Slot(u8),
+    Icon(u8),
+    Count(u8),
+}
 
 #[derive(Component)]
 enum EvoUi {
@@ -121,6 +131,7 @@ fn spawn_hud(mut commands: Commands, font: Res<UiFont>) {
         Justify::Left,
     ));
     spawn_bottom_center(&mut commands, &font);
+    spawn_hotbar(&mut commands, &font);
     commands.spawn(text_node(
         &font,
         16.0,
@@ -240,6 +251,149 @@ fn spawn_hud(mut commands: Commands, font: Res<UiFont>) {
         ));
 }
 
+/// Four weapon slots along the bottom edge, under the evolution column.
+fn spawn_hotbar(commands: &mut Commands, font: &UiFont) {
+    commands
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(14.0),
+            width: Val::Percent(100.0),
+            justify_content: JustifyContent::Center,
+            column_gap: Val::Px(6.0),
+            ..default()
+        })
+        .with_children(|row| {
+            for i in 0..HOTBAR_SLOTS {
+                row.spawn((
+                    HotbarUi::Slot(i),
+                    Node {
+                        width: Val::Px(54.0),
+                        height: Val::Px(54.0),
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        border: UiRect::all(Val::Px(2.0)),
+                        border_radius: BorderRadius::all(Val::Px(4.0)),
+                        ..default()
+                    },
+                    BackgroundColor(PANEL_BG),
+                    BorderColor::all(LOCKED),
+                ))
+                .with_children(|slot| {
+                    slot.spawn((
+                        HotbarUi::Icon(i),
+                        ImageNode::default(),
+                        Node {
+                            width: Val::Px(42.0),
+                            ..default()
+                        },
+                    ));
+                    slot.spawn((
+                        Text::new((i + 1).to_string()),
+                        font.sized(12.0),
+                        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.75)),
+                        Node {
+                            position_type: PositionType::Absolute,
+                            top: Val::Px(1.0),
+                            left: Val::Px(3.0),
+                            ..default()
+                        },
+                    ));
+                    slot.spawn((
+                        HotbarUi::Count(i),
+                        Text::new(""),
+                        font.sized(13.0),
+                        TextColor(Color::WHITE),
+                        TextShadow::default(),
+                        Node {
+                            position_type: PositionType::Absolute,
+                            bottom: Val::Px(1.0),
+                            right: Val::Px(3.0),
+                            ..default()
+                        },
+                    ));
+                });
+            }
+        });
+}
+
+fn update_hotbar(
+    textures: Option<Res<Textures>>,
+    selection: Res<Selection>,
+    me: Query<&Loadout, With<LocalPlayer>>,
+    mut ui: Query<(
+        &HotbarUi,
+        Option<&mut ImageNode>,
+        Option<&mut Visibility>,
+        Option<&mut Text>,
+        Option<&mut TextColor>,
+        Option<&mut BorderColor>,
+    )>,
+) {
+    let (Some(textures), Ok(loadout)) = (textures, me.single()) else {
+        return;
+    };
+    let shown = selection.shown(loadout);
+    let dry = Color::srgb(0.9, 0.25, 0.2);
+    for (kind, image, visibility, text, color, border) in &mut ui {
+        match *kind {
+            HotbarUi::Slot(i) => {
+                if let Some(mut border) = border {
+                    let c = if i == shown {
+                        GOLD
+                    } else {
+                        Color::srgba(0.5, 0.5, 0.5, 0.5)
+                    };
+                    border.set_if_neq(BorderColor::all(c));
+                }
+            }
+            HotbarUi::Icon(i) => {
+                let handle = slot_image(&textures, loadout, i);
+                if let (Some(mut visibility), Some(mut image)) = (visibility, image) {
+                    match handle {
+                        Some(h) => {
+                            if image.image != h {
+                                image.image = h;
+                            }
+                            visibility.set_if_neq(Visibility::Inherited);
+                        }
+                        None => {
+                            visibility.set_if_neq(Visibility::Hidden);
+                        }
+                    }
+                    let usable = i == THROW_SLOT && loadout.emps > 0
+                        || loadout.slot(i).is_some_and(|w| loadout.usable(w));
+                    image.color = if usable {
+                        Color::WHITE
+                    } else {
+                        Color::srgba(1.0, 0.45, 0.4, 0.5)
+                    };
+                }
+            }
+            HotbarUi::Count(i) => {
+                let (value, c) = match (i, loadout.slot(i)) {
+                    (THROW_SLOT, _) => (
+                        format!("×{}", loadout.emps),
+                        if loadout.emps > 0 { Color::WHITE } else { dry },
+                    ),
+                    (_, Some(w)) if w.ranged().is_some() => {
+                        let left = shots_left(loadout, w);
+                        (left.to_string(), if left > 0 { Color::WHITE } else { dry })
+                    }
+                    _ => (String::new(), Color::WHITE),
+                };
+                if let Some(mut text) = text
+                    && text.0 != value
+                {
+                    text.0 = value;
+                }
+                if let Some(mut color) = color {
+                    color.0 = c;
+                }
+            }
+        }
+    }
+}
+
 fn ui_text(font: &UiFont, size: f32, kind: EvoUi, color: Color) -> impl Bundle {
     (
         kind,
@@ -255,7 +409,7 @@ fn spawn_bottom_center(commands: &mut Commands, font: &UiFont) {
     commands
         .spawn(Node {
             position_type: PositionType::Absolute,
-            bottom: Val::Px(14.0),
+            bottom: Val::Px(78.0),
             width: Val::Percent(100.0),
             flex_direction: FlexDirection::Column,
             align_items: AlignItems::Center,
@@ -488,7 +642,7 @@ fn update_evolution_hud(
             }
             EvoUi::PerkTitle => {
                 let value = match countdown {
-                    Some(secs) => format!("选择进化（按 1/2/3）  {secs:.0} 秒后随机选择"),
+                    Some(secs) => format!("选择进化（按 Z/X/C）  {secs:.0} 秒后随机选择"),
                     None => String::new(),
                 };
                 set_text(value, None);
@@ -504,7 +658,7 @@ fn update_evolution_hud(
                 };
                 let path = perk.evo_path();
                 set_text(
-                    format!("[{}]  {}", i + 1, path.name()),
+                    format!("[{}]  {}", ["Z", "X", "C"][i], path.name()),
                     Some(path_color(path)),
                 );
             }
@@ -696,14 +850,8 @@ fn update_hud(
                 None => String::new(),
             },
             HudText::Status => match me {
-                Some((_, vitals, loadout, stats, dash, _)) => {
-                    let weapon = loadout.weapon.spec();
-                    color.0 = tier_color(weapon.tier()).mix(&Color::WHITE, 0.4);
-                    let ammo = if loadout.weapon.melee().is_some() {
-                        "∞".to_string()
-                    } else {
-                        loadout.ammo.to_string()
-                    };
+                Some((_, vitals, _, stats, dash, _)) => {
+                    color.0 = Color::WHITE;
                     let dash = if dash.cooldown == 0 {
                         "就绪".to_string()
                     } else {
@@ -713,14 +861,11 @@ fn update_hud(
                         )
                     };
                     format!(
-                        "生命 {:.0}/{:.0}   {} {:.0}\n武器 [T{}] {}  弹药 {ammo}\n电磁脉冲 ×{}   冲刺 {dash}   连杀 {}\n\nWASD 移动  鼠标 瞄准/射击  空格 冲刺\nE 拾取（按住撬保险柜）  Q/右键 电磁脉冲\nR/T 技能  1/2/3 选择进化",
+                        "生命 {:.0}/{:.0}   {} {:.0}\n冲刺 {dash}   连杀 {}\n\nWASD 移动  鼠标 瞄准/射击  空格 冲刺\nE 拾取（按住撬保险柜）  Q/右键 电磁脉冲\n1-4/滚轮 切换  B 背包  R/T 技能  Z/X/C 选择进化",
                         vitals.hp,
                         vitals.max_hp,
                         vitals.armor.name(),
                         vitals.armor_points,
-                        weapon.tier(),
-                        weapon.name(),
-                        loadout.emps,
                         stats.streak,
                     )
                 }
