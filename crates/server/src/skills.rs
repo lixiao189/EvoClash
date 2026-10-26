@@ -469,9 +469,10 @@ fn stealth_visibility(
 #[cfg(test)]
 mod tests {
     use evoclash_game::evolution::{Evolution, Perk};
+    use evoclash_game::shop::Wallet;
 
     use super::*;
-    use crate::evolution::{Dealt, Recovery, XpQueue};
+    use crate::evolution::{Dealt, LifeLog, Recovery, XpQueue};
     use crate::gameplay::{Cooldowns, Outbox};
 
     fn world_app() -> App {
@@ -480,7 +481,8 @@ mod tests {
             .init_resource::<Outbox>()
             .init_resource::<XpQueue>()
             .init_resource::<Dealt>()
-            .init_resource::<Arena>();
+            .init_resource::<Arena>()
+            .init_resource::<crate::gameplay::SimTick>();
         app.world_mut().spawn(MatchState {
             phase: Phase::Playing,
             ..default()
@@ -507,6 +509,7 @@ mod tests {
                 CurrentInput::default(),
                 Cooldowns::default(),
                 PosHistory::default(),
+                (Wallet::default(), LifeLog::default()),
             ))
             .id()
     }

@@ -6,6 +6,7 @@ pub mod map;
 pub mod nav;
 pub mod net;
 pub mod protocol;
+pub mod shop;
 pub mod sim;
 
 use bevy::prelude::*;

@@ -129,7 +129,8 @@ pub fn reset_match(
             &mut Stats,
             &mut Evolution,
             &mut SkillState,
-            &mut Evolving,
+            &mut Wallet,
+            &mut LifeLog,
         ),
         With<Player>,
     >,
@@ -152,7 +153,9 @@ pub fn reset_match(
     if !std::mem::take(&mut reset.0) {
         return;
     }
-    for (mut vitals, mut loadout, mut stats, mut evo, mut skills, mut evolving) in &mut players {
+    for (mut vitals, mut loadout, mut stats, mut evo, mut skills, mut wallet, mut life) in
+        &mut players
+    {
         *vitals = Vitals {
             alive: false,
             respawn_in: 1,
@@ -163,7 +166,8 @@ pub fn reset_match(
         // Evolution only lasts one match.
         *evo = Evolution::default();
         *skills = SkillState::default();
-        evolving.last_pick = 0;
+        *wallet = Wallet::default();
+        *life = LifeLog::default();
     }
     for entity in &clutter {
         commands.entity(entity).despawn();

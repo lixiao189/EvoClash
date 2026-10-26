@@ -40,6 +40,10 @@
     const canvas = document.getElementById("game");
     // Right click throws; keep the browser menu out of the way.
     canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+    // Tab opens the evolution panel; don't let it move focus off the game.
+    canvas.addEventListener("keydown", (event) => {
+      if (event.key === "Tab") event.preventDefault();
+    });
     if (!params.get("name")?.trim()) {
       form.style.display = "grid";
       form.name.value = localStorage.getItem("evoclash-name") ?? "";

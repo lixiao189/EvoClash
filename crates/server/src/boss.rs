@@ -18,6 +18,7 @@ use bevy::prelude::*;
 use evoclash_game::items::{ArmorKind, Item, WeaponKind};
 use evoclash_game::map::{Biome, MARGIN, VAULT_CENTER};
 use evoclash_game::protocol::*;
+use evoclash_game::shop::monster_scrap;
 use evoclash_game::sim::{Arena, DT, Obstacles, PLAYER_RADIUS};
 use rand::Rng;
 
@@ -449,6 +450,9 @@ fn reward(
                 base: award.xp,
                 pos: at,
                 loot: false,
+                // Scrap is shared out like the XP.
+                scrap: monster_scrap(MonsterKind::Behemoth) * award.xp
+                    / MonsterKind::Behemoth.xp().max(1),
             });
         }
         if award.score == 0 {

@@ -254,7 +254,9 @@ mod tests {
     use evoclash_game::sim::Arena;
 
     use super::*;
-    use crate::evolution::{Dealt, Recovery, XpQueue};
+    use evoclash_game::shop::Wallet;
+
+    use crate::evolution::{Dealt, LifeLog, Recovery, XpQueue};
     use crate::gameplay::{
         Damage, DamageQueue, Outbox, PosHistory, Rewind, SimTick, resolve_damage,
     };
@@ -290,6 +292,7 @@ mod tests {
                 Evolution::default(),
                 SkillState::default(),
                 Recovery::default(),
+                (Wallet::default(), LifeLog::default()),
                 (
                     CurrentInput::default(),
                     Cooldowns::default(),

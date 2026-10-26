@@ -1,8 +1,9 @@
 //! In-match evolution: XP, levels 1-10, perks along three paths and the skills a path grants.
 //!
 //! Everything here is plain data and arithmetic shared by server (authority) and client (HUD,
-//! prediction). Only the movement multiplier feeds the deterministic sim (`sim::speed_mult`);
-//! offers are rolled by the server with its own RNG.
+//! prediction). Only the movement multiplier feeds the deterministic sim (`sim::speed_mult`).
+//! Every level is one point to spend on any perk; the server decides when spending is allowed
+//! (any time) and when refunds are (only while dead).
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -21,12 +22,8 @@ pub const CATCH_UP_MAX: f32 = 1.5;
 /// Cap on the combined perk/skill movement multiplier (armor and EMP stack on top).
 pub const MOVE_MULT_CAP: f32 = 1.3;
 /// Path rank at which the leading path grants its first and second skill.
-pub const SKILL_A_RANK: u8 = 4;
-pub const SKILL_B_RANK: u8 = 7;
-/// An offer left alone this long is picked at random.
-pub const AUTO_PICK_TICKS: u16 = 45 * SEC;
-/// Bots think about their pick for this long.
-pub const BOT_PICK_TICKS: u16 = SEC;
+pub const SKILL_A_RANK: u8 = 2;
+pub const SKILL_B_RANK: u8 = 5;
 /// The last part of 狂暴 is a slow aftermath.
 pub const BERSERK_AFTERMATH_TICKS: u16 = 2 * SEC;
 pub const VAULT_SAFE_XP: u32 = 150;
@@ -112,7 +109,7 @@ impl EvoPath {
         ]
     }
 
-    /// (skill A at path rank 4, skill B at path rank 7)
+    /// (skill A at path rank `SKILL_A_RANK`, skill B at `SKILL_B_RANK`)
     pub fn skills(self) -> (Skill, Skill) {
         match self {
             EvoPath::Mutant => (Skill::AcidBreath, Skill::Berserk),
@@ -183,7 +180,7 @@ impl Perk {
         }
     }
 
-    /// One-line effect per rank, for the pick menu.
+    /// One-line effect per rank, for the evolution panel.
     pub fn desc(self) -> &'static str {
         match self {
             Perk::Constitution => "最大生命 +12/级",
@@ -284,15 +281,11 @@ pub struct Evolution {
     pub xp_next: u32,
     /// Rank 0..=3 of each perk, indexed by `Perk::index()`.
     pub ranks: [u8; 12],
-    /// Picks earned but not spent yet, including the one on offer.
-    pub pending: u8,
-    /// The three perks currently offered (keys 1/2/3).
-    pub offer: Option<[Perk; 3]>,
-    /// For each path, the number of the pick that first put a rank in it (0 = never).
-    /// Breaks ties for the leading path in favour of the one picked first.
+    /// Points earned (one per level) but not spent yet. `points + total_ranks() == level - 1`.
+    pub points: u8,
+    /// For each path, the number of the point that first put a rank in it (0 = none now).
+    /// Breaks ties for the leading path in favour of the one invested in first.
     pub first_pick: [u8; 3],
-    /// Ticks until the open offer is picked at random (0 when there is no offer).
-    pub offer_ticks_left: u16,
 }
 
 impl Default for Evolution {
@@ -302,10 +295,8 @@ impl Default for Evolution {
             xp: 0,
             xp_next: xp_to_reach(2),
             ranks: [0; 12],
-            pending: 0,
-            offer: None,
+            points: 0,
             first_pick: [0; 3],
-            offer_ticks_left: 0,
         }
     }
 }
@@ -353,14 +344,14 @@ impl Evolution {
         )
     }
 
-    /// Add XP and return how many levels were gained (each one is a pick).
+    /// Add XP and return how many levels were gained (each one is a point).
     pub fn add_xp(&mut self, amount: u32) -> u8 {
         self.xp = self.xp.saturating_add(amount);
         let level = level_for_xp(self.xp);
         let gained = level.saturating_sub(self.level);
         self.level = level;
         self.xp_next = xp_to_reach((level + 1).min(MAX_LEVEL));
-        self.pending += gained;
+        self.points += gained;
         gained
     }
 
@@ -369,21 +360,57 @@ impl Evolution {
         Perk::ALL.into_iter().filter(|p| self.rank(*p) < MAX_RANK)
     }
 
-    /// Spend the pending pick on `offer[slot]`. Returns the perk taken.
-    pub fn pick(&mut self, slot: usize) -> Option<Perk> {
-        let perk = *self.offer?.get(slot)?;
-        if self.rank(perk) >= MAX_RANK {
-            return None;
+    pub fn can_spend(&self, perk: Perk) -> bool {
+        self.points > 0 && self.rank(perk) < MAX_RANK
+    }
+
+    /// Put one point into `perk`. Allowed any time (alive or dead).
+    pub fn spend(&mut self, perk: Perk) -> bool {
+        if !self.can_spend(perk) {
+            return false;
         }
-        self.offer = None;
-        self.offer_ticks_left = 0;
-        self.pending = self.pending.saturating_sub(1);
+        self.points -= 1;
         self.ranks[perk.index()] += 1;
         let path = perk.evo_path().index();
         if self.first_pick[path] == 0 {
             self.first_pick[path] = self.total_ranks();
         }
-        Some(perk)
+        true
+    }
+
+    /// Take one point back out of `perk`. The server only allows this while dead.
+    pub fn refund(&mut self, perk: Perk) -> bool {
+        if self.rank(perk) == 0 {
+            return false;
+        }
+        self.ranks[perk.index()] -= 1;
+        self.points += 1;
+        let path = perk.evo_path();
+        if self.path_rank(path) == 0 {
+            self.first_pick[path.index()] = 0;
+        }
+        true
+    }
+
+    /// Refund every point (full respec; the server only allows this while dead).
+    pub fn reset(&mut self) {
+        self.points += self.total_ranks();
+        self.ranks = [0; 12];
+        self.first_pick = [0; 3];
+    }
+
+    /// Go back to an earlier allocation (沿用上次配置), keeping the points earned since as
+    /// unspent. Returns false (and changes nothing) if it needs more points than there are.
+    pub fn restore(&mut self, ranks: [u8; 12], first_pick: [u8; 3]) -> bool {
+        let need: u8 = ranks.iter().sum();
+        let have = self.points + self.total_ranks();
+        if need > have || ranks.iter().any(|r| *r > MAX_RANK) {
+            return false;
+        }
+        self.ranks = ranks;
+        self.first_pick = first_pick;
+        self.points = have - need;
+        true
     }
 
     pub fn max_hp(&self) -> f32 {
@@ -568,14 +595,14 @@ mod tests {
     }
 
     #[test]
-    fn add_xp_grants_one_pick_per_level() {
+    fn add_xp_grants_one_point_per_level() {
         let mut evo = Evolution::default();
         assert_eq!(evo.xp_next, 60);
         assert_eq!(evo.add_xp(59), 0);
         assert_eq!(evo.add_xp(100), 2);
-        assert_eq!((evo.level, evo.pending, evo.xp_next), (3, 2, 270));
+        assert_eq!((evo.level, evo.points, evo.xp_next), (3, 2, 270));
         evo.add_xp(10_000);
-        assert_eq!((evo.level, evo.pending, evo.xp_next), (10, 9, 1720));
+        assert_eq!((evo.level, evo.points, evo.xp_next), (10, 9, 1720));
     }
 
     #[test]
@@ -623,13 +650,12 @@ mod tests {
     }
 
     fn pick_perk(evo: &mut Evolution, perk: Perk) {
-        evo.pending += 1;
-        evo.offer = Some([perk, perk, perk]);
-        assert_eq!(evo.pick(0), Some(perk));
+        evo.points += 1;
+        assert!(evo.spend(perk));
     }
 
     #[test]
-    fn skills_unlock_at_path_rank_4_and_7() {
+    fn skills_unlock_at_path_rank_2_and_5() {
         let mut evo = Evolution::default();
         let order = [
             Perk::LightFoot,
@@ -637,18 +663,51 @@ mod tests {
             Perk::Lockpick,
             Perk::EmpExpert,
             Perk::EmpExpert,
-            Perk::EmpExpert,
-            Perk::AmmoRecycler,
         ];
         for (i, perk) in order.into_iter().enumerate() {
             pick_perk(&mut evo, perk);
             let rank = i as u8 + 1;
             assert_eq!(evo.path_rank(EvoPath::Scavenger), rank);
             let (a, b) = evo.skills();
-            assert_eq!(a.is_some(), rank >= 4, "rank {rank}");
-            assert_eq!(b.is_some(), rank >= 7, "rank {rank}");
+            assert_eq!(a.is_some(), rank >= SKILL_A_RANK, "rank {rank}");
+            assert_eq!(b.is_some(), rank >= SKILL_B_RANK, "rank {rank}");
         }
         assert_eq!(evo.skills(), (Some(Skill::Stealth), Some(Skill::Trap)));
+    }
+
+    #[test]
+    fn spending_needs_a_point() {
+        let mut evo = Evolution::default();
+        assert!(!evo.spend(Perk::Claws));
+        evo.add_xp(xp_to_reach(3));
+        assert!(evo.spend(Perk::Claws));
+        assert!(evo.spend(Perk::Claws));
+        assert!(!evo.spend(Perk::Claws));
+        assert_eq!((evo.points, evo.rank(Perk::Claws)), (0, 2));
+    }
+
+    #[test]
+    fn refund_reset_and_restore() {
+        let mut evo = Evolution::default();
+        evo.add_xp(xp_to_reach(6));
+        for perk in [Perk::Overclock, Perk::Claws, Perk::Claws, Perk::Overclock] {
+            assert!(evo.spend(perk));
+        }
+        let (ranks, first) = (evo.ranks, evo.first_pick);
+        assert_eq!(evo.lead_path(), Some(EvoPath::Cyborg));
+        assert!(evo.refund(Perk::Overclock));
+        assert!(evo.refund(Perk::Overclock));
+        assert!(!evo.refund(Perk::Overclock));
+        assert_eq!(evo.first_pick[EvoPath::Cyborg.index()], 0);
+        assert_eq!((evo.points, evo.lead_path()), (3, Some(EvoPath::Mutant)));
+        evo.reset();
+        assert_eq!(
+            (evo.points, evo.total_ranks(), evo.lead_path()),
+            (5, 0, None)
+        );
+        assert!(evo.restore(ranks, first));
+        assert_eq!((evo.points, evo.lead_path()), (1, Some(EvoPath::Cyborg)));
+        assert!(!evo.restore([MAX_RANK; 12], [0; 3]));
     }
 
     #[test]
@@ -663,14 +722,14 @@ mod tests {
     }
 
     #[test]
-    fn cannot_pick_a_maxed_perk() {
+    fn cannot_spend_on_a_maxed_perk() {
         let mut evo = Evolution::default();
         for _ in 0..3 {
             pick_perk(&mut evo, Perk::Claws);
         }
-        evo.pending = 1;
-        evo.offer = Some([Perk::Claws; 3]);
-        assert_eq!(evo.pick(0), None);
+        evo.points = 1;
+        assert!(!evo.spend(Perk::Claws));
+        assert_eq!(evo.points, 1);
         assert!(evo.open_perks().all(|p| p != Perk::Claws));
     }
 

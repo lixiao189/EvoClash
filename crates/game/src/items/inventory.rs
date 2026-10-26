@@ -5,6 +5,8 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+#[cfg(doc)]
+use super::MAX_EMPS;
 use super::{AmmoKind, Item, WeaponKind};
 use crate::evolution::Evolution;
 
@@ -19,8 +21,6 @@ pub const HOTBAR_SLOTS: u8 = 4;
 pub const BAG_SLOTS: usize = 6;
 /// Slot ids used by [`InventoryMove`]: the hotbar (0..4), then the bag.
 pub const SLOT_COUNT: u8 = HOTBAR_SLOTS + BAG_SLOTS as u8;
-/// EMPs carried before 电磁专家.
-pub const MAX_EMPS: u8 = 3;
 
 /// A combatant's backpack. Replicated to everyone, since the weapon in hand is drawn.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Reflect)]

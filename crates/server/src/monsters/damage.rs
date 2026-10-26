@@ -1,5 +1,7 @@
 //! Damage taken by monsters, death, loot drops and match reset.
 
+use evoclash_game::shop::monster_scrap;
+
 use super::*;
 
 /// Damage multiplier for a hit on a crawler facing `facing` (radians) from `toward_attacker`.
@@ -17,12 +19,17 @@ pub(super) fn drops(monster: Monster, brain: &Brain, rng: &mut impl Rng) -> Vec<
     if monster.elite {
         return vec![roll_loot((tier + 1).min(4), rng), Item::Medkit];
     }
+    // Normal monsters pay in scrap; gear comes from the shop, crates and other fighters.
     match monster.kind {
-        MonsterKind::Roach if rng.random_bool(0.35) => vec![roll_loot(1, rng)],
-        MonsterKind::Roach if rng.random_bool(0.3) => vec![Item::Medkit],
+        MonsterKind::Roach if rng.random_bool(0.25) => vec![roll_ammo(tier, rng)],
+        MonsterKind::Roach if rng.random_bool(0.2) => vec![Item::Medkit],
         MonsterKind::Dog if rng.random_bool(0.25) => vec![Item::Medkit],
         MonsterKind::SporePod | MonsterKind::Spitter | MonsterKind::Crawler => {
-            vec![roll_loot(tier, rng)]
+            let mut items = vec![roll_ammo(tier, rng)];
+            if rng.random_bool(0.35) {
+                items.push(Item::Medkit);
+            }
+            items
         }
         MonsterKind::Drone if rng.random_bool(0.4) => {
             vec![match rng.random_range(0..3) {
@@ -154,6 +161,7 @@ pub(super) fn resolve_monster_damage(
                 base: monster.xp(),
                 pos: pos.0,
                 loot: false,
+                scrap: monster_scrap(monster.kind) * if monster.elite { ELITE_XP_MULT } else { 1 },
             });
         }
         if let Some(killer) = player_attacker

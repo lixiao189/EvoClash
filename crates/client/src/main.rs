@@ -8,7 +8,10 @@
 
 mod assets;
 mod backpack;
+mod buttons;
+mod death_screen;
 mod effects;
+mod evo_panel;
 mod hud;
 mod input;
 mod lpc;
@@ -90,6 +93,9 @@ fn main() {
         hud::HudPlugin,
         backpack::BackpackPlugin,
         minimap::MinimapPlugin,
+        buttons::ButtonsPlugin,
+        evo_panel::EvoPanelPlugin,
+        death_screen::DeathScreenPlugin,
     ));
     app.run();
 }

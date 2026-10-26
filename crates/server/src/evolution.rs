@@ -1,14 +1,15 @@
-//! Server side of in-match evolution: XP awards and level-ups, perk offers and picks,
-//! lifesteal, regeneration and armor self-repair. The numbers live in
-//! `evoclash_game::evolution`; offers use the server's RNG (not part of the shared sim).
+//! Server side of in-match evolution: XP and scrap awards, level-ups, the perk/shop/deploy
+//! commands players send, lifesteal, regeneration and armor self-repair. The numbers live in
+//! `evoclash_game::evolution` and `evoclash_game::shop`.
 
 use bevy::prelude::*;
 use evoclash_game::evolution::*;
 use evoclash_game::protocol::*;
-use rand::Rng;
+use evoclash_game::shop::{PlayerCommand, ShopItem, Wallet, can_deploy};
+use lightyear::prelude::server::*;
+use lightyear::prelude::*;
 
-use crate::bots::Bot;
-use crate::gameplay::{CurrentInput, Outbox, SimSet, read_human_inputs, resolve_damage};
+use crate::gameplay::{Outbox, SimSet, resolve_damage};
 
 /// 再生组织 starts this long after the last hit.
 const REGEN_DELAY: u32 = 4 * 64;
@@ -24,7 +25,7 @@ impl Plugin for EvolutionPlugin {
         app.add_systems(
             FixedUpdate,
             (
-                choose_perks.in_set(SimSet::Input).after(read_human_inputs),
+                read_commands.in_set(SimSet::Input),
                 (lifesteal, grant_xp, recover)
                     .chain()
                     .in_set(SimSet::Resolve)
@@ -42,6 +43,8 @@ pub struct XpAward {
     pub pos: Vec2,
     /// From a crate or safe (撬锁专家 bonus applies).
     pub loot: bool,
+    /// 废料 earned along with it (no catch-up or perk multiplier).
+    pub scrap: u32,
 }
 
 #[derive(Resource, Default)]
@@ -57,47 +60,25 @@ pub struct Hit {
 #[derive(Resource, Default)]
 pub struct Dealt(pub Vec<Hit>);
 
-/// Server-only pick bookkeeping.
+/// Server-only record of the current life (for the death recap) and of the perks held at
+/// the last death (for 沿用上次配置).
 #[derive(Component, Default)]
-pub struct Evolving {
-    /// `PlayerInput::pick` last tick, for edge detection.
-    pub last_pick: u8,
+pub struct LifeLog {
+    /// `SimTick` when this life started.
+    pub born: u32,
+    pub scrap: u32,
+    /// Players killed this life.
+    pub kills: u32,
+    pub last_ranks: [u8; 12],
+    pub last_first_pick: [u8; 3],
+    /// 沿用上次配置 was pressed before deploying was allowed: go as soon as it is.
+    pub deploy_asap: bool,
 }
 
 /// Ticks since this combatant last took damage.
 #[derive(Component, Default)]
 pub struct Recovery {
     pub since_hurt: u32,
-}
-
-/// Three distinct perks that aren't maxed; perks of the leading path weigh double.
-pub fn roll_offer(evo: &Evolution, rng: &mut impl Rng) -> Option<[Perk; 3]> {
-    let lead = evo.lead_path();
-    let mut pool: Vec<(Perk, u32)> = evo
-        .open_perks()
-        .map(|p| (p, if Some(p.evo_path()) == lead { 2 } else { 1 }))
-        .collect();
-    let mut offer = [Perk::ALL[0]; 3];
-    for slot in &mut offer {
-        let total: u32 = pool.iter().map(|(_, w)| w).sum();
-        if total == 0 {
-            return None;
-        }
-        let mut roll = rng.random_range(0..total);
-        let i = pool
-            .iter()
-            .position(|(_, w)| {
-                if roll < *w {
-                    true
-                } else {
-                    roll -= w;
-                    false
-                }
-            })
-            .unwrap_or(0);
-        *slot = pool.swap_remove(i).0;
-    }
-    Some(offer)
 }
 
 /// Bring max HP and skill slots in line with the perks.
@@ -124,65 +105,89 @@ pub fn apply_evolution(evo: &Evolution, skills: &mut SkillState, vitals: &mut Vi
     }
 }
 
-/// Which slot to take this tick, if any: a human's key press, a bot's preference after a
-/// second, or a random one once the offer has been ignored for 45 s.
-fn decide(
-    offer: &[Perk; 3],
-    age: u16,
-    pressed: Option<u8>,
-    bot: Option<EvoPath>,
-    rng: &mut impl Rng,
-) -> Option<usize> {
-    if let Some(path) = bot {
-        return (age >= BOT_PICK_TICKS)
-            .then(|| offer.iter().position(|p| p.evo_path() == path).unwrap_or(0));
+/// Apply one `PlayerCommand`. Perk points can be spent any time; refunds, the shop and
+/// deploying only while dead. Returns true if the perks changed (call `apply_evolution`).
+pub fn handle_command(
+    cmd: &PlayerCommand,
+    evo: &mut Evolution,
+    wallet: &mut Wallet,
+    vitals: &mut Vitals,
+    life: &mut LifeLog,
+) -> bool {
+    if let PlayerCommand::Spend(perk) = cmd {
+        return evo.spend(*perk);
     }
-    if let Some(key) = pressed {
-        return Some(key as usize - 1);
+    if vitals.alive {
+        return false;
     }
-    (age >= AUTO_PICK_TICKS).then(|| rng.random_range(0..3))
+    let changed = match cmd {
+        PlayerCommand::Spend(_) => false,
+        PlayerCommand::Refund(perk) => evo.refund(*perk),
+        PlayerCommand::ResetPerks => {
+            let had = evo.total_ranks() > 0;
+            evo.reset();
+            had
+        }
+        PlayerCommand::Buy(item) => {
+            wallet.buy(*item, evo);
+            false
+        }
+        PlayerCommand::Unbuy(item) => {
+            wallet.unbuy(*item);
+            false
+        }
+        PlayerCommand::Deploy => {
+            if can_deploy(vitals.respawn_in) {
+                vitals.respawn_in = 1;
+            }
+            false
+        }
+        PlayerCommand::DeployLast => {
+            let changed = evo.restore(life.last_ranks, life.last_first_pick);
+            wallet.rebuy_last(evo);
+            // Too early: `respawn` sends them off the moment it's allowed.
+            if can_deploy(vitals.respawn_in) {
+                vitals.respawn_in = 1;
+            } else {
+                life.deploy_asap = true;
+            }
+            changed
+        }
+    };
+    // Fewer EMP slots after a refund: give back the ones that no longer fit.
+    while wallet.cart.iter().filter(|c| **c == ShopItem::Emp).count() > ShopItem::Emp.limit(evo) {
+        wallet.unbuy(ShopItem::Emp);
+    }
+    changed
 }
 
+/// Commands from each client link, applied to the body it controls.
 #[allow(clippy::type_complexity)]
-pub(crate) fn choose_perks(
+fn read_commands(
+    mut links: Query<(Entity, &mut MessageReceiver<PlayerCommand>), With<ClientOf>>,
     mut players: Query<(
+        &ControlledBy,
         &mut Evolution,
-        &mut Evolving,
-        &mut SkillState,
+        &mut Wallet,
         &mut Vitals,
-        &CurrentInput,
-        Option<&Bot>,
+        &mut SkillState,
+        &mut LifeLog,
     )>,
 ) {
-    let mut rng = rand::rng();
-    for (mut evo, mut evolving, mut skills, mut vitals, input, bot) in &mut players {
-        let key = input.0.pick;
-        let pressed = (key != evolving.last_pick && (1..=3).contains(&key)).then_some(key);
-        evolving.last_pick = key;
-        if evo.pending == 0 {
+    for (link, mut receiver) in &mut links {
+        if !receiver.has_messages() {
             continue;
         }
-        let Some(offer) = evo.offer else {
-            evo.offer = roll_offer(&evo, &mut rng);
-            evo.offer_ticks_left = if evo.offer.is_some() {
-                AUTO_PICK_TICKS
-            } else {
-                0
-            };
+        let cmds: Vec<PlayerCommand> = receiver.receive().collect();
+        let Some((_, mut evo, mut wallet, mut vitals, mut skills, mut life)) =
+            players.iter_mut().find(|(c, ..)| c.owner == link)
+        else {
             continue;
         };
-        evo.offer_ticks_left = evo.offer_ticks_left.saturating_sub(1);
-        let Some(slot) = decide(
-            &offer,
-            AUTO_PICK_TICKS - evo.offer_ticks_left,
-            pressed,
-            bot.map(|b| b.path),
-            &mut rng,
-        ) else {
-            continue;
-        };
-        if evo.pick(slot).is_some() {
-            apply_evolution(&evo, &mut skills, &mut vitals);
+        for cmd in &cmds {
+            if handle_command(cmd, &mut evo, &mut wallet, &mut vitals, &mut life) {
+                apply_evolution(&evo, &mut skills, &mut vitals);
+            }
         }
     }
 }
@@ -190,22 +195,31 @@ pub(crate) fn choose_perks(
 pub(crate) fn grant_xp(
     mut queue: ResMut<XpQueue>,
     mut outbox: ResMut<Outbox>,
-    mut players: Query<(&Player, &mut Evolution, &mut Stats)>,
+    mut players: Query<(
+        &Player,
+        &mut Evolution,
+        &mut Stats,
+        &mut Wallet,
+        &mut LifeLog,
+    )>,
 ) {
     if queue.0.is_empty() {
         return;
     }
-    let top = players.iter().map(|(_, e, _)| e.level).max().unwrap_or(1);
+    let top = players.iter().map(|(_, e, ..)| e.level).max().unwrap_or(1);
     for award in queue.0.drain(..) {
-        let Ok((player, mut evo, mut stats)) = players.get_mut(award.to) else {
+        let Ok((player, mut evo, mut stats, mut wallet, mut life)) = players.get_mut(award.to)
+        else {
             continue;
         };
+        wallet.scrap += award.scrap;
+        life.scrap += award.scrap;
         let mut mult = catch_up_mult(top, evo.level);
         if award.loot {
             mult *= evo.loot_xp_mult();
         }
         let amount = scaled_xp(award.base, mult);
-        if amount == 0 {
+        if amount == 0 && award.scrap == 0 {
             continue;
         }
         let gained = evo.add_xp(amount);
@@ -214,6 +228,7 @@ pub(crate) fn grant_xp(
             GameEvent::XpGain {
                 amount,
                 pos: award.pos,
+                scrap: award.scrap,
             },
         ));
         if gained > 0 {
@@ -261,107 +276,150 @@ fn recover(mut players: Query<(&Evolution, &mut Recovery, &mut Vitals)>) {
 
 #[cfg(test)]
 mod tests {
+    use evoclash_game::shop::RESPAWN_MAX_TICKS;
+
     use super::*;
 
-    #[test]
-    fn offers_never_contain_maxed_perks() {
-        let mut rng = rand::rng();
-        let mut evo = Evolution::default();
-        for perk in [Perk::Claws, Perk::LightFoot, Perk::Overclock] {
-            evo.ranks[perk.index()] = MAX_RANK;
+    fn dead() -> Vitals {
+        Vitals {
+            alive: false,
+            respawn_in: RESPAWN_MAX_TICKS,
+            ..default()
         }
-        evo.ranks[Perk::Constitution.index()] = 2;
-        for _ in 0..2000 {
-            let offer = roll_offer(&evo, &mut rng).expect("enough open perks");
-            for perk in offer {
-                assert!(evo.rank(perk) < MAX_RANK, "{perk:?} is maxed");
-            }
-            assert!(offer[0] != offer[1] && offer[1] != offer[2] && offer[0] != offer[2]);
-        }
-        // Only two open perks left: no offer.
-        evo.ranks = [MAX_RANK; 12];
-        evo.ranks[0] = 0;
-        evo.ranks[1] = 0;
-        assert!(roll_offer(&evo, &mut rng).is_none());
     }
 
     #[test]
-    fn leading_path_is_offered_more() {
-        let mut rng = rand::rng();
+    fn points_are_spent_through_commands() {
         let mut evo = Evolution::default();
-        evo.ranks[Perk::Overclock.index()] = 1;
-        evo.first_pick = [0, 1, 0];
-        let mut cyborg = 0;
-        for _ in 0..3000 {
-            let offer = roll_offer(&evo, &mut rng).unwrap();
-            cyborg += offer
-                .iter()
-                .filter(|p| p.evo_path() == EvoPath::Cyborg)
-                .count();
-        }
-        // Uniform would be 1/3 of 9000; double weight gives about half.
-        assert!(cyborg > 4000, "{cyborg}");
+        evo.add_xp(xp_to_reach(3));
+        let (mut wallet, mut vitals, mut life) =
+            (Wallet::default(), Vitals::default(), LifeLog::default());
+        let mut run = |cmd, evo: &mut Evolution| {
+            handle_command(&cmd, evo, &mut wallet, &mut vitals, &mut life)
+        };
+        assert!(run(PlayerCommand::Spend(Perk::Claws), &mut evo));
+        assert!(run(PlayerCommand::Spend(Perk::Overclock), &mut evo));
+        assert!(
+            !run(PlayerCommand::Spend(Perk::Claws), &mut evo),
+            "no points left"
+        );
+        assert_eq!((evo.points, evo.total_ranks()), (0, 2));
     }
 
-    fn picker(evo: Evolution) -> (App, Entity) {
+    #[test]
+    fn respec_and_shop_only_while_dead() {
+        let mut evo = Evolution::default();
+        evo.add_xp(xp_to_reach(3));
+        evo.spend(Perk::Claws);
+        evo.spend(Perk::Claws);
+        let mut wallet = Wallet {
+            scrap: 100,
+            ..default()
+        };
+        let mut life = LifeLog::default();
+        let mut alive = Vitals::default();
+        for cmd in [
+            PlayerCommand::Refund(Perk::Claws),
+            PlayerCommand::ResetPerks,
+            PlayerCommand::Buy(ShopItem::Bow),
+            PlayerCommand::Deploy,
+        ] {
+            handle_command(&cmd, &mut evo, &mut wallet, &mut alive, &mut life);
+        }
+        assert_eq!((evo.rank(Perk::Claws), wallet.scrap), (2, 100));
+        assert!(wallet.cart.is_empty() && !life.deploy_asap);
+
+        let mut vitals = dead();
+        let refund = PlayerCommand::Refund(Perk::Claws);
+        assert!(handle_command(
+            &refund,
+            &mut evo,
+            &mut wallet,
+            &mut vitals,
+            &mut life
+        ));
+        assert_eq!((evo.rank(Perk::Claws), evo.points), (1, 1));
+        let reset = PlayerCommand::ResetPerks;
+        assert!(handle_command(
+            &reset,
+            &mut evo,
+            &mut wallet,
+            &mut vitals,
+            &mut life
+        ));
+        assert_eq!((evo.total_ranks(), evo.points), (0, 2));
+        let buy = PlayerCommand::Buy(ShopItem::Bow);
+        handle_command(&buy, &mut evo, &mut wallet, &mut vitals, &mut life);
+        assert_eq!(
+            (wallet.scrap, wallet.cart.clone()),
+            (65, vec![ShopItem::Bow])
+        );
+    }
+
+    #[test]
+    fn refunding_emp_slots_returns_extra_emps() {
+        let mut evo = Evolution::default();
+        evo.add_xp(xp_to_reach(2));
+        evo.spend(Perk::EmpExpert);
+        let mut wallet = Wallet {
+            scrap: 100,
+            ..default()
+        };
+        let (mut vitals, mut life) = (dead(), LifeLog::default());
+        for _ in 0..4 {
+            let buy = PlayerCommand::Buy(ShopItem::Emp);
+            handle_command(&buy, &mut evo, &mut wallet, &mut vitals, &mut life);
+        }
+        assert_eq!(wallet.cart.len(), 4);
+        let refund = PlayerCommand::Refund(Perk::EmpExpert);
+        handle_command(&refund, &mut evo, &mut wallet, &mut vitals, &mut life);
+        assert_eq!((wallet.cart.len(), wallet.scrap), (3, 55));
+    }
+
+    #[test]
+    fn grant_xp_credits_scrap_without_multipliers() {
         let mut app = App::new();
-        app.add_systems(Update, choose_perks);
-        let entity = app
+        app.init_resource::<XpQueue>().init_resource::<Outbox>();
+        app.add_systems(Update, grant_xp);
+        let p = app
             .world_mut()
             .spawn((
-                evo,
-                Evolving::default(),
-                SkillState::default(),
-                Vitals::default(),
-                CurrentInput::default(),
+                Player {
+                    client_id: 1,
+                    name: "p".into(),
+                    color: [1.0; 3],
+                    bot: false,
+                },
+                Evolution::default(),
+                Stats::default(),
+                Wallet::default(),
+                LifeLog::default(),
             ))
             .id();
-        (app, entity)
-    }
-
-    #[test]
-    fn auto_pick_after_45_seconds() {
-        let mut evo = Evolution::default();
-        evo.add_xp(60);
-        let (mut app, entity) = picker(evo);
-        app.update(); // the offer appears
-        let evo = app.world().get::<Evolution>(entity).unwrap();
-        assert!(evo.offer.is_some());
-        assert_eq!(evo.offer_ticks_left, AUTO_PICK_TICKS);
-        for _ in 0..AUTO_PICK_TICKS - 1 {
-            app.update();
+        for (base, scrap) in [(20, 4), (0, 6)] {
+            app.world_mut().resource_mut::<XpQueue>().0.push(XpAward {
+                to: p,
+                base,
+                pos: Vec2::ZERO,
+                loot: true,
+                scrap,
+            });
         }
-        let evo = app.world().get::<Evolution>(entity).unwrap();
-        assert_eq!((evo.pending, evo.total_ranks()), (1, 0));
         app.update();
-        let evo = app.world().get::<Evolution>(entity).unwrap();
-        assert_eq!((evo.pending, evo.total_ranks()), (0, 1));
-        assert!(evo.offer.is_none());
-    }
-
-    #[test]
-    fn key_press_picks_once_and_picks_queue_up() {
-        let mut evo = Evolution::default();
-        evo.add_xp(150);
-        assert_eq!(evo.pending, 2);
-        let (mut app, entity) = picker(evo);
-        app.update();
-        let offered = app.world().get::<Evolution>(entity).unwrap().offer.unwrap();
-        app.world_mut()
-            .get_mut::<CurrentInput>(entity)
-            .unwrap()
-            .0
-            .pick = 2;
-        app.update();
-        let evo = app.world().get::<Evolution>(entity).unwrap();
-        assert_eq!(evo.rank(offered[1]), 1);
-        assert_eq!(evo.pending, 1);
-        // Still holding 2: the next offer is shown but not taken.
-        app.update();
-        app.update();
-        let evo = app.world().get::<Evolution>(entity).unwrap();
-        assert_eq!((evo.pending, evo.total_ranks()), (1, 1));
-        assert!(evo.offer.is_some());
+        let world = app.world();
+        assert_eq!(world.get::<Wallet>(p).unwrap().scrap, 10);
+        assert_eq!(world.get::<LifeLog>(p).unwrap().scrap, 10);
+        // A scrap-only award still shows its floating number.
+        let gains: Vec<_> = world
+            .resource::<Outbox>()
+            .direct
+            .iter()
+            .map(|(_, e)| match e {
+                GameEvent::XpGain { amount, scrap, .. } => (*amount, *scrap),
+                _ => panic!("{e:?}"),
+            })
+            .collect();
+        assert_eq!(gains, vec![(20, 4), (0, 6)]);
     }
 
     #[test]

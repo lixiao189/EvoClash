@@ -3,16 +3,18 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
-use evoclash_game::evolution::{EvoPath, Evolution, Skill, SkillState};
+use evoclash_game::evolution::{EvoPath, Evolution, Perk, Skill, SkillState};
 use evoclash_game::items::{Arm, ArmorKind, GUN_SLOTS, HOTBAR_SLOTS, Item, WeaponKind};
 use evoclash_game::map::ARENA_HALF;
 use evoclash_game::nav::{NavGrid, clear_ahead, next_waypoint};
 use evoclash_game::protocol::*;
+use evoclash_game::shop::{PlayerCommand, ShopItem, Wallet, can_deploy};
 use evoclash_game::sim::{Arena, DT, Obstacles, PLAYER_RADIUS, PLAYER_SPEED};
 use rand::Rng;
 
 use crate::config::ServerConfig;
 use crate::connections::Human;
+use crate::evolution::{LifeLog, apply_evolution, handle_command};
 use crate::gameplay::{CurrentInput, SimSet, spawn_combatant};
 use crate::inventory::{BagContents, auto_wants};
 use evoclash_game::evolution::seen_from;
@@ -58,7 +60,7 @@ pub struct Bot {
     target: Option<Entity>,
     /// Think cycles spent on the current target.
     locked_for: u16,
-    /// Evolution path this bot favours when picking perks.
+    /// Evolution path whose build order this bot spends its points on.
     pub path: EvoPath,
 }
 
@@ -142,7 +144,7 @@ impl Plugin for BotsPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             FixedUpdate,
-            (rebuild_nav, balance_bots, think)
+            (rebuild_nav, balance_bots, prepare, think)
                 .chain()
                 .in_set(SimSet::Input),
         );
@@ -204,6 +206,118 @@ fn balance_bots(
     {
         info!("bot {} leaves to make room", player.name);
         commands.entity(entity).despawn();
+    }
+}
+
+/// Where each path's nine points go, in order: skill A by the 2nd point, skill B by the 5th.
+pub fn build_order(path: EvoPath) -> [Perk; 9] {
+    use Perk::*;
+    match path {
+        EvoPath::Mutant => [
+            Constitution,
+            Claws,
+            Regeneration,
+            Bloodthirst,
+            Constitution,
+            Claws,
+            Bloodthirst,
+            Constitution,
+            Regeneration,
+        ],
+        EvoPath::Cyborg => [
+            Overclock,
+            CompositeArmor,
+            SelfRepair,
+            Overclock,
+            CompositeArmor,
+            Overclock,
+            SelfRepair,
+            CompositeArmor,
+            EnergyFocus,
+        ],
+        EvoPath::Scavenger => [
+            LightFoot,
+            AmmoRecycler,
+            Lockpick,
+            LightFoot,
+            EmpExpert,
+            AmmoRecycler,
+            LightFoot,
+            AmmoRecycler,
+            EmpExpert,
+        ],
+    }
+}
+
+/// The next perk `path`'s build order still wants.
+fn next_perk(evo: &Evolution, path: EvoPath) -> Option<Perk> {
+    let mut want = [0u8; 12];
+    build_order(path).into_iter().find(|perk| {
+        want[perk.index()] += 1;
+        evo.rank(*perk) < want[perk.index()]
+    })
+}
+
+/// Shop picks, best first.
+const GUNS: [ShopItem; 3] = [ShopItem::Rifle, ShopItem::PipeShotgun, ShopItem::Bow];
+const ARMORS: [ShopItem; 2] = [ShopItem::Kevlar, ShopItem::ScrapArmor];
+
+/// A bot's death prep, through the same commands a human sends: spend points on the build,
+/// and once it may deploy, buy the best gun, armor and EMPs it can afford and go.
+/// Returns true if the perks changed.
+pub fn prep_bot(
+    path: EvoPath,
+    evo: &mut Evolution,
+    wallet: &mut Wallet,
+    vitals: &mut Vitals,
+    life: &mut LifeLog,
+) -> bool {
+    let mut changed = false;
+    while let Some(perk) = next_perk(evo, path) {
+        if !handle_command(&PlayerCommand::Spend(perk), evo, wallet, vitals, life) {
+            break;
+        }
+        changed = true;
+    }
+    if vitals.alive || !can_deploy(vitals.respawn_in) {
+        return changed;
+    }
+    for group in [&GUNS[..], &ARMORS[..]] {
+        if let Some(item) = group
+            .iter()
+            .copied()
+            .find(|item| wallet.can_buy(*item, evo))
+        {
+            handle_command(&PlayerCommand::Buy(item), evo, wallet, vitals, life);
+        }
+    }
+    while wallet.can_buy(ShopItem::Emp, evo) {
+        handle_command(
+            &PlayerCommand::Buy(ShopItem::Emp),
+            evo,
+            wallet,
+            vitals,
+            life,
+        );
+    }
+    handle_command(&PlayerCommand::Deploy, evo, wallet, vitals, life);
+    changed
+}
+
+fn prepare(
+    mut bots: Query<(
+        &Bot,
+        &mut Evolution,
+        &mut Wallet,
+        &mut Vitals,
+        &mut SkillState,
+        &mut LifeLog,
+    )>,
+) {
+    for (bot, mut evo, mut wallet, mut vitals, mut skills, mut life) in &mut bots {
+        if prep_bot(bot.path, &mut evo, &mut wallet, &mut vitals, &mut life) {
+            apply_evolution(&evo, &mut skills, &mut vitals);
+        }
     }
 }
 
@@ -409,7 +523,9 @@ fn think(
 
 #[cfg(test)]
 mod tests {
+    use evoclash_game::evolution::{MAX_RANK, SKILL_A_RANK, SKILL_B_RANK, xp_to_reach};
     use evoclash_game::items::{AmmoKind, MELEE_SLOT};
+    use evoclash_game::shop::RESPAWN_MAX_TICKS;
 
     use super::*;
 
@@ -445,5 +561,76 @@ mod tests {
         assert_eq!(interest(&arrows, None, &vitals, &loadout, &evo), None);
         let bag = BagContents(vec![arrows, bullets]);
         assert!(interest(&Item::Bag, Some(&bag), &vitals, &loadout, &evo).unwrap() < keen);
+    }
+
+    #[test]
+    fn build_orders_reach_both_skills_on_time() {
+        for path in EvoPath::ALL {
+            assert!(build_order(path).iter().all(|p| p.evo_path() == path));
+            let mut evo = Evolution::default();
+            let (mut wallet, mut life) = (Wallet::default(), LifeLog::default());
+            let mut vitals = Vitals::default();
+            for level in 2..=10 {
+                evo.add_xp(xp_to_reach(level) - evo.xp);
+                assert!(prep_bot(
+                    path,
+                    &mut evo,
+                    &mut wallet,
+                    &mut vitals,
+                    &mut life
+                ));
+                let spent = level - 1;
+                assert_eq!((evo.points, evo.path_rank(path)), (0, spent), "{path:?}");
+                if spent == 2 {
+                    assert_eq!(evo.path_rank(path), SKILL_A_RANK);
+                }
+                if spent == 5 {
+                    assert_eq!(evo.path_rank(path), SKILL_B_RANK);
+                }
+            }
+            assert!(Perk::ALL.iter().all(|p| evo.rank(*p) <= MAX_RANK));
+            assert!(evo.skills().1.is_some());
+        }
+    }
+
+    #[test]
+    fn dead_bots_shop_then_deploy() {
+        let mut evo = Evolution::default();
+        let mut wallet = Wallet {
+            scrap: 160,
+            ..default()
+        };
+        let mut life = LifeLog::default();
+        let mut vitals = Vitals {
+            alive: false,
+            respawn_in: RESPAWN_MAX_TICKS,
+            ..default()
+        };
+        prep_bot(
+            EvoPath::Cyborg,
+            &mut evo,
+            &mut wallet,
+            &mut vitals,
+            &mut life,
+        );
+        assert!(wallet.cart.is_empty(), "waits until it may deploy");
+        vitals.respawn_in = RESPAWN_MAX_TICKS / 2;
+        prep_bot(
+            EvoPath::Cyborg,
+            &mut evo,
+            &mut wallet,
+            &mut vitals,
+            &mut life,
+        );
+        assert_eq!(
+            wallet.cart,
+            vec![
+                ShopItem::Rifle,
+                ShopItem::Kevlar,
+                ShopItem::Emp,
+                ShopItem::Emp
+            ]
+        );
+        assert_eq!((wallet.scrap, vitals.respawn_in), (5, 1));
     }
 }

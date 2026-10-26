@@ -513,15 +513,28 @@ fn receive_events(
                     spawn_boom(&mut commands, &textures, pos, radius, fire);
                 }
                 // Only ever sent to whoever earned it.
-                GameEvent::XpGain { amount, pos } => spawn_float_text(
-                    &mut commands,
-                    &font,
-                    format!("+{amount} XP"),
-                    15.0,
-                    Color::srgb(0.55, 1.0, 0.65),
-                    pos + Vec2::Y * 84.0,
-                    1.3,
-                ),
+                GameEvent::XpGain { amount, scrap, pos } => {
+                    spawn_float_text(
+                        &mut commands,
+                        &font,
+                        format!("+{amount} XP"),
+                        15.0,
+                        Color::srgb(0.55, 1.0, 0.65),
+                        pos + Vec2::Y * 84.0,
+                        1.3,
+                    );
+                    if scrap > 0 {
+                        spawn_float_text(
+                            &mut commands,
+                            &font,
+                            format!("+{scrap} 废料"),
+                            14.0,
+                            Color::srgb(0.9, 0.78, 0.5),
+                            pos + Vec2::Y * 66.0,
+                            1.3,
+                        );
+                    }
+                }
                 GameEvent::LevelUp { client, level } => {
                     let Some((_, _, pos, _)) =
                         players.iter().find(|(_, p, _, _)| p.client_id == client)
