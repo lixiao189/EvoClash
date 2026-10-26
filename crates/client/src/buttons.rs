@@ -9,7 +9,7 @@
 use bevy::prelude::*;
 use bevy::ui::RelativeCursorPosition;
 use evoclash_game::evolution::Evolution;
-use evoclash_game::protocol::{CommandChannel, Vitals};
+use evoclash_game::protocol::{CommandChannel, MatchState, Phase, Vitals};
 use evoclash_game::shop::{PlayerCommand, Wallet, can_deploy};
 use lightyear::prelude::{Client, MessageSender};
 
@@ -97,26 +97,30 @@ pub fn send(
 }
 
 fn enable_buttons(
+    state: Query<&MatchState>,
     me: Query<(&Evolution, &Wallet, &Vitals), With<LocalPlayer>>,
     mut buttons: Query<&mut UiButton>,
 ) {
     let Ok((evo, wallet, vitals)) = me.single() else {
         return;
     };
+    // Shop, perks and deploy are refused outside Playing, including the lobby.
+    let playing = state.iter().any(|s| s.phase == Phase::Playing);
     let dead = !vitals.alive;
     for mut button in &mut buttons {
-        let enabled = match &button.act {
-            Act::Send(cmd) => match cmd {
-                PlayerCommand::Spend(perk) => evo.can_spend(*perk),
-                PlayerCommand::Refund(perk) => dead && evo.rank(*perk) > 0,
-                PlayerCommand::ResetPerks => dead && evo.total_ranks() > 0,
-                PlayerCommand::Buy(item) => dead && wallet.can_buy(*item, evo),
-                PlayerCommand::Unbuy(item) => dead && wallet.cart.contains(item),
-                PlayerCommand::Deploy => dead && can_deploy(vitals.respawn_in),
-                PlayerCommand::DeployLast => dead,
-            },
-            Act::Unbuy(i) => dead && *i < wallet.cart.len(),
-        };
+        let enabled = playing
+            && match &button.act {
+                Act::Send(cmd) => match cmd {
+                    PlayerCommand::Spend(perk) => evo.can_spend(*perk),
+                    PlayerCommand::Refund(perk) => dead && evo.rank(*perk) > 0,
+                    PlayerCommand::ResetPerks => dead && evo.total_ranks() > 0,
+                    PlayerCommand::Buy(item) => dead && wallet.can_buy(*item, evo),
+                    PlayerCommand::Unbuy(item) => dead && wallet.cart.contains(item),
+                    PlayerCommand::Deploy => dead && can_deploy(vitals.respawn_in),
+                    PlayerCommand::DeployLast => dead,
+                },
+                Act::Unbuy(i) => dead && *i < wallet.cart.len(),
+            };
         if button.enabled != enabled {
             button.enabled = enabled;
         }
@@ -140,10 +144,14 @@ fn style_buttons(
 
 fn click_buttons(
     mouse: Option<Res<ButtonInput<MouseButton>>>,
+    state: Query<&MatchState>,
     me: Query<&Wallet, With<LocalPlayer>>,
     buttons: Query<(&UiButton, &RelativeCursorPosition, &InheritedVisibility)>,
     mut senders: Query<&mut MessageSender<PlayerCommand>, With<Client>>,
 ) {
+    if !state.iter().any(|s| s.phase == Phase::Playing) {
+        return;
+    }
     if !mouse.is_some_and(|m| m.just_pressed(MouseButton::Left)) {
         return;
     }

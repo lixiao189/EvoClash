@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use bevy::prelude::*;
 use evoclash_game::net::{self, CONNECTION_TIMEOUT_SECS, PROTOCOL_ID};
-use evoclash_game::protocol::Player;
+use evoclash_game::protocol::{MatchState, Phase, Player};
 use lightyear::connection::client::Connected;
 use lightyear::netcode::{NetcodeServer, TokenUserData};
 use lightyear::prelude::server::*;
@@ -15,6 +15,7 @@ use lightyear::webtransport::prelude::endpoint::WebTransportEndpoint;
 
 use crate::config::ServerConfig;
 use crate::gameplay::{Outbox, SimSet, spawn_combatant};
+use crate::ops::OpsState;
 
 /// A disconnected player's body stays in the arena this long so a flaky
 /// connection can resume with its gear intact.
@@ -131,6 +132,9 @@ fn on_connected(
     trigger: On<Add<Connected>>,
     links: Query<(&RemoteId, Option<&TokenUserData>), With<ClientOf>>,
     mut humans: Query<(Entity, &mut Human, &Player)>,
+    state: Query<&MatchState>,
+    config: Res<ServerConfig>,
+    ops: Res<OpsState>,
     mut outbox: ResMut<Outbox>,
     mut commands: Commands,
 ) {
@@ -153,6 +157,16 @@ fn on_connected(
         commands.entity(entity).insert(control);
         info!("{} ({peer:?}) reconnected", player.name);
         outbox.announce(format!("{} 重新连线", player.name));
+        return;
+    }
+
+    // Quick start closes in the last 8s (`join_mode`), but a seat reserved before that
+    // still connects until Starting. The matchmaker is what stops issuing new tokens.
+    let in_lobby = state.iter().next().is_some_and(|s| s.phase == Phase::Lobby);
+    let accepting = in_lobby && !ops.is_draining() && humans.iter().count() < config.max_players;
+    if !accepting {
+        info!("rejecting {client_id}: not accepting new players");
+        commands.trigger(Disconnect { entity: link });
         return;
     }
 

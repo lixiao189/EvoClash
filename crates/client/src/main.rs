@@ -14,6 +14,7 @@ mod effects;
 mod evo_panel;
 mod hud;
 mod input;
+mod lobby_ui;
 mod lpc;
 mod minimap;
 mod predict;
@@ -91,6 +92,7 @@ fn main() {
         render::RenderPlugin,
         effects::EffectsPlugin,
         hud::HudPlugin,
+        lobby_ui::LobbyUiPlugin,
         backpack::BackpackPlugin,
         minimap::MinimapPlugin,
         buttons::ButtonsPlugin,

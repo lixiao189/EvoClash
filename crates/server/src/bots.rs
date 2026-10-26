@@ -15,8 +15,9 @@ use rand::Rng;
 use crate::config::ServerConfig;
 use crate::connections::Human;
 use crate::evolution::{LifeLog, apply_evolution, handle_command};
-use crate::gameplay::{CurrentInput, SimSet, spawn_combatant};
+use crate::gameplay::{Aggressors, CurrentInput, SimSet, spawn_combatant};
 use crate::inventory::{BagContents, auto_wants};
+use crate::rng::{SimRng, Stream};
 use evoclash_game::evolution::seen_from;
 
 /// Bots fire their skills at enemies this close.
@@ -161,24 +162,31 @@ fn rebuild_nav(mut commands: Commands, arena: Res<Arena>, nav: Option<Res<Nav>>)
 fn balance_bots(
     mut commands: Commands,
     config: Res<ServerConfig>,
+    state: Query<&MatchState>,
     humans: Query<&Human>,
     bots: Query<(Entity, &Player), With<Bot>>,
     mut counter: Local<u64>,
     mut cooldown: Local<u32>,
+    rng: Res<SimRng>,
 ) {
-    // Adjust at most once a second so joins/leaves don't thrash.
-    if *cooldown > 0 {
-        *cooldown -= 1;
-        return;
+    let lobby = state.iter().any(|s| s.phase == Phase::Lobby);
+    // Outside the lobby, adjust at most once a second so joins/leaves don't thrash.
+    // A lobby fills or sheds bots on the same tick a human arrives or leaves.
+    if !lobby {
+        if *cooldown > 0 {
+            *cooldown -= 1;
+            return;
+        }
+        *cooldown = 64;
     }
-    *cooldown = 64;
     let humans = humans.iter().count();
-    let bot_count = bots.iter().count();
+    let mut bot_count = bots.iter().count();
     let wanted = config
         .min_combatants
         .saturating_sub(humans)
         .min(config.max_players.saturating_sub(humans));
-    if bot_count < wanted {
+    let playing = state.iter().any(|s| s.phase == Phase::Playing);
+    while bot_count < wanted {
         *counter += 1;
         let n = *counter;
         let name = format!("{}{}", NAMES[(n as usize - 1) % NAMES.len()], n);
@@ -189,23 +197,44 @@ fn balance_bots(
             color: [0.7, 0.7, 0.7],
             bot: true,
         };
-        let entity = spawn_combatant(&mut commands, player, None);
-        commands.entity(entity).insert(Bot {
-            goal: Vec2::ZERO,
-            last_pos: Vec2::ZERO,
-            stuck: 0,
-            strafe: 1.0,
-            think_in: 0,
-            aim_error: rand::rng().random_range(-0.12..0.12),
-            target: None,
-            locked_for: 0,
-            path: EvoPath::ALL[rand::rng().random_range(0..EvoPath::ALL.len())],
+        let (aim_error, path_i) = rng.with(playing, Stream::Bots, |rng| {
+            (
+                rng.random_range(-0.12..0.12),
+                rng.random_range(0..EvoPath::ALL.len()),
+            )
         });
-    } else if bot_count > wanted
-        && let Some((entity, player)) = bots.iter().next()
-    {
-        info!("bot {} leaves to make room", player.name);
-        commands.entity(entity).despawn();
+        let entity = spawn_combatant(&mut commands, player, None);
+        commands.entity(entity).insert((
+            Bot {
+                goal: Vec2::ZERO,
+                last_pos: Vec2::ZERO,
+                stuck: 0,
+                strafe: 1.0,
+                think_in: 0,
+                aim_error,
+                target: None,
+                locked_for: 0,
+                path: EvoPath::ALL[path_i],
+            },
+            Aggressors::default(),
+        ));
+        bot_count += 1;
+        if !lobby {
+            break;
+        }
+    }
+    if bot_count > wanted {
+        // Despawn is deferred, so collect first. Newest bots (smaller ids) leave.
+        let mut extras: Vec<(Entity, u64, String)> = bots
+            .iter()
+            .map(|(entity, player)| (entity, player.client_id, player.name.clone()))
+            .collect();
+        extras.sort_by_key(|(_, id, _)| *id);
+        let remove_n = if lobby { bot_count - wanted } else { 1 };
+        for (entity, _, name) in extras.into_iter().take(remove_n) {
+            info!("bot {name} leaves to make room");
+            commands.entity(entity).despawn();
+        }
     }
 }
 
@@ -274,7 +303,7 @@ pub fn prep_bot(
 ) -> bool {
     let mut changed = false;
     while let Some(perk) = next_perk(evo, path) {
-        if !handle_command(&PlayerCommand::Spend(perk), evo, wallet, vitals, life) {
+        if !handle_command(&PlayerCommand::Spend(perk), evo, wallet, vitals, life, true) {
             break;
         }
         changed = true;
@@ -288,7 +317,7 @@ pub fn prep_bot(
             .copied()
             .find(|item| wallet.can_buy(*item, evo))
         {
-            handle_command(&PlayerCommand::Buy(item), evo, wallet, vitals, life);
+            handle_command(&PlayerCommand::Buy(item), evo, wallet, vitals, life, true);
         }
     }
     while wallet.can_buy(ShopItem::Emp, evo) {
@@ -298,13 +327,15 @@ pub fn prep_bot(
             wallet,
             vitals,
             life,
+            true,
         );
     }
-    handle_command(&PlayerCommand::Deploy, evo, wallet, vitals, life);
+    handle_command(&PlayerCommand::Deploy, evo, wallet, vitals, life, true);
     changed
 }
 
 fn prepare(
+    state: Query<&MatchState>,
     mut bots: Query<(
         &Bot,
         &mut Evolution,
@@ -314,6 +345,10 @@ fn prepare(
         &mut LifeLog,
     )>,
 ) {
+    // Death prep (shop, deploy) is a Playing rule. Lobby respawns on its own 2s timer.
+    if !state.iter().any(|s| s.phase == Phase::Playing) {
+        return;
+    }
     for (bot, mut evo, mut wallet, mut vitals, mut skills, mut life) in &mut bots {
         if prep_bot(bot.path, &mut evo, &mut wallet, &mut vitals, &mut life) {
             apply_evolution(&evo, &mut skills, &mut vitals);
@@ -364,161 +399,172 @@ fn think(
         &mut Loadout,
         &Evolution,
         &SkillState,
+        &Aggressors,
     )>,
     others: Query<
         (Entity, &Pos, &Vitals, Option<&Monster>, Has<Human>),
         Or<(With<Player>, With<Monster>)>,
     >,
     items: Query<(&Pos, &Pickup, Option<&BagContents>)>,
+    state: Query<&MatchState>,
+    rng: Res<SimRng>,
 ) {
     let Some(nav) = nav else {
         return;
     };
-    let mut rng = rand::rng();
-    let mut claims: HashMap<Entity, u32> = HashMap::new();
-    for (_, bot, ..) in &bots {
-        if let Some(target) = bot.target {
-            *claims.entry(target).or_default() += 1;
+    let lobby = state.iter().any(|s| s.phase == Phase::Lobby);
+    let playing = state.iter().any(|s| s.phase == Phase::Playing);
+    rng.with(playing, Stream::Bots, |mut rng| {
+        let mut claims: HashMap<Entity, u32> = HashMap::new();
+        for (_, bot, ..) in &bots {
+            if let Some(target) = bot.target {
+                *claims.entry(target).or_default() += 1;
+            }
         }
-    }
-    for (entity, mut bot, mut current, pos, vitals, mut loadout, evo, skills) in &mut bots {
-        if !vitals.alive {
-            current.0 = PlayerInput::default();
-            bot.target = None;
-            continue;
-        }
-        // Radiation is only worth braving in power armor.
-        let sealed = vitals.armor == ArmorKind::PowerArmor && vitals.armor_points > 0.0;
-        let safe = |p: Vec2| sealed || !arena.in_hazard(p);
-        // Stuck on a wall: pick somewhere else.
-        if pos.0.distance_squared(bot.last_pos) < 0.25 && current.0.move_dir() != Vec2::ZERO {
-            bot.stuck += 1;
-        } else {
-            bot.stuck = 0;
-        }
-        bot.last_pos = pos.0;
+        for (entity, mut bot, mut current, pos, vitals, mut loadout, evo, skills, aggressors) in
+            &mut bots
+        {
+            if !vitals.alive {
+                current.0 = PlayerInput::default();
+                bot.target = None;
+                continue;
+            }
+            // Radiation is only worth braving in power armor.
+            let sealed = vitals.armor == ArmorKind::PowerArmor && vitals.armor_points > 0.0;
+            let safe = |p: Vec2| sealed || !arena.in_hazard(p);
+            // Stuck on a wall: pick somewhere else.
+            if pos.0.distance_squared(bot.last_pos) < 0.25 && current.0.move_dir() != Vec2::ZERO {
+                bot.stuck += 1;
+            } else {
+                bot.stuck = 0;
+            }
+            bot.last_pos = pos.0;
 
-        if bot.think_in > 0 && bot.stuck < 12 {
-            bot.think_in -= 1;
-            // Keep holding the previous decision but never hold dash/throw across ticks.
-            current.0.dash = false;
-            current.0.throw = false;
-            continue;
-        }
-        bot.think_in = THINK_EVERY;
-        let mut input = PlayerInput::default();
-        let mut arranged = *loadout;
-        arrange(&mut arranged);
-        loadout.set_if_neq(arranged);
-        let weapon = loadout.weapon();
+            if bot.think_in > 0 && bot.stuck < 12 {
+                bot.think_in -= 1;
+                // Keep holding the previous decision but never hold dash/throw across ticks.
+                current.0.dash = false;
+                current.0.throw = false;
+                continue;
+            }
+            bot.think_in = THINK_EVERY;
+            let mut input = PlayerInput::default();
+            let mut arranged = *loadout;
+            arrange(&mut arranged);
+            loadout.set_if_neq(arranged);
+            let weapon = loadout.weapon();
 
-        let previous = bot.target;
-        let enemy = others
-            .iter()
-            .filter(|(e, p, v, ..)| {
-                *e != entity
+            let previous = bot.target;
+            let enemy = others
+                .iter()
+                .filter(|(e, p, v, _, human)| {
+                    *e != entity
                     && v.alive
                     && v.shield == 0
                     // Stealthed enemies are only noticed up close.
                     && seen_from(v, p.0, pos.0)
-            })
-            .map(|(e, p, v, monster, human)| {
-                let dist = p.0.distance(pos.0);
-                let others_on_it =
-                    claims.get(&e).copied().unwrap_or(0) - u32::from(previous == Some(e));
-                let mut weight = 1.0 + PILE_ON_WEIGHT * others_on_it as f32;
-                if monster.is_some() {
-                    weight *= MONSTER_WEIGHT;
-                }
-                if human {
-                    weight *= HUMAN_WEIGHT;
-                }
-                if previous == Some(e) {
-                    weight *= STICKY_WEIGHT;
-                }
-                (e, p.0, v.armor_points, dist, dist * weight)
-            })
-            .filter(|(_, p, _, d, _)| *d < SIGHT && arena.line_of_sight(pos.0, *p))
-            .min_by(|a, b| a.4.total_cmp(&b.4));
-
-        bot.target = enemy.map(|(e, ..)| e);
-        if bot.target != previous {
-            bot.locked_for = 0;
-        }
-        bot.locked_for = bot.locked_for.saturating_add(1);
-
-        if let Some((_, enemy_pos, enemy_armor, dist, _)) = enemy {
-            let to_enemy = (enemy_pos - pos.0).normalize_or(Vec2::X);
-            input.aim = aim_toward(to_enemy, bot.aim_error, &mut rng);
-            let range = engage_range(weapon);
-            if rng.random_bool(0.03) {
-                bot.strafe = -bot.strafe;
-            }
-            let strafe = to_enemy.perp() * bot.strafe;
-            let dir = if weapon.melee().is_some() || dist > range * 0.85 {
-                let waypoint = next_waypoint(&nav.0, &arena, pos.0, enemy_pos, PLAYER_RADIUS);
-                (waypoint - pos.0).normalize_or_zero() + strafe * 0.3
-            } else if dist < range * 0.35 {
-                -to_enemy + strafe
-            } else {
-                strafe
-            };
-            steer(&mut input, dir, &arena, &obstacles.0, pos.0);
-            input.fire = bot.locked_for > REACTION_THINKS && dist < range && rng.random_bool(0.85);
-            input.dash = dist < 260.0 && rng.random_bool(0.04);
-            input.throw =
-                loadout.emps > 0 && enemy_armor >= 50.0 && dist < 420.0 && rng.random_bool(0.1);
-            // Hurt and hidden: slip away instead of giving yourself up.
-            if vitals.stealth > 0 && vitals.hp < 0.5 * vitals.max_hp {
-                input.fire = false;
-                input.throw = false;
-                steer(&mut input, -to_enemy, &arena, &obstacles.0, pos.0);
-            }
-            input.skill_b = skills.skill_b.is_some() && skills.cd_b == 0 && dist < SKILL_RANGE;
-        } else {
-            // Scavenge: head for the closest upgrade in sight, otherwise roam.
-            let upgrade = items
-                .iter()
-                .filter(|(p, ..)| {
-                    p.0.distance(pos.0) < SIGHT * 1.3 && (safe(p.0) || vitals.hp > 70.0)
+                    // Lobby bots path, loot and fight each other, and only retaliate.
+                    && !(lobby && *human && !aggressors.0.contains(e))
                 })
-                .filter_map(|(p, pickup, bag)| {
-                    interest(&pickup.item, bag, vitals, &loadout, evo)
-                        .map(|w| (p.0, p.0.distance(pos.0) * w))
-                })
-                .min_by(|a, b| a.1.total_cmp(&b.1))
-                .map(|(p, _)| p);
-            if bot.stuck >= 12
-                || bot.goal.distance(pos.0) < 40.0
-                || !safe(bot.goal)
-                || (upgrade.is_none() && rng.random_bool(0.01))
-            {
-                let bound = ARENA_HALF * 0.9;
-                for _ in 0..8 {
-                    bot.goal = Vec2::new(
-                        rng.random_range(-bound.x..bound.x),
-                        rng.random_range(-bound.y..bound.y),
-                    );
-                    if safe(bot.goal) {
-                        break;
+                .map(|(e, p, v, monster, human)| {
+                    let dist = p.0.distance(pos.0);
+                    let others_on_it =
+                        claims.get(&e).copied().unwrap_or(0) - u32::from(previous == Some(e));
+                    let mut weight = 1.0 + PILE_ON_WEIGHT * others_on_it as f32;
+                    if monster.is_some() {
+                        weight *= MONSTER_WEIGHT;
                     }
-                }
-                bot.stuck = 0;
+                    if human {
+                        weight *= HUMAN_WEIGHT;
+                    }
+                    if previous == Some(e) {
+                        weight *= STICKY_WEIGHT;
+                    }
+                    (e, p.0, v.armor_points, dist, dist * weight)
+                })
+                .filter(|(_, p, _, d, _)| *d < SIGHT && arena.line_of_sight(pos.0, *p))
+                .min_by(|a, b| a.4.total_cmp(&b.4));
+
+            bot.target = enemy.map(|(e, ..)| e);
+            if bot.target != previous {
+                bot.locked_for = 0;
             }
-            let goal = upgrade.unwrap_or(bot.goal);
-            let dir = next_waypoint(&nav.0, &arena, pos.0, goal, PLAYER_RADIUS) - pos.0;
-            steer(&mut input, dir, &arena, &obstacles.0, pos.0);
-            input.aim = dir.normalize_or(Vec2::X);
+            bot.locked_for = bot.locked_for.saturating_add(1);
+
+            if let Some((_, enemy_pos, enemy_armor, dist, _)) = enemy {
+                let to_enemy = (enemy_pos - pos.0).normalize_or(Vec2::X);
+                input.aim = aim_toward(to_enemy, bot.aim_error, &mut rng);
+                let range = engage_range(weapon);
+                if rng.random_bool(0.03) {
+                    bot.strafe = -bot.strafe;
+                }
+                let strafe = to_enemy.perp() * bot.strafe;
+                let dir = if weapon.melee().is_some() || dist > range * 0.85 {
+                    let waypoint = next_waypoint(&nav.0, &arena, pos.0, enemy_pos, PLAYER_RADIUS);
+                    (waypoint - pos.0).normalize_or_zero() + strafe * 0.3
+                } else if dist < range * 0.35 {
+                    -to_enemy + strafe
+                } else {
+                    strafe
+                };
+                steer(&mut input, dir, &arena, &obstacles.0, pos.0);
+                input.fire =
+                    bot.locked_for > REACTION_THINKS && dist < range && rng.random_bool(0.85);
+                input.dash = dist < 260.0 && rng.random_bool(0.04);
+                input.throw =
+                    loadout.emps > 0 && enemy_armor >= 50.0 && dist < 420.0 && rng.random_bool(0.1);
+                // Hurt and hidden: slip away instead of giving yourself up.
+                if vitals.stealth > 0 && vitals.hp < 0.5 * vitals.max_hp {
+                    input.fire = false;
+                    input.throw = false;
+                    steer(&mut input, -to_enemy, &arena, &obstacles.0, pos.0);
+                }
+                input.skill_b = skills.skill_b.is_some() && skills.cd_b == 0 && dist < SKILL_RANGE;
+            } else {
+                // Scavenge: head for the closest upgrade in sight, otherwise roam.
+                let upgrade = items
+                    .iter()
+                    .filter(|(p, ..)| {
+                        p.0.distance(pos.0) < SIGHT * 1.3 && (safe(p.0) || vitals.hp > 70.0)
+                    })
+                    .filter_map(|(p, pickup, bag)| {
+                        interest(&pickup.item, bag, vitals, &loadout, evo)
+                            .map(|w| (p.0, p.0.distance(pos.0) * w))
+                    })
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .map(|(p, _)| p);
+                if bot.stuck >= 12
+                    || bot.goal.distance(pos.0) < 40.0
+                    || !safe(bot.goal)
+                    || (upgrade.is_none() && rng.random_bool(0.01))
+                {
+                    let bound = ARENA_HALF * 0.9;
+                    for _ in 0..8 {
+                        bot.goal = Vec2::new(
+                            rng.random_range(-bound.x..bound.x),
+                            rng.random_range(-bound.y..bound.y),
+                        );
+                        if safe(bot.goal) {
+                            break;
+                        }
+                    }
+                    bot.stuck = 0;
+                }
+                let goal = upgrade.unwrap_or(bot.goal);
+                let dir = next_waypoint(&nav.0, &arena, pos.0, goal, PLAYER_RADIUS) - pos.0;
+                steer(&mut input, dir, &arena, &obstacles.0, pos.0);
+                input.aim = dir.normalize_or(Vec2::X);
+            }
+            // Skill A: on a nearby target, or to save yourself (shield, stealth) when hurt.
+            let near = enemy.is_some_and(|(.., dist, _)| dist < SKILL_RANGE);
+            let hurt = vitals.hp < 0.5 * vitals.max_hp;
+            input.skill_a = skills.cd_a == 0
+                && skills.skill_a.is_some_and(|skill| {
+                    near || (hurt && matches!(skill, Skill::EnergyShield | Skill::Stealth))
+                });
+            current.0 = input;
         }
-        // Skill A: on a nearby target, or to save yourself (shield, stealth) when hurt.
-        let near = enemy.is_some_and(|(.., dist, _)| dist < SKILL_RANGE);
-        let hurt = vitals.hp < 0.5 * vitals.max_hp;
-        input.skill_a = skills.cd_a == 0
-            && skills.skill_a.is_some_and(|skill| {
-                near || (hurt && matches!(skill, Skill::EnergyShield | Skill::Stealth))
-            });
-        current.0 = input;
-    }
+    });
 }
 
 #[cfg(test)]

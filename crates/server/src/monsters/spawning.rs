@@ -97,12 +97,12 @@ pub(super) fn populate(
     mut spawner: ResMut<Spawner>,
     monsters: Query<(&Monster, &Brain)>,
     players: Query<(&Pos, &Vitals), With<Player>>,
+    rng: Res<crate::rng::SimRng>,
 ) {
-    if !config.monsters || state.phase == Phase::Intermission {
+    if !config.monsters || state.phase != Phase::Playing {
         return;
     }
     let mut live = census(monsters.iter().map(|(m, b)| (m.kind, m.elite, b.pack)));
-    let warmup = state.phase == Phase::Warmup;
     let mut candidate = None;
     for kind in MonsterKind::ALL {
         if kind == MonsterKind::Behemoth {
@@ -116,7 +116,7 @@ pub(super) fn populate(
             timer.wait = s.respawn;
             continue;
         }
-        if warmup || !timer.filled {
+        if !timer.filled {
             timer.wait = timer.wait.min(1);
         }
         timer.wait = timer.wait.saturating_sub(1);
@@ -133,36 +133,40 @@ pub(super) fn populate(
         .filter(|(_, v)| v.alive)
         .map(|(p, _)| p.0)
         .collect();
-    let mut rng = rand::rng();
-    let Some((spot, block)) = pick_spot(&arena, kind, &obstacles.0, &alive, &mut rng) else {
-        spawner.timers[kind_index(kind)].wait = RETRY_TICKS;
-        return;
-    };
-    let s = spec(kind);
-    spawner.timers[kind_index(kind)].wait = s.respawn;
-    let pack = if s.group > 1 {
-        spawner.next_pack += 1;
-        spawner.next_pack
-    } else {
-        0
-    };
-    for slot in 0..s.group {
-        let pos = if slot == 0 {
-            spot
-        } else {
-            // Followers stand around the leader where there is room.
-            (0..8)
-                .map(|i| spot + Vec2::from_angle(i as f32 * TAU / 8.0 + slot as f32) * 48.0)
-                .find(|p| spot_clear(&arena, kind, *p, &obstacles.0, &alive))
-                .unwrap_or(spot)
+    let retry = rng.with(true, crate::rng::Stream::Monsters, |rng| {
+        let Some((spot, block)) = pick_spot(&arena, kind, &obstacles.0, &alive, rng) else {
+            return true;
         };
-        let elite = can_be_elite(kind)
-            && block.tier >= 2
-            && live.elites < MAX_ELITES
-            && rng.random_ratio(1, 6);
-        live.add(kind, elite, slot == 0);
-        let brain = Brain::new(kind, elite, spot, block.rect, pack, slot as u8);
-        spawn_monster(&mut commands, kind, elite, pos, brain, None);
+        let s = spec(kind);
+        spawner.timers[kind_index(kind)].wait = s.respawn;
+        let pack = if s.group > 1 {
+            spawner.next_pack += 1;
+            spawner.next_pack
+        } else {
+            0
+        };
+        for slot in 0..s.group {
+            let pos = if slot == 0 {
+                spot
+            } else {
+                // Followers stand around the leader where there is room.
+                (0..8)
+                    .map(|i| spot + Vec2::from_angle(i as f32 * TAU / 8.0 + slot as f32) * 48.0)
+                    .find(|p| spot_clear(&arena, kind, *p, &obstacles.0, &alive))
+                    .unwrap_or(spot)
+            };
+            let elite = can_be_elite(kind)
+                && block.tier >= 2
+                && live.elites < MAX_ELITES
+                && rng.random_ratio(1, 6);
+            live.add(kind, elite, slot == 0);
+            let brain = Brain::new(kind, elite, spot, block.rect, pack, slot as u8, rng);
+            spawn_monster(&mut commands, kind, elite, pos, brain, None);
+        }
+        false
+    });
+    if retry {
+        spawner.timers[kind_index(kind)].wait = RETRY_TICKS;
     }
 }
 

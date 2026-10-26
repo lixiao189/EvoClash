@@ -5,7 +5,7 @@
 use bevy::prelude::*;
 use evoclash_game::evolution::Evolution;
 use evoclash_game::items::tier_color;
-use evoclash_game::protocol::Vitals;
+use evoclash_game::protocol::{MatchState, Phase, Vitals};
 use evoclash_game::shop::{
     DEATH_CARD_TICKS, DeathRecap, PlayerCommand, RESPAWN_MAX_TICKS, RESPAWN_MIN_TICKS, ShopItem,
     Wallet, can_deploy, dead_ticks,
@@ -250,6 +250,7 @@ fn shown(on: bool) -> Visibility {
 }
 
 fn update_death_screen(
+    state: Query<&MatchState>,
     me: Query<(&Vitals, &Wallet, &Evolution), With<LocalPlayer>>,
     mut ui: Query<(
         &DeathUi,
@@ -258,7 +259,9 @@ fn update_death_screen(
         &mut Visibility,
     )>,
 ) {
-    let me = me.single().ok().filter(|(v, ..)| !v.alive);
+    // Lobby deaths stand back up on their own. The shop, scrap and deploy stay hidden.
+    let lobby = state.iter().any(|s| s.phase == Phase::Lobby);
+    let me = me.single().ok().filter(|(v, ..)| !v.alive && !lobby);
     for (kind, text, color, mut vis) in &mut ui {
         if *kind == DeathUi::Root {
             vis.set_if_neq(shown(me.is_some()));
@@ -383,10 +386,14 @@ fn update_death_screen(
 }
 
 fn death_keys(
+    state: Query<&MatchState>,
     keys: Option<Res<ButtonInput<KeyCode>>>,
     me: Query<&Vitals, With<LocalPlayer>>,
     mut senders: Query<&mut MessageSender<PlayerCommand>, With<Client>>,
 ) {
+    if !state.iter().any(|s| s.phase == Phase::Playing) {
+        return;
+    }
     let (Some(keys), Ok(vitals)) = (keys, me.single()) else {
         return;
     };

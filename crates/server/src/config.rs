@@ -25,6 +25,14 @@ pub struct ServerConfig {
     pub threads: usize,
     /// Run as an Agones GameServer: identity and public address come from the SDK sidecar.
     pub agones: bool,
+    /// Fixed for the life of this process. Every round's map seed is `mix(room_seed, match_index)`.
+    pub room_seed: u64,
+}
+
+/// The one OS random draw: the startup seed when `--room-seed` is omitted.
+#[allow(clippy::disallowed_methods)]
+fn startup_seed() -> u64 {
+    rand::random()
 }
 
 impl ServerConfig {
@@ -39,6 +47,7 @@ impl ServerConfig {
         let mut monsters = true;
         let mut threads = 1;
         let mut agones = false;
+        let mut room_seed = None;
 
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -78,12 +87,16 @@ impl ServerConfig {
                         .expect("invalid --threads")
                         .max(1)
                 }
+                "--room-seed" => {
+                    room_seed = Some(value("--room-seed").parse().expect("invalid --room-seed"))
+                }
                 "-h" | "--help" => {
                     println!(
                         "evoclash-server [--port 7000] [--public-addr 127.0.0.1:7000] [--match-id ID]\n\
                          \x20               [--max-players 8] [--bots 6] [--matchmaker URL[,URL...]] [--single-match]\n\
-                         \x20               [--no-monsters] [--threads 1] [--agones]\n\n\
+                         \x20               [--no-monsters] [--threads 1] [--agones] [--room-seed U64]\n\n\
                          --bots N          keep at least N combatants in the arena by adding bots (0 disables)\n\
+                         --room-seed       fixed seed for this room; omitted once, from the OS\n\
                          --matchmaker      heartbeat to every listed matchmaker, and to every address\n\
                          \x20                 a hostname resolves to (a headless Service reaches all pods)\n\
                          --agones          run as an Agones GameServer (implies --single-match)\n\
@@ -106,6 +119,7 @@ impl ServerConfig {
             monsters,
             threads,
             agones,
+            room_seed: room_seed.unwrap_or_else(startup_seed),
         }
     }
 }

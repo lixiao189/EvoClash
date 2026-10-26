@@ -105,15 +105,20 @@ pub fn apply_evolution(evo: &Evolution, skills: &mut SkillState, vitals: &mut Vi
     }
 }
 
-/// Apply one `PlayerCommand`. Perk points can be spent any time; refunds, the shop and
-/// deploying only while dead. Returns true if the perks changed (call `apply_evolution`).
+/// Apply one `PlayerCommand`. Outside Playing the shop, perk panel and death-deploy are
+/// refused, so a lobby death stays on its 2s timer. Refunds and deploying also require
+/// the body to be dead. Returns true if the perks changed (call `apply_evolution`).
 pub fn handle_command(
     cmd: &PlayerCommand,
     evo: &mut Evolution,
     wallet: &mut Wallet,
     vitals: &mut Vitals,
     life: &mut LifeLog,
+    allow_shop: bool,
 ) -> bool {
+    if !allow_shop {
+        return false;
+    }
     if let PlayerCommand::Spend(perk) = cmd {
         return evo.spend(*perk);
     }
@@ -164,6 +169,7 @@ pub fn handle_command(
 /// Commands from each client link, applied to the body it controls.
 #[allow(clippy::type_complexity)]
 fn read_commands(
+    state: Query<&MatchState>,
     mut links: Query<(Entity, &mut MessageReceiver<PlayerCommand>), With<ClientOf>>,
     mut players: Query<(
         &ControlledBy,
@@ -174,6 +180,7 @@ fn read_commands(
         &mut LifeLog,
     )>,
 ) {
+    let allow_shop = state.iter().any(|s| s.phase == Phase::Playing);
     for (link, mut receiver) in &mut links {
         if !receiver.has_messages() {
             continue;
@@ -185,7 +192,14 @@ fn read_commands(
             continue;
         };
         for cmd in &cmds {
-            if handle_command(cmd, &mut evo, &mut wallet, &mut vitals, &mut life) {
+            if handle_command(
+                cmd,
+                &mut evo,
+                &mut wallet,
+                &mut vitals,
+                &mut life,
+                allow_shop,
+            ) {
                 apply_evolution(&evo, &mut skills, &mut vitals);
             }
         }
@@ -193,6 +207,7 @@ fn read_commands(
 }
 
 pub(crate) fn grant_xp(
+    state: Query<&MatchState>,
     mut queue: ResMut<XpQueue>,
     mut outbox: ResMut<Outbox>,
     mut players: Query<(
@@ -203,6 +218,10 @@ pub(crate) fn grant_xp(
         &mut LifeLog,
     )>,
 ) {
+    if state.iter().any(|s| s.phase != Phase::Playing) {
+        queue.0.clear();
+        return;
+    }
     if queue.0.is_empty() {
         return;
     }
@@ -295,7 +314,7 @@ mod tests {
         let (mut wallet, mut vitals, mut life) =
             (Wallet::default(), Vitals::default(), LifeLog::default());
         let mut run = |cmd, evo: &mut Evolution| {
-            handle_command(&cmd, evo, &mut wallet, &mut vitals, &mut life)
+            handle_command(&cmd, evo, &mut wallet, &mut vitals, &mut life, true)
         };
         assert!(run(PlayerCommand::Spend(Perk::Claws), &mut evo));
         assert!(run(PlayerCommand::Spend(Perk::Overclock), &mut evo));
@@ -324,7 +343,7 @@ mod tests {
             PlayerCommand::Buy(ShopItem::Bow),
             PlayerCommand::Deploy,
         ] {
-            handle_command(&cmd, &mut evo, &mut wallet, &mut alive, &mut life);
+            handle_command(&cmd, &mut evo, &mut wallet, &mut alive, &mut life, true);
         }
         assert_eq!((evo.rank(Perk::Claws), wallet.scrap), (2, 100));
         assert!(wallet.cart.is_empty() && !life.deploy_asap);
@@ -336,7 +355,8 @@ mod tests {
             &mut evo,
             &mut wallet,
             &mut vitals,
-            &mut life
+            &mut life,
+            true,
         ));
         assert_eq!((evo.rank(Perk::Claws), evo.points), (1, 1));
         let reset = PlayerCommand::ResetPerks;
@@ -345,11 +365,12 @@ mod tests {
             &mut evo,
             &mut wallet,
             &mut vitals,
-            &mut life
+            &mut life,
+            true,
         ));
         assert_eq!((evo.total_ranks(), evo.points), (0, 2));
         let buy = PlayerCommand::Buy(ShopItem::Bow);
-        handle_command(&buy, &mut evo, &mut wallet, &mut vitals, &mut life);
+        handle_command(&buy, &mut evo, &mut wallet, &mut vitals, &mut life, true);
         assert_eq!(
             (wallet.scrap, wallet.cart.clone()),
             (65, vec![ShopItem::Bow])
@@ -368,11 +389,11 @@ mod tests {
         let (mut vitals, mut life) = (dead(), LifeLog::default());
         for _ in 0..4 {
             let buy = PlayerCommand::Buy(ShopItem::Emp);
-            handle_command(&buy, &mut evo, &mut wallet, &mut vitals, &mut life);
+            handle_command(&buy, &mut evo, &mut wallet, &mut vitals, &mut life, true);
         }
         assert_eq!(wallet.cart.len(), 4);
         let refund = PlayerCommand::Refund(Perk::EmpExpert);
-        handle_command(&refund, &mut evo, &mut wallet, &mut vitals, &mut life);
+        handle_command(&refund, &mut evo, &mut wallet, &mut vitals, &mut life, true);
         assert_eq!((wallet.cart.len(), wallet.scrap), (3, 55));
     }
 

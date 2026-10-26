@@ -112,7 +112,7 @@ fn body_radius(monster: Option<&Monster>, prop: Option<&Prop>) -> f32 {
 }
 
 fn combat_allowed(state: &MatchState) -> bool {
-    state.phase != Phase::Intermission
+    !matches!(state.phase, Phase::Results | Phase::Recovering)
 }
 
 /// Where `target` was `rewind` ticks ago, from the shooter's point of view.
@@ -164,96 +164,100 @@ pub(crate) fn fire_weapons(
     )>,
     mut damage: ResMut<DamageQueue>,
     mut outbox: ResMut<Outbox>,
+    rng: Res<crate::rng::SimRng>,
 ) {
     if !combat_allowed(&state) {
         return;
     }
-    let mut rng = rand::rng();
-    for (entity, pos, input, vitals, mut loadout, mut cd, rewind, human, evo, skills) in
-        &mut shooters
-    {
-        let input = &input.0;
-        if !vitals.alive || !input.fire || cd.fire > 0 {
-            continue;
-        }
-        // A click never does nothing: a dry gun gives way to the best weapon that can attack.
-        if loadout.stuck() {
-            loadout.auto_switch();
-        }
-        if loadout.selected == THROW_SLOT {
-            // `throw_emps` throws instead.
-            continue;
-        }
-        let kind = loadout.weapon();
-        let aim = input.aim.normalize_or(Vec2::X);
-        let weapon = kind.spec();
-        cd.fire = evo.fire_cooldown(weapon.cooldown());
-        // Perks (利爪, 能量聚焦) and 狂暴.
-        let damage_amount = weapon.damage() * evo.weapon_damage_mult(kind) * skills.damage_mult();
-        let armor_mult = weapon.armor_mult() + evo.armor_mult_bonus(kind);
-
-        let gun = match kind.arm() {
-            Arm::Ranged(gun) => gun,
-            Arm::Melee(club) => {
-                for (target, target_pos, target_vitals, history, monster, prop) in &targets {
-                    if target == entity || !target_vitals.alive {
-                        continue;
-                    }
-                    let seen_at = rewound(history, tick.0, rewind.0, target_pos.0);
-                    let radius = body_radius(monster, prop);
-                    if !club.strikes(seen_at - pos.0, radius, aim, evo.melee_reach_bonus()) {
-                        continue;
-                    }
-                    if !arena.line_of_sight(pos.0, seen_at) {
-                        continue;
-                    }
-                    damage.0.push(Damage {
-                        target,
-                        attacker: Some(entity),
-                        amount: damage_amount,
-                        armor_mult,
-                        weapon: Some(kind),
-                        emp: false,
-                        cause: None,
-                    });
-                }
-                outbox.fast.push(GameEvent::Melee {
-                    pos: pos.0,
-                    dir: aim,
-                });
+    let playing = state.phase == Phase::Playing;
+    rng.with(playing, crate::rng::Stream::Combat, |mut rng| {
+        for (entity, pos, input, vitals, mut loadout, mut cd, rewind, human, evo, skills) in
+            &mut shooters
+        {
+            let input = &input.0;
+            if !vitals.alive || !input.fire || cd.fire > 0 {
                 continue;
             }
-        };
+            // A click never does nothing: a dry gun gives way to the best weapon that can attack.
+            if loadout.stuck() {
+                loadout.auto_switch();
+            }
+            if loadout.selected == THROW_SLOT {
+                // `throw_emps` throws instead.
+                continue;
+            }
+            let kind = loadout.weapon();
+            let aim = input.aim.normalize_or(Vec2::X);
+            let weapon = kind.spec();
+            cd.fire = evo.fire_cooldown(weapon.cooldown());
+            // Perks (利爪, 能量聚焦) and 狂暴.
+            let damage_amount =
+                weapon.damage() * evo.weapon_damage_mult(kind) * skills.damage_mult();
+            let armor_mult = weapon.armor_mult() + evo.armor_mult_bonus(kind);
 
-        for dir in gun.volley(aim, &mut rng) {
-            commands.spawn((
-                Name::new("Projectile"),
-                Projectile {
-                    kind: ProjectileKind::Shot(kind),
-                    vel: dir * gun.muzzle_speed(),
-                },
-                Pos(pos.0 + dir * (PLAYER_RADIUS + 4.0)),
-                Flight {
-                    owner: entity,
-                    rewind: rewind.0,
-                    ttl: gun.lifetime(),
-                    damage: damage_amount,
-                    armor_mult,
-                    piercing: gun.piercing(),
-                    already_hit: Vec::new(),
-                    fauna: false,
-                    cause: None,
-                    radius: 0.0,
-                },
-                projectile_replication(human),
-            ));
+            let gun = match kind.arm() {
+                Arm::Ranged(gun) => gun,
+                Arm::Melee(club) => {
+                    for (target, target_pos, target_vitals, history, monster, prop) in &targets {
+                        if target == entity || !target_vitals.alive {
+                            continue;
+                        }
+                        let seen_at = rewound(history, tick.0, rewind.0, target_pos.0);
+                        let radius = body_radius(monster, prop);
+                        if !club.strikes(seen_at - pos.0, radius, aim, evo.melee_reach_bonus()) {
+                            continue;
+                        }
+                        if !arena.line_of_sight(pos.0, seen_at) {
+                            continue;
+                        }
+                        damage.0.push(Damage {
+                            target,
+                            attacker: Some(entity),
+                            amount: damage_amount,
+                            armor_mult,
+                            weapon: Some(kind),
+                            emp: false,
+                            cause: None,
+                        });
+                    }
+                    outbox.fast.push(GameEvent::Melee {
+                        pos: pos.0,
+                        dir: aim,
+                    });
+                    continue;
+                }
+            };
+
+            for dir in gun.volley(aim, &mut rng) {
+                commands.spawn((
+                    Name::new("Projectile"),
+                    Projectile {
+                        kind: ProjectileKind::Shot(kind),
+                        vel: dir * gun.muzzle_speed(),
+                    },
+                    Pos(pos.0 + dir * (PLAYER_RADIUS + 4.0)),
+                    Flight {
+                        owner: entity,
+                        rewind: rewind.0,
+                        ttl: gun.lifetime(),
+                        damage: damage_amount,
+                        armor_mult,
+                        piercing: gun.piercing(),
+                        already_hit: Vec::new(),
+                        fauna: false,
+                        cause: None,
+                        radius: 0.0,
+                    },
+                    projectile_replication(human),
+                ));
+            }
+            loadout.spend(kind);
+            // Out of ammo: the gun stays in the backpack, and the next best weapon comes out.
+            if loadout.stuck() {
+                loadout.auto_switch();
+            }
         }
-        loadout.spend(kind);
-        // Out of ammo: the gun stays in the backpack, and the next best weapon comes out.
-        if loadout.stuck() {
-            loadout.auto_switch();
-        }
-    }
+    });
 }
 
 fn throw_emps(

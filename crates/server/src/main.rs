@@ -17,6 +17,7 @@ mod gameplay;
 mod inventory;
 mod monsters;
 mod ops;
+mod rng;
 mod skills;
 
 use std::time::Duration;
@@ -62,6 +63,7 @@ fn main() {
     app.insert_resource(ReplicationMetadata::new(REPLICATION_INTERVAL));
     app.add_plugins(evoclash_game::SharedPlugin);
     app.insert_resource(connections::TlsIdentity::self_signed(&config));
+    info!("room seed {}", config.room_seed);
     app.insert_resource(config);
     app.add_plugins((
         connections::ConnectionsPlugin,

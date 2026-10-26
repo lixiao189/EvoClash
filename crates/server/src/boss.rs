@@ -345,6 +345,7 @@ fn boss_flow(
     bosses: Query<(Entity, &Vitals, &BossBrain)>,
     mut outbox: ResMut<Outbox>,
     mut decay_in: Local<u32>,
+    rng: Res<crate::rng::SimRng>,
 ) {
     if reset.0 {
         // The match is starting over; reset_match clears the arena.
@@ -382,7 +383,9 @@ fn boss_flow(
             let hp = behemoth_hp(humans);
             let at = lair(&arena, &obstacles.0);
             let turf = Rect::from_center_size(at, Vec2::splat(800.0));
-            let brain = Brain::new(MonsterKind::Behemoth, false, at, turf, 0, 0);
+            let brain = rng.with(true, crate::rng::Stream::Boss, |rng| {
+                Brain::new(MonsterKind::Behemoth, false, at, turf, 0, 0, rng)
+            });
             let entity = spawn_monster(
                 &mut commands,
                 MonsterKind::Behemoth,
@@ -493,212 +496,218 @@ fn behemoth(
     monsters: Query<(), With<Monster>>,
     mut damage: ResMut<DamageQueue>,
     mut outbox: ResMut<Outbox>,
+    rng: Res<crate::rng::SimRng>,
 ) {
-    if state.phase == Phase::Intermission {
+    if state.phase != Phase::Playing {
         return;
     }
     let alive = prey(players.iter());
     let mut live_monsters = monsters.iter().count();
-    let mut rng = rand::rng();
-    let radius = MonsterKind::Behemoth.radius();
-    for (entity, mut pos, vitals, mut brain, mut mstate) in &mut bosses {
-        if !vitals.alive {
-            continue;
-        }
-        let b = &mut *brain;
-        for cd in [
-            &mut b.slam_cd,
-            &mut b.spit_cd,
-            &mut b.ring_cd,
-            &mut b.charge_cd,
-            &mut b.summon_cd,
-            &mut b.trail_cd,
-            &mut b.report_cd,
-        ] {
-            *cd = cd.saturating_sub(1);
-        }
-        let phase = phase_of(vitals.hp, b.max_hp);
-        if phase != b.phase || b.report_cd == 0 {
-            if phase == 3 && b.phase != 3 {
-                outbox.announce("辐射巨兽陷入狂暴！");
+    rng.with(true, crate::rng::Stream::Boss, |rng| {
+        let radius = MonsterKind::Behemoth.radius();
+        for (entity, mut pos, vitals, mut brain, mut mstate) in &mut bosses {
+            if !vitals.alive {
+                continue;
             }
-            b.phase = phase;
-            b.report_cd = TICKS_PER_SEC as u16;
-            outbox.fast.push(GameEvent::BossHp {
-                hp: vitals.hp,
-                max: b.max_hp,
-                phase,
-            });
-        }
-        let at = pos.0;
-        let hit = |damage: &mut DamageQueue, target: Entity, amount: f32, cause| {
-            damage.0.push(Damage {
-                target,
-                attacker: Some(entity),
-                amount,
-                armor_mult: 1.0,
-                weapon: None,
-                emp: false,
-                cause: Some(cause),
-            });
-        };
-        let target = nearest(&alive, at).filter(|(_, _, d)| *d < CHASE_RANGE);
-        let mut facing = mstate.facing;
-        let mut velocity = Vec2::ZERO;
-        b.act = match b.act {
-            Act::Slam(t) if t > 1 => Act::Slam(t - 1),
-            Act::Slam(_) => {
-                for (victim, p, _) in &alive {
-                    if p.distance(at) <= BEHEMOTH_SLAM_RADIUS + PLAYER_RADIUS {
-                        hit(&mut damage, *victim, SLAM_DAMAGE, "重踏");
-                    }
+            let b = &mut *brain;
+            for cd in [
+                &mut b.slam_cd,
+                &mut b.spit_cd,
+                &mut b.ring_cd,
+                &mut b.charge_cd,
+                &mut b.summon_cd,
+                &mut b.trail_cd,
+                &mut b.report_cd,
+            ] {
+                *cd = cd.saturating_sub(1);
+            }
+            let phase = phase_of(vitals.hp, b.max_hp);
+            if phase != b.phase || b.report_cd == 0 {
+                if phase == 3 && b.phase != 3 {
+                    outbox.announce("辐射巨兽陷入狂暴！");
                 }
-                outbox.fast.push(GameEvent::Boom {
-                    pos: at,
-                    radius: BEHEMOTH_SLAM_RADIUS,
-                    fire: false,
+                b.phase = phase;
+                b.report_cd = TICKS_PER_SEC as u16;
+                outbox.fast.push(GameEvent::BossHp {
+                    hp: vitals.hp,
+                    max: b.max_hp,
+                    phase,
                 });
-                b.slam_cd = SLAM_CD;
-                Act::Idle
             }
-            Act::Windup(t) if t > 1 => Act::Windup(t - 1),
-            Act::Windup(_) => {
-                b.charge_hit.clear();
-                Act::Charging(CHARGE_TICKS)
-            }
-            Act::Charging(t) => {
-                velocity = b.charge_dir * CHARGE_SPEED;
-                for (victim, p, _) in &alive {
-                    if p.distance(at) <= radius + PLAYER_RADIUS && !b.charge_hit.contains(victim) {
-                        b.charge_hit.push(*victim);
-                        hit(&mut damage, *victim, CHARGE_DAMAGE, "冲撞");
+            let at = pos.0;
+            let hit = |damage: &mut DamageQueue, target: Entity, amount: f32, cause| {
+                damage.0.push(Damage {
+                    target,
+                    attacker: Some(entity),
+                    amount,
+                    armor_mult: 1.0,
+                    weapon: None,
+                    emp: false,
+                    cause: Some(cause),
+                });
+            };
+            let target = nearest(&alive, at).filter(|(_, _, d)| *d < CHASE_RANGE);
+            let mut facing = mstate.facing;
+            let mut velocity = Vec2::ZERO;
+            b.act = match b.act {
+                Act::Slam(t) if t > 1 => Act::Slam(t - 1),
+                Act::Slam(_) => {
+                    for (victim, p, _) in &alive {
+                        if p.distance(at) <= BEHEMOTH_SLAM_RADIUS + PLAYER_RADIUS {
+                            hit(&mut damage, *victim, SLAM_DAMAGE, "重踏");
+                        }
                     }
-                }
-                if t > 1 {
-                    Act::Charging(t - 1)
-                } else {
-                    b.charge_cd = CHARGE_CD;
+                    outbox.fast.push(GameEvent::Boom {
+                        pos: at,
+                        radius: BEHEMOTH_SLAM_RADIUS,
+                        fire: false,
+                    });
+                    b.slam_cd = SLAM_CD;
                     Act::Idle
                 }
-            }
-            Act::Idle => {
-                let mut next = Act::Idle;
-                if let Some((_, p, d)) = target {
-                    let to = (p - at).normalize_or(Vec2::X);
-                    facing = to.to_angle();
-                    let sight = d < SPIT_RANGE && arena.line_of_sight(at, p);
-                    if b.slam_cd == 0 && d <= BEHEMOTH_SLAM_RADIUS + PLAYER_RADIUS - 10.0 {
-                        next = Act::Slam(SLAM_WINDUP);
-                    } else if phase >= 2
-                        && b.charge_cd == 0
-                        && (250.0..700.0).contains(&d)
-                        && arena.line_of_sight(at, p)
-                    {
-                        b.charge_dir = to;
-                        next = Act::Windup(CHARGE_WINDUP);
-                    } else {
-                        if d > radius + PLAYER_RADIUS {
-                            let mult = if phase == 3 { P3_SPEED_MULT } else { 1.0 };
-                            velocity = to * SPEED * mult;
+                Act::Windup(t) if t > 1 => Act::Windup(t - 1),
+                Act::Windup(_) => {
+                    b.charge_hit.clear();
+                    Act::Charging(CHARGE_TICKS)
+                }
+                Act::Charging(t) => {
+                    velocity = b.charge_dir * CHARGE_SPEED;
+                    for (victim, p, _) in &alive {
+                        if p.distance(at) <= radius + PLAYER_RADIUS
+                            && !b.charge_hit.contains(victim)
+                        {
+                            b.charge_hit.push(*victim);
+                            hit(&mut damage, *victim, CHARGE_DAMAGE, "冲撞");
                         }
-                        if b.spit_cd == 0 && sight {
-                            b.spit_cd = SPIT_CD;
-                            for i in 0..SPIT_GLOBS {
-                                let off = (i as f32 - (SPIT_GLOBS - 1) as f32 / 2.0) * SPIT_SPREAD;
-                                let dir = Vec2::from_angle(to.to_angle() + off);
-                                let flight = Flight::fauna(entity, ACID_TTL, SPIT_DAMAGE, "酸液");
-                                let from = at + dir * (radius + 8.0);
-                                shoot(
-                                    &mut commands,
-                                    ProjectileKind::Acid,
-                                    from,
-                                    dir,
-                                    ACID_SPEED,
-                                    flight,
-                                );
+                    }
+                    if t > 1 {
+                        Act::Charging(t - 1)
+                    } else {
+                        b.charge_cd = CHARGE_CD;
+                        Act::Idle
+                    }
+                }
+                Act::Idle => {
+                    let mut next = Act::Idle;
+                    if let Some((_, p, d)) = target {
+                        let to = (p - at).normalize_or(Vec2::X);
+                        facing = to.to_angle();
+                        let sight = d < SPIT_RANGE && arena.line_of_sight(at, p);
+                        if b.slam_cd == 0 && d <= BEHEMOTH_SLAM_RADIUS + PLAYER_RADIUS - 10.0 {
+                            next = Act::Slam(SLAM_WINDUP);
+                        } else if phase >= 2
+                            && b.charge_cd == 0
+                            && (250.0..700.0).contains(&d)
+                            && arena.line_of_sight(at, p)
+                        {
+                            b.charge_dir = to;
+                            next = Act::Windup(CHARGE_WINDUP);
+                        } else {
+                            if d > radius + PLAYER_RADIUS {
+                                let mult = if phase == 3 { P3_SPEED_MULT } else { 1.0 };
+                                velocity = to * SPEED * mult;
+                            }
+                            if b.spit_cd == 0 && sight {
+                                b.spit_cd = SPIT_CD;
+                                for i in 0..SPIT_GLOBS {
+                                    let off =
+                                        (i as f32 - (SPIT_GLOBS - 1) as f32 / 2.0) * SPIT_SPREAD;
+                                    let dir = Vec2::from_angle(to.to_angle() + off);
+                                    let flight =
+                                        Flight::fauna(entity, ACID_TTL, SPIT_DAMAGE, "酸液");
+                                    let from = at + dir * (radius + 8.0);
+                                    shoot(
+                                        &mut commands,
+                                        ProjectileKind::Acid,
+                                        from,
+                                        dir,
+                                        ACID_SPEED,
+                                        flight,
+                                    );
+                                }
                             }
                         }
                     }
+                    next
                 }
-                next
-            }
-        };
-        if phase >= 2 && b.ring_cd == 0 && target.is_some() {
-            b.ring_cd = RING_CD;
-            b.spiral += 0.31;
-            for i in 0..RING_GLOBS {
-                let dir = Vec2::from_angle(b.spiral + i as f32 * TAU / RING_GLOBS as f32);
-                let flight = Flight::fauna(entity, RING_TTL, RING_DAMAGE, "辐射");
-                let from = at + dir * (radius + 8.0);
-                shoot(
-                    &mut commands,
-                    ProjectileKind::Spore,
-                    from,
-                    dir,
-                    RING_SPEED,
-                    flight,
-                );
-            }
-        }
-        if phase == 3 {
-            if b.trail_cd == 0 {
-                b.trail_cd = TRAIL_EVERY;
-                spawn_puddle(&mut commands, PuddleKind::Radiation, at, Some(entity));
-            }
-            if b.summon_cd == 0 && target.is_some() {
-                b.summon_cd = SUMMON_EVERY;
-                let start = rng.random_range(0.0..TAU);
-                for i in 0..SUMMONS {
-                    if live_monsters >= MAX_LIVE {
-                        break;
-                    }
-                    let dir = Vec2::from_angle(start + i as f32 * TAU / SUMMONS as f32);
-                    let spot = at + dir * (radius + 40.0);
-                    let ghoul = MonsterKind::Ghoul;
-                    if arena.resolve_with(spot, ghoul.radius(), &obstacles.0) != spot {
-                        continue;
-                    }
-                    let turf = Rect::from_center_size(spot, Vec2::splat(600.0));
-                    let brain = Brain::new(ghoul, false, spot, turf, 0, 0);
-                    spawn_monster(&mut commands, ghoul, false, spot, brain, None);
-                    live_monsters += 1;
+            };
+            if phase >= 2 && b.ring_cd == 0 && target.is_some() {
+                b.ring_cd = RING_CD;
+                b.spiral += 0.31;
+                for i in 0..RING_GLOBS {
+                    let dir = Vec2::from_angle(b.spiral + i as f32 * TAU / RING_GLOBS as f32);
+                    let flight = Flight::fauna(entity, RING_TTL, RING_DAMAGE, "辐射");
+                    let from = at + dir * (radius + 8.0);
+                    shoot(
+                        &mut commands,
+                        ProjectileKind::Spore,
+                        from,
+                        dir,
+                        RING_SPEED,
+                        flight,
+                    );
                 }
             }
-        }
-        if velocity != Vec2::ZERO {
-            let want = at + velocity * DT;
-            let next = arena.resolve_with(want, radius, &obstacles.0);
-            if let Act::Charging(_) = b.act
-                && next.distance(want) > CHARGE_SPEED * DT * 0.5
-            {
-                // Slammed into a wall: the charge ends.
-                b.act = Act::Idle;
-                b.charge_cd = CHARGE_CD;
+            if phase == 3 {
+                if b.trail_cd == 0 {
+                    b.trail_cd = TRAIL_EVERY;
+                    spawn_puddle(&mut commands, PuddleKind::Radiation, at, Some(entity));
+                }
+                if b.summon_cd == 0 && target.is_some() {
+                    b.summon_cd = SUMMON_EVERY;
+                    let start = rng.random_range(0.0..TAU);
+                    for i in 0..SUMMONS {
+                        if live_monsters >= MAX_LIVE {
+                            break;
+                        }
+                        let dir = Vec2::from_angle(start + i as f32 * TAU / SUMMONS as f32);
+                        let spot = at + dir * (radius + 40.0);
+                        let ghoul = MonsterKind::Ghoul;
+                        if arena.resolve_with(spot, ghoul.radius(), &obstacles.0) != spot {
+                            continue;
+                        }
+                        let turf = Rect::from_center_size(spot, Vec2::splat(600.0));
+                        let brain = Brain::new(ghoul, false, spot, turf, 0, 0, rng);
+                        spawn_monster(&mut commands, ghoul, false, spot, brain, None);
+                        live_monsters += 1;
+                    }
+                }
             }
-            if next != at {
-                pos.0 = next;
+            if velocity != Vec2::ZERO {
+                let want = at + velocity * DT;
+                let next = arena.resolve_with(want, radius, &obstacles.0);
+                if let Act::Charging(_) = b.act
+                    && next.distance(want) > CHARGE_SPEED * DT * 0.5
+                {
+                    // Slammed into a wall: the charge ends.
+                    b.act = Act::Idle;
+                    b.charge_cd = CHARGE_CD;
+                }
+                if next != at {
+                    pos.0 = next;
+                }
+                if !matches!(b.act, Act::Charging(_)) {
+                    facing = velocity.to_angle();
+                }
             }
-            if !matches!(b.act, Act::Charging(_)) {
-                facing = velocity.to_angle();
+            let (action, fuse) = match b.act {
+                Act::Idle => (MonsterAction::Idle, 0),
+                Act::Slam(t) => (MonsterAction::Slam, t),
+                Act::Windup(t) => (MonsterAction::Charge, t),
+                Act::Charging(_) => (MonsterAction::Charge, 0),
+            };
+            if matches!(b.act, Act::Windup(_) | Act::Charging(_)) {
+                facing = b.charge_dir.to_angle();
             }
+            let new = MonsterState {
+                facing,
+                phase,
+                action,
+                fuse,
+            };
+            set_state(&mut mstate, new);
         }
-        let (action, fuse) = match b.act {
-            Act::Idle => (MonsterAction::Idle, 0),
-            Act::Slam(t) => (MonsterAction::Slam, t),
-            Act::Windup(t) => (MonsterAction::Charge, t),
-            Act::Charging(_) => (MonsterAction::Charge, 0),
-        };
-        if matches!(b.act, Act::Windup(_) | Act::Charging(_)) {
-            facing = b.charge_dir.to_angle();
-        }
-        let new = MonsterState {
-            facing,
-            phase,
-            action,
-            fuse,
-        };
-        set_state(&mut mstate, new);
-    }
+    });
 }
 
 #[cfg(test)]

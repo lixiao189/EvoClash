@@ -84,7 +84,7 @@ fn command(app: &mut App, e: Entity, cmd: PlayerCommand) {
     let world = app.world_mut();
     let mut q = world.query::<(&mut Evolution, &mut Wallet, &mut Vitals, &mut LifeLog)>();
     let (mut evo, mut wallet, mut vitals, mut life) = q.get_mut(world, e).unwrap();
-    handle_command(&cmd, &mut evo, &mut wallet, &mut vitals, &mut life);
+    handle_command(&cmd, &mut evo, &mut wallet, &mut vitals, &mut life, true);
 }
 
 fn alive(app: &App, e: Entity) -> bool {
@@ -245,4 +245,100 @@ fn scrap_and_perks_survive_death_and_the_cart_is_equipped() {
     let vitals = world.get::<Vitals>(p).unwrap();
     assert_eq!(vitals.armor, ArmorKind::Scrap);
     assert_eq!(world.get::<Evolution>(p).unwrap().rank(Perk::Overclock), 1);
+}
+
+fn combatant(app: &mut App, id: u64, name: &str) -> Entity {
+    app.world_mut()
+        .spawn((
+            Player {
+                client_id: id,
+                name: name.into(),
+                color: [1.0; 3],
+                bot: false,
+            },
+            Pos(Vec2::ZERO),
+            Vitals::default(),
+            Loadout::default(),
+            Stats {
+                score: 4,
+                streak: 2,
+                ..default()
+            },
+            Evolution::default(),
+            SkillState::default(),
+            Recovery::default(),
+            Wallet {
+                scrap: 10,
+                ..default()
+            },
+            LifeLog::default(),
+            (Dash::default(), PosHistory::default()),
+        ))
+        .id()
+}
+
+#[test]
+fn public_join_stays_open_twelve_seconds_in_and_closes_at_seven() {
+    // 20s clock = 17s Lobby + 3s Starting. Twelve seconds in, 8s remain: still offered.
+    let mut state = MatchState {
+        phase: Phase::Lobby,
+        countdown_active: true,
+        ticks_left: LOBBY_COUNTDOWN_TICKS - 12 * TICKS_PER_SEC,
+        ..default()
+    };
+    assert!(lobby_open(&state), "8s until Playing still accepts");
+    state.ticks_left = LOBBY_COUNTDOWN_TICKS - 13 * TICKS_PER_SEC;
+    assert!(!lobby_open(&state), "7s until Playing is join_mode none");
+    state.countdown_active = false;
+    state.ticks_left = 0;
+    assert!(lobby_open(&state));
+    state.phase = Phase::Starting;
+    state.ticks_left = STARTING_TICKS;
+    assert!(!lobby_open(&state));
+}
+
+#[test]
+fn lobby_kill_does_not_score_or_drop_a_bag() {
+    let mut app = App::new();
+    app.init_resource::<DamageQueue>()
+        .init_resource::<Outbox>()
+        .init_resource::<XpQueue>()
+        .init_resource::<Dealt>()
+        .init_resource::<SimTick>();
+    app.world_mut().spawn(MatchState {
+        phase: Phase::Lobby,
+        ..default()
+    });
+    app.add_systems(Update, resolve_damage);
+    let killer = combatant(&mut app, 1, "a");
+    let victim = combatant(&mut app, 2, "b");
+    app.world_mut()
+        .resource_mut::<DamageQueue>()
+        .0
+        .push(Damage {
+            target: victim,
+            attacker: Some(killer),
+            amount: 500.0,
+            armor_mult: 1.0,
+            weapon: Some(WeaponKind::Stick),
+            emp: false,
+            cause: None,
+        });
+    app.update();
+    let world = app.world();
+    assert_eq!(world.get::<Stats>(killer).unwrap().score, 4);
+    assert_eq!(world.get::<Stats>(killer).unwrap().streak, 2);
+    assert_eq!(world.get::<Wallet>(killer).unwrap().scrap, 10);
+    assert_eq!(world.get::<Evolution>(killer).unwrap().level, 1);
+    assert_eq!(world.get::<Loadout>(victim).unwrap(), &Loadout::default());
+    assert_eq!(
+        world.get::<Vitals>(victim).unwrap().respawn_in,
+        LOBBY_RESPAWN_TICKS
+    );
+    assert!(world.get::<Wallet>(victim).unwrap().recap.is_none());
+    let bags = world
+        .iter_entities()
+        .filter(|e| e.contains::<Pickup>())
+        .count();
+    assert_eq!(bags, 0, "lobby deaths leave no bag");
 }

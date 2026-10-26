@@ -47,17 +47,30 @@ pub(super) fn drop_shield_on_attack(mut players: Query<(&CurrentInput, &mut Vita
 pub(super) fn movement(
     arena: Res<Arena>,
     obstacles: Res<Obstacles>,
+    state: Query<&MatchState>,
     mut players: Query<(
         &mut Pos,
         &mut Dash,
         &mut Aim,
-        &CurrentInput,
+        &mut CurrentInput,
         &Vitals,
         &Evolution,
         &SkillState,
     )>,
 ) {
-    for (pos, dash, mut aim, input, vitals, evo, skills) in &mut players {
+    let frozen = state.iter().any(|s| s.phase == Phase::Starting);
+    for (pos, dash, mut aim, mut input, vitals, evo, skills) in &mut players {
+        if frozen {
+            // Zeroed before step_movement and before Combat reads the same component.
+            input.0.move_x = 0;
+            input.0.move_y = 0;
+            input.0.fire = false;
+            input.0.dash = false;
+            input.0.interact = false;
+            input.0.throw = false;
+            input.0.skill_a = false;
+            input.0.skill_b = false;
+        }
         sim::step_movement(
             pos,
             dash,

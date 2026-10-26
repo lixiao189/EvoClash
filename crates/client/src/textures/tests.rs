@@ -533,6 +533,37 @@ fn preview_skills() {
     write_bmp(&sheet, 6, &path);
 }
 
+/// Dev aid: host crown and the BOT tag on dark and pale ground, 8x.
+/// `EVOCLASH_SPRITE_PREVIEW=out.bmp cargo test -p evoclash -- --ignored preview_badges`
+#[test]
+#[ignore]
+fn preview_badges() {
+    let Ok(path) = std::env::var("EVOCLASH_SPRITE_PREVIEW") else {
+        return;
+    };
+    let mut sheet = Canvas::filled(40, 28, |x, _| {
+        if x < 20 {
+            rgb(0.22, 0.18, 0.15)
+        } else {
+            rgb(0.78, 0.74, 0.66)
+        }
+    });
+    let blit = |sheet: &mut Canvas, src: &Canvas, dx: i32, dy: i32| {
+        for y in 0..src.h as i32 {
+            for x in 0..src.w as i32 {
+                sheet.put(dx + x, dy + y, src.get(x, y));
+            }
+        }
+    };
+    let crown = paint_host_crown();
+    let tag = paint_bot_tag();
+    blit(&mut sheet, &crown, 4, 2);
+    blit(&mut sheet, &tag, 4, 14);
+    blit(&mut sheet, &crown, 24, 2);
+    blit(&mut sheet, &tag, 22, 14);
+    write_bmp(&sheet, 8, &path);
+}
+
 #[test]
 fn sprites_have_opaque_pixels() {
     for canvas in [
@@ -548,6 +579,8 @@ fn sprites_have_opaque_pixels() {
         paint_ammo(),
         paint_reticle(),
         paint_bar(),
+        paint_host_crown(),
+        paint_bot_tag(),
     ] {
         assert!(canvas.px.iter().any(|p| p[3] > 0.9));
     }

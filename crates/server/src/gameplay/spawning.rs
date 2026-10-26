@@ -63,8 +63,10 @@ pub(super) fn spawn_match_state(mut commands: Commands, arena: Res<Arena>) {
     commands.spawn((
         Name::new("Match"),
         MatchState {
-            phase: Phase::Warmup,
-            ticks_left: WARMUP_TICKS,
+            phase: Phase::Lobby,
+            ticks_left: 0,
+            countdown_active: false,
+            match_index: 0,
             vault_in: FIRST_VAULT_TICKS,
             winner: None,
             map_seed: arena.seed,

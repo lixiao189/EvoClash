@@ -7,9 +7,11 @@ use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 use evoclash_game::api::Heartbeat;
+use evoclash_game::protocol::{MatchState, Player};
 
 use crate::config::ServerConfig;
 use crate::connections::{Human, TlsIdentity};
+use crate::gameplay::{lobby_open, phase_left_secs, phase_name};
 
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(2);
 /// The self-signed certificate is valid for 14 days; stop taking new players well before that
@@ -30,6 +32,13 @@ impl OpsState {
     fn start_draining(&self, why: &str) {
         if !self.draining.swap(true, Ordering::Relaxed) {
             info!("{why}: finishing the current match, then exiting");
+        }
+    }
+
+    /// The next heartbeats say this process is leaving on purpose, not crashing.
+    pub fn mark_exiting(&self) {
+        if let Ok(mut beat) = self.snapshot.lock() {
+            beat.exiting = true;
         }
     }
 }
@@ -56,6 +65,16 @@ impl Plugin for OpsPlugin {
                 max_players: config.max_players as u32,
                 accepting: true,
                 tick_us: 0,
+                phase: "lobby".into(),
+                phase_left_secs: None,
+                humans: 0,
+                bots: 0,
+                is_private: false,
+                room_code: None,
+                room_seed: config.room_seed,
+                match_index: 0,
+                join_mode: "lobby".into(),
+                exiting: false,
             })),
         };
         for url in &config.matchmakers {
@@ -68,14 +87,7 @@ impl Plugin for OpsPlugin {
             timer.started = Some(Instant::now());
         });
         app.add_systems(FixedLast, finish_tick_timer);
-        app.add_systems(
-            Update,
-            (
-                update_snapshot,
-                retire_old_certificate,
-                exit_when_drained_and_empty,
-            ),
-        );
+        app.add_systems(Update, (update_snapshot, retire_old_certificate));
     }
 }
 
@@ -92,18 +104,6 @@ fn install_signal_handler(ops: OpsState) {
     });
     if let Err(e) = result {
         warn!("cannot install signal handler: {e}");
-    }
-}
-
-/// A draining server with nobody in it (or holding a reconnect slot) has nothing to finish.
-fn exit_when_drained_and_empty(
-    ops: Res<OpsState>,
-    humans: Query<(), With<Human>>,
-    mut exit: MessageWriter<AppExit>,
-) {
-    if ops.is_draining() && humans.is_empty() {
-        info!("drained with no players left, shutting down");
-        exit.write(AppExit::Success);
     }
 }
 
@@ -124,15 +124,36 @@ fn update_snapshot(
     ops: Res<OpsState>,
     timer: Res<TickTimer>,
     humans: Query<&Human>,
+    players: Query<&Player>,
+    state: Query<&MatchState>,
     config: Res<ServerConfig>,
 ) {
-    let players = humans.iter().count() as u32;
+    let human_count = humans.iter().count() as u32;
+    let bots = players.iter().filter(|player| player.bot).count() as u32;
     let Ok(mut snapshot) = ops.snapshot.lock() else {
         return;
     };
-    snapshot.players = players;
-    snapshot.accepting = !ops.is_draining() && (players as usize) < config.max_players;
+    let exiting = snapshot.exiting;
+    snapshot.players = human_count;
+    snapshot.humans = human_count;
+    snapshot.bots = bots;
+    snapshot.accepting = !ops.is_draining() && (human_count as usize) < config.max_players;
     snapshot.tick_us = timer.ema_us as u32;
+    snapshot.room_seed = config.room_seed;
+    snapshot.is_private = false;
+    snapshot.room_code = None;
+    snapshot.exiting = exiting;
+    if let Some(state) = state.iter().next() {
+        snapshot.phase = phase_name(state.phase).to_string();
+        snapshot.phase_left_secs = phase_left_secs(state);
+        snapshot.match_index = state.match_index;
+        snapshot.join_mode = if lobby_open(state) && snapshot.accepting {
+            "lobby"
+        } else {
+            "none"
+        }
+        .to_string();
+    }
 }
 
 /// Every endpoint behind a matchmaker URL. A plain `http://name:port` URL is expanded to each
