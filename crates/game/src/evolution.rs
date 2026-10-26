@@ -355,11 +355,6 @@ impl Evolution {
         gained
     }
 
-    /// Perks that can still be ranked up.
-    pub fn open_perks(&self) -> impl Iterator<Item = Perk> + '_ {
-        Perk::ALL.into_iter().filter(|p| self.rank(*p) < MAX_RANK)
-    }
-
     pub fn can_spend(&self, perk: Perk) -> bool {
         self.points > 0 && self.rank(perk) < MAX_RANK
     }
@@ -730,7 +725,7 @@ mod tests {
         evo.points = 1;
         assert!(!evo.spend(Perk::Claws));
         assert_eq!(evo.points, 1);
-        assert!(evo.open_perks().all(|p| p != Perk::Claws));
+        assert!(!evo.can_spend(Perk::Claws));
     }
 
     #[test]
