@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::evolution::{Evolution, Skill, SkillState};
 use crate::items::{ArmorKind, Item, WeaponKind};
 use crate::map::PropKind;
+use crate::shop::{PlayerCommand, Wallet};
 
 /// One tick of player intent. Sent redundantly every tick (UDP, unreliable) so a lost
 /// packet never drops a shot; the server replays the newest input it has if one is late.
@@ -23,9 +24,6 @@ pub struct PlayerInput {
     pub dash: bool,
     pub interact: bool,
     pub throw: bool,
-    /// Perk pick: 1..=3 chooses that slot of the current offer while held, 0 = none.
-    /// The server acts on the change, so holding a key picks once.
-    pub pick: u8,
     /// Skill A (R) / skill B (T) held.
     pub skill_a: bool,
     pub skill_b: bool,
@@ -117,7 +115,8 @@ pub struct Vitals {
     pub armor: ArmorKind,
     pub armor_points: f32,
     pub alive: bool,
-    /// Ticks until respawn while dead.
+    /// Ticks until the automatic respawn while dead (counts down from
+    /// `shop::RESPAWN_MAX_TICKS`; `shop::can_deploy` says when you may leave early).
     pub respawn_in: u16,
     /// Ticks of EMP-induced slowdown left.
     pub emp_slow: u16,
@@ -491,6 +490,8 @@ pub enum GameEvent {
     /// Sent only to the combatant who earned it.
     XpGain {
         amount: u32,
+        /// 废料 earned along with it.
+        scrap: u32,
         pos: Vec2,
     },
     LevelUp {
@@ -513,6 +514,8 @@ pub enum GameEvent {
 pub struct ReliableChannel;
 /// Cosmetic feedback (hits, swings, explosions): latest-wins, never retransmitted.
 pub struct FastChannel;
+/// Client → server `shop::PlayerCommand`s (perk points, shop, deploy): must arrive, in order.
+pub struct CommandChannel;
 
 pub struct ProtocolPlugin;
 
@@ -564,5 +567,15 @@ impl Plugin for ProtocolPlugin {
             ..default()
         })
         .add_direction(NetworkDirection::ServerToClient);
+
+        // Death prep (scrap, shop, respec, deploy).
+        app.component::<Wallet>().replicate();
+        app.register_message::<PlayerCommand>()
+            .add_direction(NetworkDirection::ClientToServer);
+        app.add_channel::<CommandChannel>(ChannelSettings {
+            mode: ChannelMode::OrderedReliable(ReliableSettings::default()),
+            ..default()
+        })
+        .add_direction(NetworkDirection::ClientToServer);
     }
 }

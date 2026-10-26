@@ -9,6 +9,9 @@ mod weapons;
 
 pub use weapons::*;
 
+/// EMPs a combatant can carry before 电磁专家.
+pub const MAX_EMPS: u8 = 3;
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, Reflect, Default)]
 pub enum ArmorKind {
     #[default]

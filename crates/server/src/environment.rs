@@ -7,6 +7,7 @@ use evoclash_game::evolution::{Evolution, VAULT_SAFE_XP, crate_xp, safe_xp};
 use evoclash_game::items::{ArmorKind, Item, roll_container};
 use evoclash_game::map::{Biome, PropKind};
 use evoclash_game::protocol::*;
+use evoclash_game::shop::{VAULT_SAFE_SCRAP, crate_scrap, safe_scrap};
 use evoclash_game::sim::{Arena, Obstacles, PLAYER_RADIUS};
 use lightyear::prelude::*;
 use rand::Rng;
@@ -274,6 +275,11 @@ fn crack_safes(
                         },
                         pos: pos.0,
                         loot: true,
+                        scrap: if vault {
+                            VAULT_SAFE_SCRAP
+                        } else {
+                            safe_scrap(prop.tier)
+                        },
                     });
                     let toward = (cracker_pos.0 - pos.0).normalize_or(Vec2::NEG_Y);
                     let drop_at = pos.0 + toward * (prop.kind.radius() + 18.0);
@@ -352,6 +358,7 @@ fn resolve_prop_damage(
                         base: crate_xp(prop.tier),
                         pos: pos.0,
                         loot: true,
+                        scrap: crate_scrap(prop.tier),
                     });
                 }
                 let item = if rng.random_bool(0.85) {

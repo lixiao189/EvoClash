@@ -7,16 +7,17 @@ use evoclash_game::evolution::{Evolution, Skill, SkillState, player_kill_xp};
 use evoclash_game::items::{ArmorKind, Item, WeaponKind, roll_loot};
 use evoclash_game::map::{ArenaMap, VAULT_CENTER};
 use evoclash_game::protocol::*;
+use evoclash_game::shop::{DeathRecap, RESPAWN_MAX_TICKS, Wallet, can_deploy, player_kill_scrap};
 use evoclash_game::sim::{self, Arena, Obstacles, gear_tier, underdog_mult};
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
-use rand::Rng;
 
+use crate::combat::take;
 use crate::config::ServerConfig;
 use crate::connections::Human;
 use crate::environment::{Blasts, PropSlots};
-use crate::evolution::{Dealt, Evolving, Recovery, XpAward, XpQueue};
+use crate::evolution::{Dealt, LifeLog, Recovery, XpAward, XpQueue};
 use crate::ops::OpsState;
 use crate::skills::HiddenFrom;
 
@@ -39,7 +40,6 @@ const INTERMISSION_TICKS: u32 = 8 * TICKS_PER_SEC;
 const FIRST_VAULT_TICKS: u32 = 60 * TICKS_PER_SEC;
 const VAULT_INTERVAL_TICKS: u32 = 90 * TICKS_PER_SEC;
 pub const SCORE_TO_WIN: u32 = 25;
-const RESPAWN_TICKS: u16 = (2.5 * TICKS_PER_SEC as f32) as u16;
 const DROP_TTL_TICKS: u32 = 30 * TICKS_PER_SEC;
 /// Fresh spawns can't be hurt for this long (or until they shoot), so nobody gets spawn-camped.
 const SPAWN_SHIELD_TICKS: u16 = (2.5 * TICKS_PER_SEC as f32) as u16;

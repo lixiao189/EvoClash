@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use bevy::prelude::*;
 use evoclash_game::evolution::{Evolution, SkillState};
-use evoclash_game::items::{Arm, ArmorKind, Item, RangedWeapon, WeaponKind};
+use evoclash_game::items::{Arm, ArmorKind, Item, MAX_EMPS, RangedWeapon, WeaponKind};
 use evoclash_game::map::segment_circle;
 use evoclash_game::protocol::*;
 use evoclash_game::sim::{Arena, DT, PLAYER_RADIUS};
@@ -20,7 +20,6 @@ use crate::monsters::spawn_puddle;
 use crate::skills::TurretBrain;
 
 const PICKUP_RADIUS: f32 = 46.0;
-const MAX_EMPS: u8 = 3;
 const EMP_SPEED: f32 = 760.0;
 const EMP_FUSE_TICKS: u16 = 36;
 const EMP_RADIUS: f32 = 180.0;
@@ -443,7 +442,12 @@ pub fn auto_wants(item: &Item, vitals: &Vitals, loadout: &Loadout, evo: &Evoluti
 }
 
 /// Equip `item`, returning whatever had to be put down to make room.
-fn take(item: Item, vitals: &mut Vitals, loadout: &mut Loadout, evo: &Evolution) -> Option<Item> {
+pub(crate) fn take(
+    item: Item,
+    vitals: &mut Vitals,
+    loadout: &mut Loadout,
+    evo: &Evolution,
+) -> Option<Item> {
     match item {
         Item::Weapon { kind, ammo } => {
             if kind == loadout.weapon {

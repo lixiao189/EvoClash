@@ -7,7 +7,10 @@
 #![cfg_attr(not(target_family = "wasm"), allow(dead_code, unused_imports))]
 
 mod assets;
+mod buttons;
+mod death_screen;
 mod effects;
+mod evo_panel;
 mod hud;
 mod input;
 mod lpc;
@@ -88,6 +91,9 @@ fn main() {
         effects::EffectsPlugin,
         hud::HudPlugin,
         minimap::MinimapPlugin,
+        buttons::ButtonsPlugin,
+        evo_panel::EvoPanelPlugin,
+        death_screen::DeathScreenPlugin,
     ));
     app.run();
 }
