@@ -1,9 +1,9 @@
 //! Screen-space UI: status, match clock, scoreboard, kill feed, banners, and the evolution bar
-//! (level, XP, skill slots and the perk pick).
+//! (level, XP, skill slots and the unspent-point hint).
 
 use bevy::prelude::*;
 use evoclash_game::evolution::{
-    EvoPath, Evolution, MAX_LEVEL, MAX_RANK, SKILL_A_RANK, SKILL_B_RANK, SkillState, xp_to_reach,
+    EvoPath, Evolution, MAX_LEVEL, SKILL_A_RANK, SKILL_B_RANK, SkillState, xp_to_reach,
 };
 use evoclash_game::items::{ArmorKind, tier_color};
 use evoclash_game::map::PropKind;
@@ -12,6 +12,7 @@ use evoclash_game::sim::{Arena, DASH_COOLDOWN, PLAYER_RADIUS};
 
 use crate::assets::{Loading, PendingAssets};
 use crate::effects::{Banner, BossBar, KillFeed};
+use crate::evo_panel::EvoPanelOpen;
 use crate::input::LocalPlayer;
 use crate::render::UiFont;
 
@@ -58,9 +59,9 @@ pub fn path_color(path: EvoPath) -> Color {
     }
 }
 
-const PANEL_BG: Color = Color::srgba(0.0, 0.0, 0.0, 0.6);
-const LOCKED: Color = Color::srgba(0.5, 0.5, 0.5, 0.6);
-const GOLD: Color = Color::srgb(1.0, 0.85, 0.35);
+pub const PANEL_BG: Color = Color::srgba(0.0, 0.0, 0.0, 0.6);
+pub const LOCKED: Color = Color::srgba(0.5, 0.5, 0.5, 0.6);
+pub const GOLD: Color = Color::srgb(1.0, 0.85, 0.35);
 
 #[derive(Component)]
 enum EvoUi {
@@ -68,14 +69,6 @@ enum EvoUi {
     XpFill,
     XpText,
     Pending,
-    /// Shown only while an offer is up.
-    PerkPanel,
-    PerkTitle,
-    /// Card `i` of the offer, with its border.
-    Card(usize),
-    CardHead(usize),
-    CardName(usize),
-    CardDetail(usize),
     /// Skill slot 0 (R) / 1 (T), with its border.
     Slot(usize),
     SlotText(usize),
@@ -250,7 +243,7 @@ fn ui_text(font: &UiFont, size: f32, kind: EvoUi, color: Color) -> impl Bundle {
     )
 }
 
-/// Bottom-center column, top to bottom: the safe hint, the perk pick, skill slots, level and XP.
+/// Bottom-center column, top to bottom: the safe hint, skill slots, level and XP.
 fn spawn_bottom_center(commands: &mut Commands, font: &UiFont) {
     commands
         .spawn(Node {
@@ -273,53 +266,6 @@ fn spawn_bottom_center(commands: &mut Commands, font: &UiFont) {
                 },
                 Justify::Center,
             ));
-            col.spawn((
-                EvoUi::PerkPanel,
-                Node {
-                    display: Display::None,
-                    flex_direction: FlexDirection::Column,
-                    align_items: AlignItems::Center,
-                    row_gap: Val::Px(4.0),
-                    margin: UiRect::bottom(Val::Px(6.0)),
-                    ..default()
-                },
-            ))
-            .with_children(|panel| {
-                panel.spawn(ui_text(font, 15.0, EvoUi::PerkTitle, GOLD));
-                panel
-                    .spawn(Node {
-                        column_gap: Val::Px(8.0),
-                        ..default()
-                    })
-                    .with_children(|row| {
-                        for i in 0..3 {
-                            row.spawn((
-                                EvoUi::Card(i),
-                                Node {
-                                    width: Val::Px(200.0),
-                                    flex_direction: FlexDirection::Column,
-                                    row_gap: Val::Px(2.0),
-                                    padding: UiRect::all(Val::Px(6.0)),
-                                    border: UiRect::all(Val::Px(2.0)),
-                                    border_radius: BorderRadius::all(Val::Px(4.0)),
-                                    ..default()
-                                },
-                                BackgroundColor(PANEL_BG),
-                                BorderColor::all(LOCKED),
-                            ))
-                            .with_children(|card| {
-                                card.spawn(ui_text(font, 13.0, EvoUi::CardHead(i), Color::WHITE));
-                                card.spawn(ui_text(font, 17.0, EvoUi::CardName(i), Color::WHITE));
-                                card.spawn(ui_text(
-                                    font,
-                                    12.0,
-                                    EvoUi::CardDetail(i),
-                                    Color::srgba(0.9, 0.9, 0.9, 0.9),
-                                ));
-                            });
-                        }
-                    });
-            });
             col.spawn(Node {
                 column_gap: Val::Px(8.0),
                 ..default()
@@ -413,15 +359,11 @@ fn spawn_bottom_center(commands: &mut Commands, font: &UiFont) {
         });
 }
 
-/// Seconds left before the server picks the open offer at random (it replicates the ticks left).
-fn auto_pick_secs(evo: &Evolution) -> Option<f32> {
-    evo.offer.map(|_| evo.offer_ticks_left as f32 / 64.0)
-}
-
 #[allow(clippy::type_complexity)]
 fn update_evolution_hud(
     time: Res<Time>,
-    me: Query<(&Evolution, &SkillState), With<LocalPlayer>>,
+    panel_open: Res<EvoPanelOpen>,
+    me: Query<(&Evolution, &SkillState, &Vitals), With<LocalPlayer>>,
     mut ui: Query<(
         &EvoUi,
         Option<&mut Text>,
@@ -433,10 +375,11 @@ fn update_evolution_hud(
 ) {
     let now = time.elapsed_secs();
     let default_evo = Evolution::default();
-    let (evo, skills) = me
+    let (evo, skills, alive) = me
         .single()
-        .map_or((&default_evo, SkillState::default()), |(e, s)| (e, *s));
-    let countdown = auto_pick_secs(evo);
+        .map_or((&default_evo, SkillState::default(), false), |(e, s, v)| {
+            (e, *s, v.alive)
+        });
     let (lead_rank, lead) = evo
         .lead_path()
         .map_or((0, None), |p| (evo.path_rank(p), Some(p)));
@@ -473,59 +416,11 @@ fn update_evolution_hud(
                 set_text(value, None);
             }
             EvoUi::Pending => {
-                let value = match evo.pending {
-                    0 => String::new(),
-                    n => format!("待选进化 ×{n}"),
+                let value = match evo.points {
+                    n if n > 0 && !panel_open.0 && alive => format!("进化点 ×{n} · Tab 加点"),
+                    _ => String::new(),
                 };
                 set_text(value, Some(GOLD.with_alpha(blink)));
-            }
-            EvoUi::PerkPanel => {
-                node.display = if evo.offer.is_some() {
-                    Display::Flex
-                } else {
-                    Display::None
-                };
-            }
-            EvoUi::PerkTitle => {
-                let value = match countdown {
-                    Some(secs) => format!("选择进化（按 1/2/3）  {secs:.0} 秒后随机选择"),
-                    None => String::new(),
-                };
-                set_text(value, None);
-            }
-            EvoUi::Card(i) => {
-                if let (Some(mut border), Some(perk)) = (border, evo.offer.map(|o| o[i])) {
-                    *border = BorderColor::all(path_color(perk.evo_path()));
-                }
-            }
-            EvoUi::CardHead(i) => {
-                let Some(perk) = evo.offer.map(|o| o[i]) else {
-                    continue;
-                };
-                let path = perk.evo_path();
-                set_text(
-                    format!("[{}]  {}", i + 1, path.name()),
-                    Some(path_color(path)),
-                );
-            }
-            EvoUi::CardName(i) => {
-                if let Some(perk) = evo.offer.map(|o| o[i]) {
-                    set_text(perk.name().to_string(), None);
-                }
-            }
-            EvoUi::CardDetail(i) => {
-                if let Some(perk) = evo.offer.map(|o| o[i]) {
-                    let rank = evo.rank(perk);
-                    set_text(
-                        format!(
-                            "等级 {rank} → {}/{MAX_RANK}
-{}",
-                            rank + 1,
-                            perk.desc()
-                        ),
-                        None,
-                    );
-                }
             }
             EvoUi::Slot(slot) => {
                 let unlocked = [skills.skill_a, skills.skill_b][slot];
@@ -713,7 +608,7 @@ fn update_hud(
                         )
                     };
                     format!(
-                        "生命 {:.0}/{:.0}   {} {:.0}\n武器 [T{}] {}  弹药 {ammo}\n电磁脉冲 ×{}   冲刺 {dash}   连杀 {}\n\nWASD 移动  鼠标 瞄准/射击  空格 冲刺\nE 拾取（按住撬保险柜）  Q/右键 电磁脉冲\nR/T 技能  1/2/3 选择进化",
+                        "生命 {:.0}/{:.0}   {} {:.0}\n武器 [T{}] {}  弹药 {ammo}\n电磁脉冲 ×{}   冲刺 {dash}   连杀 {}\n\nWASD 移动  鼠标 瞄准/射击  空格 冲刺\nE 拾取（按住撬保险柜）  Q/右键 电磁脉冲\nR/T 技能  Tab 进化",
                         vitals.hp,
                         vitals.max_hp,
                         vitals.armor.name(),
@@ -821,12 +716,6 @@ fn update_hud(
             HudText::Center => {
                 if let Some(s) = state.filter(|s| s.phase == Phase::Intermission) {
                     format!("{} 获胜", s.winner.as_deref().unwrap_or("无人"))
-                } else if let Some((_, vitals, ..)) = me.filter(|(_, v, ..)| !v.alive) {
-                    color.0 = Color::srgb(1.0, 0.4, 0.35);
-                    format!(
-                        "你倒下了 — {:.1} 秒后带着木棍重生",
-                        vitals.respawn_in as f32 / 64.0
-                    )
                 } else {
                     String::new()
                 }

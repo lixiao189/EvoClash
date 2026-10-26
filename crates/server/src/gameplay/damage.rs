@@ -32,9 +32,12 @@ pub fn resolve_damage(
         &Evolution,
         &mut SkillState,
         &mut Recovery,
+        &mut Wallet,
+        &mut LifeLog,
     )>,
     monsters: Query<&Monster>,
     state: Single<&MatchState>,
+    tick: Res<SimTick>,
 ) {
     if state.phase == Phase::Intermission {
         queue.0.clear();
@@ -46,7 +49,7 @@ pub fn resolve_damage(
         let attacker = dmg.attacker.and_then(|a| players.get(a).ok());
         let attacker_id = attacker.map_or(0, |(p, ..)| p.client_id);
         let attacker_tier = attacker.map(|(_, _, _, loadout, ..)| loadout.weapon.spec().tier());
-        let Ok((_, pos, mut vitals, mut loadout, _, evo, mut skills, mut recovery)) =
+        let Ok((_, pos, mut vitals, mut loadout, _, evo, mut skills, mut recovery, ..)) =
             players.get_mut(dmg.target)
         else {
             continue;
@@ -114,7 +117,7 @@ pub fn resolve_damage(
         if vitals.hp <= 0.0 {
             vitals.hp = 0.0;
             vitals.alive = false;
-            vitals.respawn_in = RESPAWN_TICKS;
+            vitals.respawn_in = RESPAWN_MAX_TICKS;
             vitals.stealth = 0;
             // Active skills end with you; cooldowns and perks carry over.
             skills.active_a = 0;
@@ -177,46 +180,86 @@ pub fn resolve_damage(
         vitals.armor_points = 0.0;
 
         let killer = attacker.filter(|a| *a != victim);
-        let killer_name = match killer.and_then(|k| players.get_mut(k).ok()) {
-            Some((killer_player, _, _, mut killer_loadout, mut killer_stats, killer_evo, ..)) => {
-                killer_stats.kills += 1;
-                killer_stats.streak += 1;
-                killer_stats.score += if had_bounty { 3 } else { 1 };
-                let killer_tier = killer_loadout.weapon.spec().tier();
-                let giant_slayer = victim_tier >= killer_tier + GIANT_SLAYER_GAP;
-                xp.0.push(XpAward {
-                    to: killer.expect("killer"),
-                    base: player_kill_xp(victim_level, had_bounty, giant_slayer),
-                    pos: drop_at,
-                    loot: false,
-                });
-                // Every kill salvages a quarter magazine; 弹药回收 adds to it.
-                let weapon = killer_loadout.weapon;
-                let refill = killer_evo.ammo_per_kill() + weapon.ammo_box() / 2;
-                if refill > 0 && weapon != WeaponKind::Stick {
-                    killer_loadout.ammo =
-                        (killer_loadout.ammo + refill).min(killer_evo.max_ammo(weapon));
+        let (killer_name, killer_path, killer_level) =
+            match killer.and_then(|k| players.get_mut(k).ok()) {
+                Some((
+                    killer_player,
+                    _,
+                    _,
+                    mut killer_loadout,
+                    mut killer_stats,
+                    killer_evo,
+                    _,
+                    _,
+                    _,
+                    mut killer_life,
+                )) => {
+                    killer_stats.kills += 1;
+                    killer_life.kills += 1;
+                    killer_stats.streak += 1;
+                    killer_stats.score += if had_bounty { 3 } else { 1 };
+                    let killer_tier = killer_loadout.weapon.spec().tier();
+                    let giant_slayer = victim_tier >= killer_tier + GIANT_SLAYER_GAP;
+                    xp.0.push(XpAward {
+                        to: killer.expect("killer"),
+                        base: player_kill_xp(victim_level, had_bounty, giant_slayer),
+                        pos: drop_at,
+                        loot: false,
+                        scrap: player_kill_scrap(had_bounty),
+                    });
+                    // Every kill salvages a quarter magazine; 弹药回收 adds to it.
+                    let weapon = killer_loadout.weapon;
+                    let refill = killer_evo.ammo_per_kill() + weapon.ammo_box() / 2;
+                    if refill > 0 && weapon != WeaponKind::Stick {
+                        killer_loadout.ammo =
+                            (killer_loadout.ammo + refill).min(killer_evo.max_ammo(weapon));
+                    }
+                    if giant_slayer {
+                        killer_stats.score += 1;
+                        outbox.announce(format!(
+                            "{} 以弱胜强击败了 {victim_name}，额外 +1 分！",
+                            killer_player.name
+                        ));
+                    }
+                    if killer_stats.streak == sim::BOUNTY_STREAK {
+                        outbox.announce(format!(
+                            "{} 连杀 {} 人，已被悬赏！",
+                            killer_player.name, killer_stats.streak
+                        ));
+                    }
+                    (
+                        killer_player.name.clone(),
+                        killer_evo.lead_path(),
+                        killer_evo.level,
+                    )
                 }
-                if giant_slayer {
-                    killer_stats.score += 1;
-                    outbox.announce(format!(
-                        "{} 以弱胜强击败了 {victim_name}，额外 +1 分！",
-                        killer_player.name
-                    ));
-                }
-                if killer_stats.streak == sim::BOUNTY_STREAK {
-                    outbox.announce(format!(
-                        "{} 连杀 {} 人，已被悬赏！",
-                        killer_player.name, killer_stats.streak
-                    ));
-                }
-                killer_player.name.clone()
-            }
-            None => attacker
-                .and_then(|a| monsters.get(a).ok())
-                .map_or_else(|| "废土".to_string(), |m| m.display_name()),
-        };
+                None => (
+                    attacker
+                        .and_then(|a| monsters.get(a).ok())
+                        .map_or_else(|| "废土".to_string(), |m| m.display_name()),
+                    None,
+                    0,
+                ),
+            };
         info!("{killer_name} killed {victim_name} ({how})");
+        // The death card, and the perks 沿用上次配置 goes back to.
+        if let Ok((.., evo, _, _, mut wallet, mut life)) = players.get_mut(victim) {
+            wallet.recap = Some(DeathRecap {
+                killer: killer_name.clone(),
+                how: how.to_string(),
+                killer_path,
+                killer_level,
+                alive_secs: tick.0.saturating_sub(life.born) / TICKS_PER_SEC,
+                scrap: life.scrap,
+                kills: life.kills,
+            });
+            *life = LifeLog {
+                born: tick.0,
+                last_ranks: evo.ranks,
+                last_first_pick: evo.first_pick,
+                ..default()
+            };
+        }
         outbox.reliable.push(GameEvent::Kill {
             killer: killer_name,
             victim: victim_name,
@@ -226,29 +269,11 @@ pub fn resolve_damage(
     }
 }
 
-/// Gear handed to someone respawning this many points behind the leader, so a fallen
-/// player comes back able to fight instead of with a stick against a railgun.
-pub(super) fn catch_up_kit(
-    deficit: u32,
-    rng: &mut impl Rng,
-) -> (Option<WeaponKind>, Option<ArmorKind>) {
-    match deficit {
-        12.. => (Some(WeaponKind::Rifle), Some(ArmorKind::Kevlar)),
-        7.. => (Some(WeaponKind::Rifle), Some(ArmorKind::Scrap)),
-        3.. => {
-            let weapon = if rng.random_bool(0.5) {
-                WeaponKind::Bow
-            } else {
-                WeaponKind::PipeShotgun
-            };
-            (Some(weapon), None)
-        }
-        _ => (None, None),
-    }
-}
-
+/// Bring the dead back: when the timer runs out, or once 沿用上次配置 may go. Whatever was
+/// bought in the shop is equipped on the spot.
 pub(super) fn respawn(
     arena: Res<Arena>,
+    tick: Res<SimTick>,
     mut players: Query<(
         Entity,
         &mut Pos,
@@ -256,8 +281,9 @@ pub(super) fn respawn(
         &mut Dash,
         &mut PosHistory,
         &mut Loadout,
-        &Stats,
         &Evolution,
+        &mut Wallet,
+        &mut LifeLog,
     )>,
 ) {
     let mut alive: Vec<(Entity, Vec2)> = players
@@ -265,15 +291,25 @@ pub(super) fn respawn(
         .filter(|(_, _, v, ..)| v.alive)
         .map(|(e, p, ..)| (e, p.0))
         .collect();
-    let leader = players.iter().map(|(.., s, _)| s.score).max().unwrap_or(0);
-    let mut rng = rand::rng();
-    for (entity, mut pos, mut vitals, mut dash, mut history, mut loadout, stats, evo) in
-        &mut players
+    for (
+        entity,
+        mut pos,
+        mut vitals,
+        mut dash,
+        mut history,
+        mut loadout,
+        evo,
+        mut wallet,
+        mut life,
+    ) in &mut players
     {
         if vitals.alive {
             continue;
         }
         vitals.respawn_in = vitals.respawn_in.saturating_sub(1);
+        if life.deploy_asap && can_deploy(vitals.respawn_in) {
+            vitals.respawn_in = 0;
+        }
         if vitals.respawn_in > 0 {
             continue;
         }
@@ -303,18 +339,11 @@ pub(super) fn respawn(
             shield: SPAWN_SHIELD_TICKS,
             ..default()
         };
-        let (weapon, armor) = catch_up_kit(leader.saturating_sub(stats.score), &mut rng);
-        if let Some(kind) = weapon {
-            *loadout = Loadout {
-                weapon: kind,
-                ammo: evo.max_ammo(kind),
-                ..*loadout
-            };
+        for item in wallet.take_cart() {
+            take(item, &mut vitals, &mut loadout, evo);
         }
-        if let Some(kind) = armor {
-            vitals.armor = kind;
-            vitals.armor_points = kind.max_points();
-        }
+        life.born = tick.0;
+        life.deploy_asap = false;
     }
 }
 

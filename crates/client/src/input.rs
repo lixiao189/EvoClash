@@ -6,6 +6,8 @@ use lightyear::prelude::client::input::InputSystems;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
 use lightyear::prelude::*;
 
+use crate::buttons::PointerOverUi;
+
 /// Mouse position in world space, filled in by the renderer.
 #[derive(Resource, Default)]
 pub struct CursorWorld(pub Option<Vec2>);
@@ -51,6 +53,7 @@ fn buffer_input(
     keys: Option<Res<ButtonInput<KeyCode>>>,
     mouse: Option<Res<ButtonInput<MouseButton>>>,
     cursor: Res<CursorWorld>,
+    over_ui: Res<PointerOverUi>,
     mut query: Query<(&mut ActionState<PlayerInput>, &Pos), With<InputMarker<PlayerInput>>>,
 ) {
     let Ok((mut action, pos)) = query.single_mut() else {
@@ -68,13 +71,9 @@ fn buffer_input(
             || mouse
                 .as_ref()
                 .is_some_and(|m| m.pressed(MouseButton::Right));
-        input.fire =
-            keys.pressed(KeyJ) || mouse.as_ref().is_some_and(|m| m.pressed(MouseButton::Left));
-        // Perk pick while 1/2/3 is held; the server acts on the change, so holding picks once.
-        input.pick = [Digit1, Digit2, Digit3]
-            .iter()
-            .position(|k| keys.pressed(*k))
-            .map_or(0, |i| i as u8 + 1);
+        // Clicking a panel button must not also shoot.
+        input.fire = !over_ui.0
+            && (keys.pressed(KeyJ) || mouse.as_ref().is_some_and(|m| m.pressed(MouseButton::Left)));
         input.skill_a = keys.pressed(KeyR);
         input.skill_b = keys.pressed(KeyT);
         input.aim = cursor
