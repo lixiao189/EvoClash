@@ -848,6 +848,33 @@ mod tests {
     }
 
     #[test]
+    fn a_playing_seat_is_refilled_by_a_fresh_bot() {
+        let mut app = balance_app();
+        let humans = spawn_humans(&mut app, 7);
+        {
+            let world = app.world_mut();
+            let mut states = world.query::<&mut MatchState>();
+            states.single_mut(world).unwrap().phase = Phase::Playing;
+        }
+        app.update();
+        assert_eq!(roster(&mut app), (8, 1));
+        assert!(app.world_mut().despawn(humans[0]));
+        // Outside the lobby the fill waits out the one-second cooldown, then adds one bot.
+        for _ in 0..64 {
+            app.update();
+        }
+        app.update();
+        assert_eq!(roster(&mut app), (8, 2));
+        let world = app.world_mut();
+        let mut bots = world.query_filtered::<(&Player, &Stats), With<Bot>>();
+        let rows: Vec<(u32, u8)> = bots
+            .iter(world)
+            .map(|(_, stats)| (stats.score, stats.level))
+            .collect();
+        assert!(rows.iter().all(|(score, level)| *score == 0 && *level == 1));
+    }
+
+    #[test]
     fn dead_bots_shop_then_deploy() {
         let mut evo = Evolution::default();
         let mut wallet = Wallet {

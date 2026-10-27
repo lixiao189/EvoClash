@@ -7,7 +7,7 @@ use lightyear::prelude::input::native::InputPlugin;
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::evolution::{Evolution, Skill, SkillState};
+use crate::evolution::{EvoPath, Evolution, Skill, SkillState};
 use crate::items::{ArmorKind, Item, WeaponKind};
 pub use crate::items::{InventoryMove, Loadout};
 use crate::map::PropKind;
@@ -131,6 +131,10 @@ pub struct Vitals {
     pub stealth: u16,
     /// Ticks this combatant is revealed to everyone (sprung a trap).
     pub revealed: u16,
+    /// Ticks until a dead human is sent out with `DeployLast`.
+    /// 0 when this is not counting: alive, a bot, or not a Playing death.
+    /// Seconds left for the death screen are `deploy_in.div_ceil(64)`.
+    pub deploy_in: u16,
 }
 
 impl Default for Vitals {
@@ -146,6 +150,7 @@ impl Default for Vitals {
             shield: 0,
             stealth: 0,
             revealed: 0,
+            deploy_in: 0,
         }
     }
 }
@@ -484,6 +489,9 @@ pub struct RoomSettings {
     pub private_room: bool,
     /// Uppercase room code. Empty on a public room.
     pub code: String,
+    /// Private room: the host paused automatic continue. The lobby waits for Start.
+    /// Countdown already running is not paused this way; the host uses Cancel.
+    pub auto_paused: bool,
 }
 
 /// Host (and Leave) commands on the ordered reliable command channel.
@@ -491,11 +499,51 @@ pub struct RoomSettings {
 pub enum RoomCommand {
     // `bots` stays on the wire for compatibility, but production rooms always fill to
     // `ROOM_COMBATANTS`; only `monsters` changes.
-    SetSettings { bots: Option<u8>, monsters: bool },
+    SetSettings {
+        bots: Option<u8>,
+        monsters: bool,
+    },
     Start,
     Cancel,
     Leave,
+    /// Host only, in Results or Lobby, and only before the countdown is running.
+    PauseAutoStart,
+    /// Host only, in Results or Lobby, before the countdown is running.
+    /// Clears `RoomSettings::auto_paused`. The held lobby still waits for `Start`.
+    ResumeAutoStart,
 }
+
+/// One human who left during Playing. Shown on the results screen, not ranked.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Reflect)]
+pub struct Departure {
+    pub name: String,
+    pub score: u32,
+    pub kills: u32,
+    pub deaths: u32,
+    /// Evolution level at the moment they left.
+    pub level: u8,
+    /// Leading path then. None if they never spent a point.
+    pub path: Option<EvoPath>,
+}
+
+impl Departure {
+    pub fn from_combatant(player: &Player, stats: &Stats, evo: &Evolution) -> Self {
+        Self {
+            name: player.name.clone(),
+            score: stats.score,
+            kills: stats.kills,
+            deaths: stats.deaths,
+            level: evo.level,
+            path: evo.lead_path(),
+        }
+    }
+}
+
+/// Leavers from the current round, on the same entity as `MatchState`.
+/// Cleared when the round resets (results back to the lobby, and the next start).
+/// Only Playing departures are recorded. They do not take a place in the ranking.
+#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Reflect, Default)]
+pub struct Departed(pub Vec<Departure>);
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum GameEvent {
@@ -602,6 +650,7 @@ impl Plugin for ProtocolPlugin {
         app.component::<Prop>().replicate();
         app.component::<MatchState>().replicate();
         app.component::<RoomSettings>().replicate();
+        app.component::<Departed>().replicate();
 
         app.register_message::<GameEvent>()
             .add_direction(NetworkDirection::ServerToClient);

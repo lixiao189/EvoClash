@@ -88,6 +88,7 @@ pub(super) fn spawn_match_state(
             boss_eta: 0,
         },
         super::room::settings_from_config(&config),
+        Departed::default(),
         Replicate::to_clients(NetworkTarget::All),
     ));
 }

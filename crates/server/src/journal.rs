@@ -407,6 +407,8 @@ pub fn fmt_room(cmd: &RoomCommand) -> String {
         RoomCommand::Start => "start".into(),
         RoomCommand::Cancel => "cancel".into(),
         RoomCommand::Leave => "leave".into(),
+        RoomCommand::PauseAutoStart => "pause_auto".into(),
+        RoomCommand::ResumeAutoStart => "resume_auto".into(),
     }
 }
 
@@ -421,10 +423,11 @@ fn settings_line(settings: &RoomSettings) -> String {
         settings.code.clone()
     };
     format!(
-        "settings {bots} {} {} {} {code}",
+        "settings {bots} {} {} {} {code} {}",
         u8::from(settings.monsters),
         settings.host,
         u8::from(settings.private_room),
+        u8::from(settings.auto_paused),
     )
 }
 
@@ -583,33 +586,48 @@ fn open_logs(mut commands: Commands, config: Res<ServerConfig>, clock: Option<Re
 fn apply_presence(
     mut commands: Commands,
     mut injected: ResMut<Injected>,
-    mut humans: Query<(Entity, &mut Human, &Player)>,
+    state: Query<&MatchState>,
+    mut departed: Query<&mut Departed>,
+    mut humans: Query<(Entity, &mut Human, &Player, &Stats, &Evolution)>,
 ) {
     let connects = std::mem::take(&mut injected.connects);
     let disconnects = std::mem::take(&mut injected.disconnects);
     let leaves = std::mem::take(&mut injected.leaves);
+    let playing = state.iter().any(|s| s.phase == Phase::Playing);
     for id in connects {
-        if let Some((_, mut human, _)) = humans
+        if let Some((_, mut human, _, _, _)) = humans
             .iter_mut()
-            .find(|(_, _, player)| player.client_id == id)
+            .find(|(_, _, player, _, _)| player.client_id == id)
         {
             human.disconnected_ticks = 0;
             human.left = false;
         }
     }
     for id in disconnects {
-        if let Some((_, mut human, _)) = humans
+        if let Some((_, mut human, _, _, _)) = humans
             .iter_mut()
-            .find(|(_, _, player)| player.client_id == id)
+            .find(|(_, _, player, _, _)| player.client_id == id)
             && human.connected()
         {
             human.disconnected_ticks = 1;
         }
     }
+    let mut gone = Vec::new();
     for id in leaves {
-        if let Some((entity, _, _)) = humans.iter().find(|(_, _, player)| player.client_id == id) {
+        if let Some((entity, _, player, stats, evo)) = humans
+            .iter()
+            .find(|(_, _, player, _, _)| player.client_id == id)
+        {
+            if playing {
+                gone.push(Departure::from_combatant(player, stats, evo));
+            }
             commands.entity(entity).despawn();
         }
+    }
+    if !gone.is_empty()
+        && let Ok(mut departed) = departed.single_mut()
+    {
+        departed.0.extend(gone);
     }
 }
 
@@ -1016,12 +1034,15 @@ fn spawn_roster(app: &mut App, roster: &[RosterEntry]) {
                     .entity(entity)
                     .insert((Bot::fresh(), crate::gameplay::Aggressors::default()));
             } else {
-                commands.entity(entity).insert(Human {
-                    peer: PeerId::Netcode(entry.client_id),
-                    disconnected_ticks: 0,
-                    joined_at: 0,
-                    left: false,
-                });
+                commands.entity(entity).insert((
+                    Human {
+                        peer: PeerId::Netcode(entry.client_id),
+                        disconnected_ticks: 0,
+                        joined_at: 0,
+                        left: false,
+                    },
+                    crate::gameplay::Idle::default(),
+                ));
             }
         }
     }
@@ -1200,6 +1221,7 @@ fn parse_settings(rest: &str) -> Option<RoomSettings> {
     let host = parts.next()?.parse().ok()?;
     let private_room = parts.next()? == "1";
     let code = parts.next().unwrap_or("-");
+    let auto_paused = parts.next().is_some_and(|flag| flag == "1");
     Some(RoomSettings {
         bots,
         monsters,
@@ -1210,6 +1232,7 @@ fn parse_settings(rest: &str) -> Option<RoomSettings> {
         } else {
             code.to_string()
         },
+        auto_paused,
     })
 }
 
@@ -1314,6 +1337,8 @@ fn parse_room(body: &str) -> Option<(u64, RoomCommand)> {
         "start" => RoomCommand::Start,
         "cancel" => RoomCommand::Cancel,
         "leave" => RoomCommand::Leave,
+        "pause_auto" => RoomCommand::PauseAutoStart,
+        "resume_auto" => RoomCommand::ResumeAutoStart,
         "settings" => {
             let bots = match parts.next()? {
                 "off" => None,
@@ -1561,12 +1586,15 @@ mod tests {
                 bot: false,
             };
             let entity = spawn_combatant(&mut commands, player, None);
-            commands.entity(entity).insert(Human {
-                peer: PeerId::Netcode(*id),
-                disconnected_ticks: 0,
-                joined_at: 0,
-                left: false,
-            });
+            commands.entity(entity).insert((
+                Human {
+                    peer: PeerId::Netcode(*id),
+                    disconnected_ticks: 0,
+                    joined_at: 0,
+                    left: false,
+                },
+                crate::gameplay::Idle::default(),
+            ));
         }
         app.world_mut().flush();
     }

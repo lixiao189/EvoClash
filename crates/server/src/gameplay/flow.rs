@@ -209,6 +209,7 @@ pub fn match_flow(
                     &humans,
                     &players,
                     private_room,
+                    settings.auto_paused,
                 );
             }
         }
@@ -269,6 +270,7 @@ fn begin_lobby(
     humans: &Query<&Human>,
     players: &Query<(&Player, &Stats)>,
     private_room: bool,
+    auto_paused: bool,
 ) {
     state.match_index = state.match_index.saturating_add(1);
     state.map_seed = mix(config.room_seed, state.match_index);
@@ -278,9 +280,14 @@ fn begin_lobby(
     state.winner = None;
     state.boss_eta = 0;
     state.vault_in = FIRST_VAULT_TICKS;
-    // Whoever is still here starts the next public countdown immediately.
-    // A private room waits for the host again.
-    if !private_room && connected_humans(humans) > 0 && players.iter().count() >= 2 {
+    // Public rooms, and a private room from the second round on, open the 15s
+    // countdown (12s lobby + 3s Starting) for whoever is still here.
+    // The first private round waits for the host. A paused private room does too.
+    let private_auto = private_room && state.match_index > 0 && !auto_paused;
+    if (private_auto || !private_room)
+        && connected_humans(humans) > 0
+        && players.iter().count() >= 2
+    {
         state.countdown_active = true;
         state.ticks_left = public_lobby_countdown_ticks(state.match_index);
     } else {
@@ -323,9 +330,13 @@ pub fn reset_match(
     mut loot: ResMut<LootState>,
     mut props: ResMut<PropSlots>,
     mut blasts: ResMut<Blasts>,
+    mut departed: Query<&mut Departed>,
 ) {
     if !std::mem::take(&mut reset.0) {
         return;
+    }
+    for mut departed in &mut departed {
+        departed.0.clear();
     }
     for (mut vitals, mut loadout, mut stats, mut evo, mut skills, mut wallet, mut life) in
         &mut players

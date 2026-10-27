@@ -53,7 +53,7 @@ pub fn resolve_damage(
         let attacker = dmg.attacker.and_then(|a| players.get(a).ok());
         let attacker_id = attacker.map_or(0, |(p, ..)| p.client_id);
         let attacker_tier = attacker.map(|(_, _, _, loadout, ..)| loadout.weapon().spec().tier());
-        let Ok((_, pos, mut vitals, mut loadout, _, evo, mut skills, mut recovery, ..)) =
+        let Ok((player, pos, mut vitals, mut loadout, _, evo, mut skills, mut recovery, ..)) =
             players.get_mut(dmg.target)
         else {
             continue;
@@ -131,6 +131,12 @@ pub fn resolve_damage(
                 LOBBY_RESPAWN_TICKS
             } else {
                 RESPAWN_MAX_TICKS
+            };
+            // Humans get 45s on the death screen, then DeployLast. Bots still leave on their own.
+            vitals.deploy_in = if playing && !player.bot {
+                AUTO_DEPLOY_TICKS
+            } else {
+                0
             };
             vitals.stealth = 0;
             // Active skills end with you; cooldowns and perks carry over.
@@ -287,9 +293,10 @@ pub(super) fn salvage_target(loadout: &Loadout) -> Option<WeaponKind> {
 }
 
 /// Bring the dead back. Playing: only after Deploy / DeployLast (`deploy_asap`); an
-/// unconfirmed human sticks at `respawn_in == 1`. Lobby: the 2s timer counts down to 0 on
-/// its own. Whatever was bought in the shop is equipped on the spot.
-pub(super) fn respawn(
+/// unconfirmed human sticks at `respawn_in == 1` until `deploy_in` hits 0, which sends
+/// them with DeployLast. Bots are unchanged (their `deploy_in` stays 0). Lobby: the 2s
+/// timer counts down to 0 on its own. Whatever was bought in the shop is equipped on the spot.
+pub fn respawn(
     arena: Res<Arena>,
     tick: Res<SimTick>,
     state: Query<&MatchState>,
@@ -301,7 +308,8 @@ pub(super) fn respawn(
         &mut Dash,
         &mut PosHistory,
         &mut Loadout,
-        &Evolution,
+        &mut Evolution,
+        &mut SkillState,
         &mut Wallet,
         &mut LifeLog,
         Option<&Player>,
@@ -317,7 +325,7 @@ pub(super) fn respawn(
     let mut dead: Vec<(u64, Entity)> = players
         .iter()
         .filter(|(_, _, v, ..)| !v.alive)
-        .map(|(entity, _, _, _, _, _, _, _, _, player)| {
+        .map(|(entity, _, _, _, _, _, _, _, _, _, player)| {
             (player.map(|p| p.client_id).unwrap_or(u64::MAX), entity)
         })
         .collect();
@@ -330,10 +338,11 @@ pub(super) fn respawn(
             mut dash,
             mut history,
             mut loadout,
-            evo,
+            mut evo,
+            mut skills,
             mut wallet,
             mut life,
-            _,
+            player,
         )) = players.get_mut(entity)
         else {
             continue;
@@ -342,6 +351,23 @@ pub(super) fn respawn(
             continue;
         }
         if playing {
+            let human = player.is_some_and(|p| !p.bot);
+            if human && vitals.deploy_in > 0 {
+                vitals.deploy_in -= 1;
+                if vitals.deploy_in == 0 && !life.deploy_asap {
+                    let changed = crate::evolution::handle_command(
+                        &PlayerCommand::DeployLast,
+                        &mut evo,
+                        &mut wallet,
+                        &mut vitals,
+                        &mut life,
+                        true,
+                    );
+                    if changed {
+                        crate::evolution::apply_evolution(&evo, &mut skills, &mut vitals);
+                    }
+                }
+            }
             if life.deploy_asap && can_deploy(vitals.respawn_in) {
                 vitals.respawn_in = 0;
             } else if vitals.respawn_in > 1 {
@@ -391,7 +417,7 @@ pub(super) fn respawn(
             ..default()
         };
         for item in wallet.take_cart() {
-            take(item, &mut vitals, &mut loadout, evo);
+            take(item, &mut vitals, &mut loadout, &evo);
         }
         // Death already wrote a fresh log; revival only stamps this life and drops the confirm.
         life.born = tick.0;

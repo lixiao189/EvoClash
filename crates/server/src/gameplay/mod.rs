@@ -8,7 +8,9 @@ use evoclash_game::items::{AmmoKind, ArmorKind, Item, WeaponKind, roll_loot};
 use evoclash_game::map::{ArenaMap, VAULT_CENTER};
 use evoclash_game::protocol::*;
 use evoclash_game::rng::mix;
-use evoclash_game::shop::{DeathRecap, RESPAWN_MAX_TICKS, Wallet, can_deploy, player_kill_scrap};
+use evoclash_game::shop::{
+    DeathRecap, PlayerCommand, RESPAWN_MAX_TICKS, Wallet, can_deploy, player_kill_scrap,
+};
 use evoclash_game::sim::{self, Arena, Obstacles, gear_tier, underdog_mult};
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::server::*;
@@ -25,6 +27,7 @@ use crate::skills::HiddenFrom;
 
 mod damage;
 mod flow;
+mod idle;
 mod movement;
 mod room;
 mod spawning;
@@ -33,6 +36,8 @@ mod tests;
 
 pub use damage::*;
 pub use flow::*;
+pub(crate) use idle::Idle;
+use idle::watch_idle;
 pub use movement::*;
 use room::{maintain_host, private_idle_cap, read_room_commands};
 pub use spawning::*;
@@ -57,6 +62,8 @@ const PRIVATE_IDLE_WARN_TICKS: u32 = 28 * 60 * TICKS_PER_SEC;
 const PRIVATE_IDLE_CLOSE_TICKS: u32 = 30 * 60 * TICKS_PER_SEC;
 /// Lobby deaths stand back up after this, with no death bag.
 pub(super) const LOBBY_RESPAWN_TICKS: u16 = (2 * TICKS_PER_SEC) as u16;
+/// Playing: a dead human who never deploys is sent with DeployLast after this.
+pub const AUTO_DEPLOY_TICKS: u16 = (45 * TICKS_PER_SEC) as u16;
 pub(crate) const FIRST_VAULT_TICKS: u32 = 60 * TICKS_PER_SEC;
 const VAULT_INTERVAL_TICKS: u32 = 90 * TICKS_PER_SEC;
 const DROP_TTL_TICKS: u32 = 30 * TICKS_PER_SEC;
@@ -126,6 +133,7 @@ impl Plugin for GameplayPlugin {
                     .chain()
                     .in_set(SimSet::Resolve),
                 (
+                    watch_idle,
                     loot_spawner,
                     match_flow,
                     reset_match,

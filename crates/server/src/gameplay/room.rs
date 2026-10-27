@@ -32,6 +32,7 @@ pub(super) fn settings_from_config(config: &ServerConfig) -> RoomSettings {
         } else {
             String::new()
         },
+        auto_paused: false,
     }
 }
 
@@ -89,6 +90,28 @@ pub fn apply_room_command(
             state.ticks_left = 0;
             RoomEffect::Cancelled
         }
+        RoomCommand::PauseAutoStart => {
+            // Results, or a lobby that has not started counting. A running countdown
+            // stays up; the host cancels it instead.
+            let open = state.phase == Phase::Results
+                || (state.phase == Phase::Lobby && !state.countdown_active);
+            if !open {
+                return RoomEffect::Ignore;
+            }
+            settings.auto_paused = true;
+            RoomEffect::Updated
+        }
+        RoomCommand::ResumeAutoStart => {
+            let open = state.phase == Phase::Results
+                || (state.phase == Phase::Lobby && !state.countdown_active);
+            if !open {
+                return RoomEffect::Ignore;
+            }
+            settings.auto_paused = false;
+            // Does not start the clock. A held lobby stays put until the host sends Start.
+            // Cleared during Results, the next begin_lobby auto-starts on its own.
+            RoomEffect::Updated
+        }
     }
 }
 
@@ -115,9 +138,17 @@ pub(super) fn next_host(humans: &[PresentHuman], leaving: Option<u64>) -> Option
 pub(super) fn read_room_commands(
     mut commands: Commands,
     mut links: Query<(Entity, &mut MessageReceiver<RoomCommand>), With<ClientOf>>,
-    mut humans: Query<(Entity, &mut Human, &Player, Option<&ControlledBy>)>,
+    mut humans: Query<(
+        Entity,
+        &mut Human,
+        &Player,
+        Option<&ControlledBy>,
+        &Stats,
+        &Evolution,
+    )>,
     mut states: Query<&mut MatchState>,
     mut settings: Query<&mut RoomSettings>,
+    mut departed: Query<&mut Departed>,
     mut outbox: ResMut<Outbox>,
     mut injected: Option<ResMut<Injected>>,
     mut trace: Option<ResMut<Trace>>,
@@ -139,25 +170,34 @@ pub(super) fn read_room_commands(
         .as_mut()
         .map(|injected| std::mem::take(&mut injected.rooms))
         .unwrap_or_default();
+    let mut leaving = Vec::new();
     for (client_id, cmd) in scripted {
         if let Some(trace) = trace.as_mut() {
             trace.push(format!("room {client_id} {}", fmt_room(&cmd)));
         }
-        let Some((entity, name, link)) = humans.iter().find_map(|(entity, _, player, control)| {
-            (player.client_id == client_id).then(|| {
-                (
-                    entity,
-                    player.name.clone(),
-                    control.map(|control| control.owner),
-                )
-            })
-        }) else {
+        let Some((entity, name, link, snap)) =
+            humans
+                .iter()
+                .find_map(|(entity, _, player, control, stats, evo)| {
+                    (player.client_id == client_id).then(|| {
+                        (
+                            entity,
+                            player.name.clone(),
+                            control.map(|control| control.owner),
+                            Departure::from_combatant(player, stats, evo),
+                        )
+                    })
+                })
+        else {
             continue;
         };
         if apply_room_command(&cmd, client_id, &mut state, &mut settings) != RoomEffect::Leave {
             continue;
         }
-        if let Some((_, mut human, _, _)) = humans.iter_mut().find(|(e, ..)| *e == entity) {
+        if state.phase == Phase::Playing {
+            leaving.push(snap);
+        }
+        if let Some((_, mut human, ..)) = humans.iter_mut().find(|(e, ..)| *e == entity) {
             human.left = true;
         }
         outbox.announce(format!("{name} 离开了废土"));
@@ -167,11 +207,19 @@ pub(super) fn read_room_commands(
         }
     }
     for (link, cmds) in inbox {
-        let Some((entity, client_id, name)) =
-            humans.iter().find_map(|(entity, _, player, control)| {
-                (control.is_some_and(|c| c.owner == link))
-                    .then(|| (entity, player.client_id, player.name.clone()))
-            })
+        let Some((entity, client_id, name, snap)) =
+            humans
+                .iter()
+                .find_map(|(entity, _, player, control, stats, evo)| {
+                    (control.is_some_and(|c| c.owner == link)).then(|| {
+                        (
+                            entity,
+                            player.client_id,
+                            player.name.clone(),
+                            Departure::from_combatant(player, stats, evo),
+                        )
+                    })
+                })
         else {
             continue;
         };
@@ -182,7 +230,10 @@ pub(super) fn read_room_commands(
             if apply_room_command(cmd, client_id, &mut state, &mut settings) != RoomEffect::Leave {
                 continue;
             }
-            if let Some((_, mut human, _, _)) = humans.iter_mut().find(|(e, ..)| *e == entity) {
+            if state.phase == Phase::Playing {
+                leaving.push(snap);
+            }
+            if let Some((_, mut human, ..)) = humans.iter_mut().find(|(e, ..)| *e == entity) {
                 human.left = true;
             }
             outbox.announce(format!("{name} 离开了废土"));
@@ -190,6 +241,12 @@ pub(super) fn read_room_commands(
             commands.entity(link).despawn();
             break;
         }
+    }
+    if state.phase == Phase::Playing
+        && !leaving.is_empty()
+        && let Ok(mut departed) = departed.single_mut()
+    {
+        departed.0.extend(leaving);
     }
 }
 

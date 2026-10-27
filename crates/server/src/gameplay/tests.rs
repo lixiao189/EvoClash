@@ -1,4 +1,4 @@
-use evoclash_game::evolution::{Perk, xp_to_reach};
+use evoclash_game::evolution::{EvoPath, Perk, xp_to_reach};
 use evoclash_game::shop::{PlayerCommand, RESPAWN_MIN_TICKS, ShopItem, can_deploy};
 use lightyear::prelude::PeerId;
 
@@ -81,6 +81,7 @@ fn spawn_dead(app: &mut App, evo: Evolution, wallet: Wallet, life: LifeLog) -> E
             PosHistory::default(),
             Loadout::default(),
             evo,
+            SkillState::default(),
             wallet,
             life,
         ))
@@ -390,6 +391,7 @@ fn private_settings(host: u64) -> RoomSettings {
         host,
         private_room: true,
         code: "ABCD".into(),
+        auto_paused: false,
     }
 }
 
@@ -791,4 +793,454 @@ fn later_lobby_still_closes_inside_eight_seconds() {
     assert!(lobby_open(&state), "8s until Playing still accepts");
     state.ticks_left = NEXT_LOBBY_COUNTDOWN_TICKS - 8 * TICKS_PER_SEC;
     assert!(!lobby_open(&state), "7s until Playing is closed");
+}
+
+fn departed_rows(app: &mut App) -> Vec<Departure> {
+    let world = app.world_mut();
+    let mut query = world.query::<&Departed>();
+    query
+        .single(world)
+        .map(|departed| departed.0.clone())
+        .unwrap_or_default()
+}
+
+#[test]
+fn playing_leave_is_recorded_and_lobby_leave_is_not() {
+    use crate::journal::Injected;
+
+    let mut ranks = [0; 12];
+    ranks[Perk::Claws.index()] = 2;
+    let mut first_pick = [0; 3];
+    first_pick[EvoPath::Mutant.index()] = 1;
+    let evo = Evolution {
+        level: 4,
+        ranks,
+        first_pick,
+        ..Evolution::default()
+    };
+    let stats = Stats {
+        score: 9,
+        kills: 4,
+        deaths: 2,
+        level: 4,
+        ..default()
+    };
+
+    let mut playing = App::new();
+    playing.insert_resource(Injected {
+        rooms: vec![(1, RoomCommand::Leave)],
+        ..default()
+    });
+    playing.init_resource::<Outbox>();
+    playing.world_mut().spawn((
+        MatchState {
+            phase: Phase::Playing,
+            ..default()
+        },
+        private_settings(1),
+        Departed::default(),
+    ));
+    playing.world_mut().spawn((
+        Player {
+            client_id: 1,
+            name: "lea".into(),
+            color: [1.0; 3],
+            bot: false,
+        },
+        Human {
+            peer: PeerId::Netcode(1),
+            disconnected_ticks: 0,
+            joined_at: 0,
+            left: false,
+        },
+        stats,
+        evo.clone(),
+    ));
+    playing.add_systems(Update, room::read_room_commands);
+    playing.update();
+    let rows = departed_rows(&mut playing);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "lea");
+    assert_eq!((rows[0].score, rows[0].kills, rows[0].deaths), (9, 4, 2));
+    assert_eq!(rows[0].level, 4);
+    assert_eq!(rows[0].path, Some(EvoPath::Mutant));
+    {
+        let world = playing.world_mut();
+        let mut players = world.query::<&Player>();
+        assert_eq!(players.iter(world).count(), 0);
+    }
+
+    let mut lobby = App::new();
+    lobby.insert_resource(Injected {
+        rooms: vec![(1, RoomCommand::Leave)],
+        ..default()
+    });
+    lobby.init_resource::<Outbox>();
+    lobby.world_mut().spawn((
+        MatchState {
+            phase: Phase::Lobby,
+            ..default()
+        },
+        private_settings(1),
+        Departed::default(),
+    ));
+    lobby.world_mut().spawn((
+        Player {
+            client_id: 1,
+            name: "lea".into(),
+            color: [1.0; 3],
+            bot: false,
+        },
+        Human {
+            peer: PeerId::Netcode(1),
+            disconnected_ticks: 0,
+            joined_at: 0,
+            left: false,
+        },
+        stats,
+        evo,
+    ));
+    lobby.add_systems(Update, room::read_room_commands);
+    lobby.update();
+    assert!(departed_rows(&mut lobby).is_empty());
+}
+
+#[test]
+fn a_departed_high_score_does_not_take_the_win() {
+    let mut app = flow_app(&[(2, "stay", 3, 1, 0, 10)], 1);
+    app.world_mut().spawn(Departed(vec![Departure {
+        name: "gone".into(),
+        score: 100,
+        kills: 20,
+        deaths: 0,
+        level: 8,
+        path: Some(EvoPath::Cyborg),
+    }]));
+    app.update();
+    let winner = {
+        let world = app.world_mut();
+        let mut states = world.query::<&MatchState>();
+        let state = states.single(world).unwrap();
+        assert_eq!(state.phase, Phase::Results);
+        state.winner.clone()
+    };
+    assert_eq!(winner.as_deref(), Some("stay"));
+    let world = app.world_mut();
+    let mut departed = world.query::<&Departed>();
+    let row = &departed.single(world).unwrap().0[0];
+    assert_eq!(row.score, 100, "frozen");
+    assert_ne!(winner.as_deref(), Some(row.name.as_str()));
+}
+
+fn idle_app(alive: bool) -> (App, Entity) {
+    let mut app = App::new();
+    app.init_resource::<Outbox>();
+    app.world_mut().spawn((
+        MatchState {
+            phase: Phase::Playing,
+            ..default()
+        },
+        Departed::default(),
+    ));
+    let body = app
+        .world_mut()
+        .spawn((
+            Player {
+                client_id: 3,
+                name: "idle".into(),
+                color: [1.0; 3],
+                bot: false,
+            },
+            Human {
+                peer: PeerId::Netcode(3),
+                disconnected_ticks: 0,
+                joined_at: 0,
+                left: false,
+            },
+            Idle::default(),
+            CurrentInput::default(),
+            Vitals { alive, ..default() },
+            Stats {
+                score: 2,
+                kills: 1,
+                ..default()
+            },
+            Evolution::default(),
+        ))
+        .id();
+    app.add_systems(Update, idle::watch_idle);
+    (app, body)
+}
+
+#[test]
+fn idle_human_is_warned_at_60s_and_removed_at_90s() {
+    let (mut app, body) = idle_app(true);
+    for _ in 0..idle::IDLE_WARN_TICKS - 1 {
+        app.update();
+    }
+    assert!(app.world().get::<Player>(body).is_some());
+    assert!(app.world().resource::<Outbox>().direct.is_empty());
+    app.update();
+    let note = app.world().resource::<Outbox>().direct.clone();
+    assert_eq!(note.len(), 1);
+    assert!(
+        matches!(&note[0].1, GameEvent::Announce(text) if text == "60 秒内无操作，30 秒后将被移出房间")
+    );
+    app.world_mut().resource_mut::<Outbox>().direct.clear();
+    for _ in 0..(idle::IDLE_KICK_TICKS - idle::IDLE_WARN_TICKS - 1) {
+        app.update();
+    }
+    assert!(
+        app.world().get::<Player>(body).is_some(),
+        "still here at 89s"
+    );
+    app.update();
+    assert!(app.world().get::<Player>(body).is_none());
+    let rows = departed_rows(&mut app);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (rows[0].name.as_str(), rows[0].score, rows[0].kills),
+        ("idle", 2, 1)
+    );
+    let announced = app
+        .world()
+        .resource::<Outbox>()
+        .reliable
+        .iter()
+        .any(|event| matches!(event, GameEvent::Announce(text) if text.contains("挂机")));
+    assert!(announced);
+}
+
+#[test]
+fn dead_time_and_a_changed_input_do_not_count_as_idle() {
+    let (mut app, body) = idle_app(false);
+    for _ in 0..idle::IDLE_KICK_TICKS {
+        app.update();
+    }
+    assert!(
+        app.world().get::<Player>(body).is_some(),
+        "a corpse is not idle"
+    );
+    assert!(departed_rows(&mut app).is_empty());
+    app.world_mut().get_mut::<Vitals>(body).unwrap().alive = true;
+    app.world_mut()
+        .get_mut::<CurrentInput>(body)
+        .unwrap()
+        .0
+        .move_x = 1;
+    for _ in 0..idle::IDLE_WARN_TICKS {
+        app.update();
+    }
+    assert!(
+        app.world().resource::<Outbox>().direct.is_empty(),
+        "the move resets the clock"
+    );
+    assert!(app.world().get::<Player>(body).is_some());
+}
+
+#[test]
+fn a_bot_is_not_idle_kicked() {
+    let (mut app, _) = idle_app(true);
+    let bot = app
+        .world_mut()
+        .spawn((
+            Player {
+                client_id: 9,
+                name: "bot".into(),
+                color: [0.5; 3],
+                bot: true,
+            },
+            CurrentInput::default(),
+            Vitals::default(),
+            Stats::default(),
+            Evolution::default(),
+        ))
+        .id();
+    app.update();
+    assert!(app.world().get::<Player>(bot).is_some());
+}
+
+#[test]
+fn a_human_auto_deploys_last_loadout_after_45s_and_a_bot_does_not() {
+    let mut app = respawn_app();
+    let mut evo = Evolution::default();
+    evo.add_xp(xp_to_reach(2));
+    let mut last_ranks = [0; 12];
+    last_ranks[Perk::Claws.index()] = 1;
+    let life = LifeLog {
+        last_ranks,
+        last_first_pick: [1, 0, 0],
+        ..default()
+    };
+    let human = spawn_dead(&mut app, evo, Wallet::default(), life);
+    app.world_mut().entity_mut(human).insert((Player {
+        client_id: 1,
+        name: "h".into(),
+        color: [1.0; 3],
+        bot: false,
+    },));
+    app.world_mut().get_mut::<Vitals>(human).unwrap().deploy_in = AUTO_DEPLOY_TICKS;
+
+    let bot = spawn_dead(
+        &mut app,
+        Evolution::default(),
+        Wallet::default(),
+        LifeLog::default(),
+    );
+    app.world_mut().entity_mut(bot).insert(Player {
+        client_id: 2,
+        name: "b".into(),
+        color: [1.0; 3],
+        bot: true,
+    });
+
+    for _ in 0..AUTO_DEPLOY_TICKS - 1 {
+        app.update();
+    }
+    assert!(!alive(&app, human), "still on the death screen");
+    assert_eq!(app.world().get::<Vitals>(human).unwrap().deploy_in, 1);
+    app.update();
+    assert!(alive(&app, human));
+    assert_eq!(
+        app.world()
+            .get::<Evolution>(human)
+            .unwrap()
+            .rank(Perk::Claws),
+        1
+    );
+    assert_eq!(app.world().get::<Vitals>(human).unwrap().deploy_in, 0);
+    assert!(!alive(&app, bot), "bots are not on the 45s clock");
+    assert_eq!(app.world().get::<Vitals>(bot).unwrap().respawn_in, 1);
+}
+
+fn run_private_tick(
+    phase: Phase,
+    ticks_left: u32,
+    match_index: u32,
+    auto_paused: bool,
+) -> (MatchState, bool) {
+    let mut app = App::new();
+    app.init_resource::<Arena>()
+        .init_resource::<Outbox>()
+        .init_resource::<ResetRequested>()
+        .init_resource::<PendingStart>()
+        .init_resource::<SimTick>()
+        .insert_resource(server_config())
+        .insert_resource(SimRng::from_match_seed(1));
+    let mut settings = private_settings(1);
+    settings.auto_paused = auto_paused;
+    app.world_mut().spawn((
+        MatchState {
+            phase,
+            ticks_left,
+            countdown_active: false,
+            match_index,
+            ..default()
+        },
+        settings,
+    ));
+    for id in 1..=2 {
+        app.world_mut().spawn((
+            Player {
+                client_id: id,
+                name: format!("p{id}"),
+                color: [1.0; 3],
+                bot: false,
+            },
+            Stats::default(),
+            Human {
+                peer: PeerId::Netcode(id),
+                disconnected_ticks: 0,
+                joined_at: 0,
+                left: false,
+            },
+        ));
+    }
+    app.add_systems(Update, match_flow);
+    app.update();
+    let world = app.world_mut();
+    let mut states = world.query::<&MatchState>();
+    let mut rooms = world.query::<&RoomSettings>();
+    (
+        states.single(world).unwrap().clone(),
+        rooms.single(world).unwrap().auto_paused,
+    )
+}
+
+#[test]
+fn private_room_auto_continues_after_the_first_match_unless_paused() {
+    let (first, _) = run_private_tick(Phase::Lobby, 0, 0, false);
+    assert_eq!(first.phase, Phase::Lobby);
+    assert!(
+        !first.countdown_active,
+        "the first round still waits for the host"
+    );
+
+    let (next, paused) = run_private_tick(Phase::Results, 1, 0, false);
+    assert_eq!(next.phase, Phase::Lobby);
+    assert_eq!(next.match_index, 1);
+    assert!(next.countdown_active);
+    assert_eq!(next.ticks_left, NEXT_LOBBY_COUNTDOWN_TICKS);
+    assert_eq!(next.ticks_left + STARTING_TICKS, 15 * TICKS_PER_SEC);
+    assert!(!paused);
+
+    let (held, paused) = run_private_tick(Phase::Results, 1, 0, true);
+    assert_eq!(held.phase, Phase::Lobby);
+    assert_eq!(held.match_index, 1);
+    assert!(!held.countdown_active);
+    assert_eq!(held.ticks_left, 0);
+    assert!(paused);
+}
+
+#[test]
+fn pause_auto_start_is_host_only_and_ignored_once_the_countdown_runs() {
+    let mut state = MatchState {
+        phase: Phase::Results,
+        match_index: 1,
+        ..default()
+    };
+    let mut settings = private_settings(1);
+    assert_eq!(
+        room::apply_room_command(&RoomCommand::PauseAutoStart, 2, &mut state, &mut settings),
+        room::RoomEffect::Ignore
+    );
+    assert!(!settings.auto_paused);
+    assert_eq!(
+        room::apply_room_command(&RoomCommand::PauseAutoStart, 1, &mut state, &mut settings),
+        room::RoomEffect::Updated
+    );
+    assert!(settings.auto_paused);
+
+    state.phase = Phase::Lobby;
+    state.countdown_active = false;
+    state.ticks_left = 0;
+    state.match_index = 1;
+    assert_eq!(
+        room::apply_room_command(&RoomCommand::ResumeAutoStart, 1, &mut state, &mut settings),
+        room::RoomEffect::Updated
+    );
+    assert!(!settings.auto_paused);
+    assert!(!state.countdown_active, "resume does not start the clock");
+    assert_eq!(
+        room::apply_room_command(&RoomCommand::Start, 1, &mut state, &mut settings),
+        room::RoomEffect::Started
+    );
+    assert_eq!(state.ticks_left, PRIVATE_LOBBY_COUNTDOWN_TICKS);
+    // Put the 15s clock up, then show Pause no longer applies.
+    state.countdown_active = true;
+    state.ticks_left = NEXT_LOBBY_COUNTDOWN_TICKS;
+
+    assert_eq!(
+        room::apply_room_command(&RoomCommand::PauseAutoStart, 1, &mut state, &mut settings),
+        room::RoomEffect::Ignore,
+        "a running countdown is cancelled, not paused"
+    );
+    assert!(!settings.auto_paused);
+    assert!(state.countdown_active);
+
+    assert_eq!(
+        room::apply_room_command(&RoomCommand::Cancel, 1, &mut state, &mut settings),
+        room::RoomEffect::Cancelled
+    );
+    assert!(!state.countdown_active);
 }
