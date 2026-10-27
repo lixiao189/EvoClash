@@ -17,6 +17,7 @@ mod input;
 mod lobby_ui;
 mod lpc;
 mod minimap;
+mod perf;
 mod predict;
 mod render;
 mod session;

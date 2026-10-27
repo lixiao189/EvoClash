@@ -770,5 +770,9 @@ mod tests {
             ]
         );
         assert_eq!((wallet.scrap, vitals.respawn_in), (5, 1));
+        assert!(
+            life.deploy_asap,
+            "a bot that may deploy confirms, so the next respawn tick revives it"
+        );
     }
 }

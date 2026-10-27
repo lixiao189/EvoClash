@@ -14,12 +14,14 @@ use evoclash_game::shop::{PlayerCommand, Wallet, can_deploy};
 use lightyear::prelude::{Client, MessageSender};
 
 use crate::input::LocalPlayer;
+use crate::perf::{EvoSelectSent, Instant, SlowWarn};
 
 pub struct ButtonsPlugin;
 
 impl Plugin for ButtonsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PointerOverUi>();
+        app.init_resource::<EvoSelectSent>();
         app.add_systems(
             Update,
             (
@@ -101,6 +103,7 @@ fn enable_buttons(
     me: Query<(&Evolution, &Wallet, &Vitals), With<LocalPlayer>>,
     mut buttons: Query<&mut UiButton>,
 ) {
+    let _probe = SlowWarn::new("enable_buttons");
     let Ok((evo, wallet, vitals)) = me.single() else {
         return;
     };
@@ -133,22 +136,26 @@ fn style_buttons(
         Or<(Changed<UiButton>, Changed<RelativeCursorPosition>)>,
     >,
 ) {
+    let _probe = SlowWarn::new("style_buttons");
     for (button, cursor, mut bg) in &mut buttons {
-        bg.0 = match (button.enabled, cursor.cursor_over()) {
+        let color = match (button.enabled, cursor.cursor_over()) {
             (false, _) => DISABLED_BG,
             (true, true) => HOVER_BG,
             (true, false) => BUTTON_BG,
         };
+        bg.set_if_neq(BackgroundColor(color));
     }
 }
 
 fn click_buttons(
+    mut select_sent: ResMut<EvoSelectSent>,
     mouse: Option<Res<ButtonInput<MouseButton>>>,
     state: Query<&MatchState>,
     me: Query<&Wallet, With<LocalPlayer>>,
     buttons: Query<(&UiButton, &RelativeCursorPosition, &InheritedVisibility)>,
     mut senders: Query<&mut MessageSender<PlayerCommand>, With<Client>>,
 ) {
+    let _probe = SlowWarn::new("click_buttons");
     if !state.iter().any(|s| s.phase == Phase::Playing) {
         return;
     }
@@ -168,6 +175,12 @@ fn click_buttons(
             None => return,
         },
     };
+    if matches!(
+        cmd,
+        PlayerCommand::Spend(_) | PlayerCommand::Refund(_) | PlayerCommand::ResetPerks
+    ) {
+        select_sent.0 = Some(Instant::now());
+    }
     send(&mut senders, cmd);
 }
 
@@ -178,6 +191,7 @@ fn pointer_over_ui(
         Or<(With<BlocksPointer>, With<UiButton>)>,
     >,
 ) {
+    let _probe = SlowWarn::new("pointer_over_ui");
     let value = nodes
         .iter()
         .any(|(cursor, vis)| vis.get() && cursor.cursor_over());
