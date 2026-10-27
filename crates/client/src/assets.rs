@@ -39,6 +39,11 @@ impl PendingAssets {
     pub fn add(&mut self, handle: impl Into<UntypedHandle>) {
         self.handles.push(handle.into());
     }
+
+    /// How many files the boot cover waits for.
+    pub fn total(&self) -> usize {
+        self.handles.len()
+    }
 }
 
 /// Run condition: every registered file has loaded.
