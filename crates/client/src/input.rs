@@ -1,7 +1,8 @@
 //! Keyboard/mouse → `PlayerInput`, written into lightyear's input buffer every tick.
 //!
 //! The Esc stack lives here: it closes the backpack, then the evolution panel, then toggles the
-//! menu, so one key never opens two overlays.
+//! menu, so one key never opens two overlays. While any of those panels is open the buffered
+//! input stands still (aim frozen, weapon unchanged); B, Tab and Esc still toggle the panels.
 
 use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
@@ -30,6 +31,12 @@ pub struct LocalPlayer;
 /// Whether the backpack panel (B) is open: clicks then belong to it, not to the weapon.
 #[derive(Resource, Default)]
 pub struct BackpackOpen(pub bool);
+
+/// Backpack, evolution panel or pause menu. Aim, movement and the camera lean stay put while
+/// this is true.
+pub fn panel_open(backpack: bool, menu: bool, evo: bool) -> bool {
+    backpack || menu || evo
+}
 
 /// Trackpads scroll in pixels: this much counts as one wheel notch.
 const SCROLL_NOTCH_PX: f32 = 60.0;
@@ -135,6 +142,8 @@ fn hotbar_keys(
     let Some(keys) = keys else {
         return;
     };
+    // Captured before B / Esc so the press that closes a panel cannot also switch weapons.
+    let panel_was_open = panel_open(open.0, menu.0, evo.0);
     if keys.just_pressed(KeyCode::KeyB) && !menu.0 {
         open.0 = !open.0;
     }
@@ -147,6 +156,12 @@ fn hotbar_keys(
             // No menu over the loading cover / join-failure screen.
             menu.0 = !menu.0;
         }
+    }
+    // 1–4 and the wheel belong to the panels while one is up (including the frame it opens or
+    // closes). Tab toggles the evolution panel in its own system, so treat that press the same.
+    if panel_was_open || panel_open(open.0, menu.0, evo.0) || keys.just_pressed(KeyCode::Tab) {
+        *scrolled = 0.0;
+        return;
     }
     let Ok(loadout) = me.single() else {
         return;
@@ -184,6 +199,37 @@ fn axis(keys: &ButtonInput<KeyCode>, neg: [KeyCode; 2], pos: [KeyCode; 2]) -> i8
     keys.any_pressed(pos) as i8 - keys.any_pressed(neg) as i8
 }
 
+/// While a panel is open, stand still and keep the current weapon. `aim` stays at the last
+/// direction sent before the panel opened (`Vec2::X` if none has been sent). A closed panel
+/// passes `input` through and, when `sampled`, remembers its aim for the next lock.
+fn apply_panel_lock(
+    panel_open: bool,
+    mut input: PlayerInput,
+    sampled: bool,
+    last_aim: &mut Vec2,
+) -> PlayerInput {
+    if !panel_open {
+        if sampled {
+            *last_aim = input.aim;
+        }
+        return input;
+    }
+    input.move_x = 0;
+    input.move_y = 0;
+    input.aim = if *last_aim == Vec2::ZERO {
+        Vec2::X
+    } else {
+        *last_aim
+    };
+    input.fire = false;
+    input.dash = false;
+    input.interact = false;
+    input.throw = false;
+    input.skill_a = false;
+    input.skill_b = false;
+    input
+}
+
 fn buffer_input(
     keys: Option<Res<ButtonInput<KeyCode>>>,
     mouse: Option<Res<ButtonInput<MouseButton>>>,
@@ -191,13 +237,17 @@ fn buffer_input(
     selection: Res<Selection>,
     open: Res<BackpackOpen>,
     menu: Res<MenuOpen>,
+    evo: Res<EvoPanelOpen>,
     over_ui: Res<PointerOverUi>,
+    mut last_aim: Local<Vec2>,
     mut query: Query<(&mut ActionState<PlayerInput>, &Pos), With<InputMarker<PlayerInput>>>,
 ) {
     let Ok((mut action, pos)) = query.single_mut() else {
         return;
     };
     let mut input = PlayerInput::default();
+    let panel = panel_open(open.0, menu.0, evo.0);
+    let sampled = keys.is_some();
 
     if let Some(keys) = keys {
         use KeyCode::*;
@@ -206,7 +256,7 @@ fn buffer_input(
         input.dash = keys.any_pressed([Space, ShiftLeft]);
         input.interact = keys.any_pressed([KeyE, KeyF]);
         // The mouse belongs to the backpack panel while it is open, and to the menu while that
-        // is open: a click there must not fire or throw.
+        // is open: a click there must not fire or throw. `apply_panel_lock` clears the rest.
         let mouse = mouse.filter(|_| !open.0 && !menu.0);
         input.throw = keys.pressed(KeyQ)
             || mouse
@@ -224,6 +274,56 @@ fn buffer_input(
             .map(|c| (c - (pos.0 + Vec2::Y * GUN_HEIGHT)).normalize_or(Vec2::X))
             .unwrap_or(Vec2::X);
     }
+    if panel {
+        // Keys may be missing; still keep the weapon the player already asked for.
+        input.select = selection.wire();
+    }
     // Always write a value: an absent input means "packet lost", not "standing still".
-    action.0 = input;
+    // Held keys are read with `pressed`, so closing a panel resumes movement on the next tick.
+    action.0 = apply_panel_lock(panel, input, sampled, &mut last_aim);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn busy() -> PlayerInput {
+        PlayerInput {
+            move_x: 1,
+            move_y: -1,
+            aim: Vec2::Y,
+            fire: true,
+            dash: true,
+            interact: true,
+            throw: true,
+            skill_a: true,
+            skill_b: true,
+            select: 0b0000_1001,
+        }
+    }
+
+    #[test]
+    fn panel_lock_clears_actions_and_freezes_aim() {
+        let live = busy();
+        let mut last = Vec2::X;
+        let locked = apply_panel_lock(true, live.clone(), true, &mut last);
+        assert_eq!(
+            locked,
+            PlayerInput {
+                select: live.select,
+                aim: Vec2::X,
+                ..PlayerInput::default()
+            }
+        );
+        assert_eq!(last, Vec2::X);
+
+        let resumed = apply_panel_lock(false, live.clone(), true, &mut last);
+        assert_eq!(resumed, live);
+        assert_eq!(last, Vec2::Y);
+
+        let mut unset = Vec2::ZERO;
+        let fallback = apply_panel_lock(true, live, true, &mut unset);
+        assert_eq!(fallback.aim, Vec2::X);
+        assert_eq!(unset, Vec2::ZERO);
+    }
 }
