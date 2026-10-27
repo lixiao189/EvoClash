@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# What scripts/pi-run sessions are doing.
+#
+#   scripts/pi-status [session]
+#
+# One line per run: state (running / done / stopped), tool calls so far, seconds since the log
+# last changed, and the latest tool call. Pass a session to also print its report or stderr.
+set -euo pipefail
+
+root=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
+runs=$root/.pi/runs
+[ -d "$runs" ] || { echo "no runs in $runs"; exit 0; }
+
+mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1"; }
+
+show() {
+    local s=$1 log=$runs/$1.jsonl state age calls last
+    [ -f "$log" ] || { echo "pi-status: no run '$s'" >&2; return 1; }
+    if pgrep -f -- "--session-id evoclash-$s( |$)" >/dev/null; then
+        state=running
+    elif [ -s "$runs/$s.md" ]; then
+        state="done"
+    else
+        state=stopped
+    fi
+    age=$(($(date +%s) - $(mtime "$log")))
+    calls=$(jq -R 'fromjson? | select(.type == "tool_execution_start")' "$log" | grep -c '"type"' || true)
+    last=$(jq -Rr 'fromjson? | select(.type == "tool_execution_start")
+        | "\(.toolName) \(.args.command // .args.path // .args.pattern // "")"' "$log" |
+        tail -1 | tr '\n' ' ' | cut -c1-90)
+    printf '%-32s %-8s %4s tools  idle %5ss  %s\n' "$s" "$state" "$calls" "$age" "$last"
+    if [ "$state" = running ] && [ "$age" -gt 300 ]; then
+        echo "  ! no log activity for ${age}s: check the provider, or whether pi is waiting on stdin"
+    fi
+}
+
+if [ $# -gt 0 ]; then
+    show "$1"
+    if [ -s "$runs/$1.md" ]; then
+        echo
+        cat "$runs/$1.md"
+    elif [ -s "$runs/$1.err" ]; then
+        echo
+        tail -20 "$runs/$1.err"
+    fi
+else
+    # Newest first. Session names never contain spaces (they become a `--session-id`).
+    while IFS= read -r log; do
+        show "$(basename "$log" .jsonl)"
+    done < <(ls -t "$runs"/*.jsonl 2>/dev/null)
+fi
