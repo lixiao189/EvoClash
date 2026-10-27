@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use bevy::prelude::*;
 use evoclash_game::net::DEFAULT_GAME_PORT;
@@ -31,6 +32,12 @@ pub struct ServerConfig {
     pub private: bool,
     /// Uppercase room code. Empty unless `private`.
     pub room_code: String,
+    /// Directory for room and match logs. Default `logs/`.
+    pub log_dir: PathBuf,
+    /// Offline `--replay` input. The process does not bind or heartbeat.
+    pub replay: Option<PathBuf>,
+    /// Write room and match logs. Replay turns this off.
+    pub logging: bool,
 }
 
 /// The one OS random draw: the startup seed when `--room-seed` is omitted.
@@ -54,6 +61,8 @@ impl ServerConfig {
         let mut room_seed = None;
         let mut private = false;
         let mut room_code = String::new();
+        let mut log_dir = PathBuf::from("logs");
+        let mut replay = None;
 
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -98,16 +107,20 @@ impl ServerConfig {
                 }
                 "--private" => private = true,
                 "--room-code" => room_code = value("--room-code").trim().to_uppercase(),
+                "--log-dir" => log_dir = PathBuf::from(value("--log-dir")),
+                "--replay" => replay = Some(PathBuf::from(value("--replay"))),
                 "-h" | "--help" => {
                     println!(
                         "evoclash-server [--port 7000] [--public-addr 127.0.0.1:7000] [--match-id ID]\n\
                          \x20               [--max-players 8] [--bots 6] [--matchmaker URL[,URL...]] [--single-match]\n\
                          \x20               [--no-monsters] [--threads 1] [--agones] [--room-seed U64]\n\
-                         \x20               [--private] [--room-code CODE]\n\n\
+                         \x20               [--private] [--room-code CODE] [--log-dir logs] [--replay FILE]\n\n\
                          --bots N          keep at least N combatants in the arena by adding bots (0 disables)\n\
                          --room-seed       fixed seed for this room; omitted once, from the OS\n\
                          --private         friends-only room; the host starts the match\n\
                          --room-code       4-character code for a private room\n\
+                         --log-dir         room and match logs (default logs/)\n\
+                         --replay FILE     offline match log: no port, no matchmaker; exit 1 on digest mismatch\n\
                          --matchmaker      heartbeat to every listed matchmaker, and to every address\n\
                          \x20                 a hostname resolves to (a headless Service reaches all pods)\n\
                          --agones          run as an Agones GameServer (implies --single-match)\n\
@@ -133,6 +146,9 @@ impl ServerConfig {
             room_seed: room_seed.unwrap_or_else(startup_seed),
             private,
             room_code,
+            log_dir,
+            replay,
+            logging: true,
         }
     }
 }

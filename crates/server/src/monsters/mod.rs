@@ -5,7 +5,7 @@
 //! trickles back in on its own timer. Monsters far from every player think only every
 //! fourth tick, so a full arena stays cheap. The behemoth boss lives in `boss.rs`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::f32::consts::{PI, TAU};
 
 use bevy::prelude::*;
@@ -215,6 +215,8 @@ pub struct Brain {
     locked_for: u16,
     target: Option<Entity>,
     think_in: u16,
+    /// Spawn order this match. Far-stride and replay sort by this, never by entity id.
+    pub serial: u32,
 }
 
 impl Brain {
@@ -259,6 +261,7 @@ impl Brain {
             locked_for: 0,
             target: None,
             think_in: 0,
+            serial: 0,
         }
     }
 }
@@ -299,6 +302,16 @@ struct KindTimer {
 pub struct Spawner {
     timers: [KindTimer; MonsterKind::ALL.len()],
     next_pack: u32,
+    next_serial: u32,
+}
+
+impl Spawner {
+    /// Stable id for think-stride and replay ordering. Not an entity id.
+    pub fn alloc_serial(&mut self) -> u32 {
+        let serial = self.next_serial;
+        self.next_serial = self.next_serial.wrapping_add(1);
+        serial
+    }
 }
 
 /// Who is alive right now, per kind.

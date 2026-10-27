@@ -153,6 +153,7 @@ pub(crate) fn fire_weapons(
         Option<&Human>,
         &Evolution,
         &SkillState,
+        &Player,
     )>,
     targets: Query<(
         Entity,
@@ -170,10 +171,29 @@ pub(crate) fn fire_weapons(
         return;
     }
     let playing = state.phase == Phase::Playing;
+    let mut order: Vec<(u64, Entity)> = shooters
+        .iter()
+        .map(|(entity, .., player)| (player.client_id, entity))
+        .collect();
+    order.sort_unstable_by_key(|(id, _)| *id);
     rng.with(playing, crate::rng::Stream::Combat, |mut rng| {
-        for (entity, pos, input, vitals, mut loadout, mut cd, rewind, human, evo, skills) in
-            &mut shooters
-        {
+        for (_, entity) in order {
+            let Ok((
+                entity,
+                pos,
+                input,
+                vitals,
+                mut loadout,
+                mut cd,
+                rewind,
+                human,
+                evo,
+                skills,
+                _,
+            )) = shooters.get_mut(entity)
+            else {
+                continue;
+            };
             let input = &input.0;
             if !vitals.alive || !input.fire || cd.fire > 0 {
                 continue;

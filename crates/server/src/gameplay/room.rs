@@ -1,6 +1,7 @@
 //! Private-room host commands, host handoff and the 30 minute idle cap.
 
 use super::*;
+use crate::journal::{Injected, Trace, fmt_room};
 
 /// Someone still in the room, for picking the next host.
 #[derive(Clone, Debug)]
@@ -55,7 +56,7 @@ fn until_playing(state: &MatchState) -> u32 {
 }
 
 /// Apply one command. Invalid commands are ignored; nobody is kicked.
-pub(super) fn apply_room_command(
+pub fn apply_room_command(
     cmd: &RoomCommand,
     sender: u64,
     state: &mut MatchState,
@@ -132,6 +133,8 @@ pub(super) fn read_room_commands(
     mut states: Query<&mut MatchState>,
     mut settings: Query<&mut RoomSettings>,
     mut outbox: ResMut<Outbox>,
+    mut injected: Option<ResMut<Injected>>,
+    mut trace: Option<ResMut<Trace>>,
 ) {
     let Ok(mut state) = states.single_mut() else {
         return;
@@ -150,6 +153,39 @@ pub(super) fn read_room_commands(
         .iter()
         .filter(|(_, human, _, _)| human.connected() && !human.left)
         .count();
+    let scripted = injected
+        .as_mut()
+        .map(|injected| std::mem::take(&mut injected.rooms))
+        .unwrap_or_default();
+    for (client_id, cmd) in scripted {
+        if let Some(trace) = trace.as_mut() {
+            trace.push(format!("room {client_id} {}", fmt_room(&cmd)));
+        }
+        let Some((entity, name, link)) = humans.iter().find_map(|(entity, _, player, control)| {
+            (player.client_id == client_id).then(|| {
+                (
+                    entity,
+                    player.name.clone(),
+                    control.map(|control| control.owner),
+                )
+            })
+        }) else {
+            continue;
+        };
+        if apply_room_command(&cmd, client_id, &mut state, &mut settings, connected)
+            != RoomEffect::Leave
+        {
+            continue;
+        }
+        if let Some((_, mut human, _, _)) = humans.iter_mut().find(|(e, ..)| *e == entity) {
+            human.left = true;
+        }
+        outbox.announce(format!("{name} 离开了废土"));
+        commands.entity(entity).despawn();
+        if let Some(link) = link {
+            commands.entity(link).despawn();
+        }
+    }
     for (link, cmds) in inbox {
         let Some((entity, client_id, name)) =
             humans.iter().find_map(|(entity, _, player, control)| {
@@ -160,6 +196,9 @@ pub(super) fn read_room_commands(
             continue;
         };
         for cmd in &cmds {
+            if let Some(trace) = trace.as_mut() {
+                trace.push(format!("room {client_id} {}", fmt_room(cmd)));
+            }
             if apply_room_command(cmd, client_id, &mut state, &mut settings, connected)
                 != RoomEffect::Leave
             {
@@ -225,9 +264,12 @@ pub(super) fn private_idle_cap(
     mut idle_for: Local<u32>,
     mut warned: Local<bool>,
     mut outbox: ResMut<Outbox>,
-    ops: Res<OpsState>,
+    ops: Option<Res<OpsState>>,
     mut exit: MessageWriter<AppExit>,
 ) {
+    let Some(ops) = ops else {
+        return;
+    };
     let private_room = settings.iter().next().is_some_and(|s| s.private_room);
     let idling = private_room
         && state

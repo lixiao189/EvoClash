@@ -11,6 +11,7 @@ use lightyear::prelude::server::ClientOf;
 use lightyear::prelude::*;
 
 use crate::gameplay::{Cooldowns, CurrentInput, Expires, SimSet, spawn_pickup};
+use crate::journal::{Injected, Trace};
 
 const PICKUP_RADIUS: f32 = 46.0;
 /// Ticks between deliberate (E) pickups, so one press swaps once.
@@ -56,17 +57,42 @@ fn select_slots(mut players: Query<(&CurrentInput, &mut Selecting, &mut Loadout)
 /// Rearranging in the backpack panel arrives as reliable messages on the client's link.
 fn apply_moves(
     mut links: Query<(Entity, &mut MessageReceiver<InventoryMove>), With<ClientOf>>,
-    mut players: Query<(&ControlledBy, &mut Loadout)>,
+    mut players: Query<(&Player, Option<&ControlledBy>, &mut Loadout)>,
+    mut injected: Option<ResMut<Injected>>,
+    mut trace: Option<ResMut<Trace>>,
 ) {
+    if let Some(injected) = injected.as_mut() {
+        let moves = std::mem::take(&mut injected.moves);
+        for (id, m) in moves {
+            if let Some(trace) = trace.as_mut() {
+                trace.push(format!("inv {id} {} {}", m.from, m.to));
+            }
+            let Some((_, _, mut loadout)) = players
+                .iter_mut()
+                .find(|(player, ..)| player.client_id == id)
+            else {
+                continue;
+            };
+            loadout.move_slots(m.from, m.to);
+            loadout.auto_switch();
+        }
+    }
     for (link, mut receiver) in &mut links {
         let moves: Vec<InventoryMove> = receiver.receive().collect();
         if moves.is_empty() {
             continue;
         }
-        let Some((_, mut loadout)) = players.iter_mut().find(|(c, _)| c.owner == link) else {
+        let Some((player, _, mut loadout)) = players
+            .iter_mut()
+            .find(|(_, control, _)| control.is_some_and(|c| c.owner == link))
+        else {
             continue;
         };
+        let id = player.client_id;
         for m in moves {
+            if let Some(trace) = trace.as_mut() {
+                trace.push(format!("inv {id} {} {}", m.from, m.to));
+            }
             loadout.move_slots(m.from, m.to);
         }
         loadout.auto_switch();

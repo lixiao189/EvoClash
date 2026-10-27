@@ -303,6 +303,7 @@ pub(super) fn respawn(
         &Evolution,
         &mut Wallet,
         &mut LifeLog,
+        Option<&Player>,
     )>,
 ) {
     let lobby = state.iter().any(|s| s.phase == Phase::Lobby);
@@ -311,18 +312,30 @@ pub(super) fn respawn(
         .filter(|(_, _, v, ..)| v.alive)
         .map(|(e, p, ..)| (e, p.0))
         .collect();
-    for (
-        entity,
-        mut pos,
-        mut vitals,
-        mut dash,
-        mut history,
-        mut loadout,
-        evo,
-        mut wallet,
-        mut life,
-    ) in &mut players
-    {
+    let mut dead: Vec<(u64, Entity)> = players
+        .iter()
+        .filter(|(_, _, v, ..)| !v.alive)
+        .map(|(entity, _, _, _, _, _, _, _, _, player)| {
+            (player.map(|p| p.client_id).unwrap_or(u64::MAX), entity)
+        })
+        .collect();
+    dead.sort_unstable_by_key(|(id, _)| *id);
+    for (_, entity) in dead {
+        let Ok((
+            entity,
+            mut pos,
+            mut vitals,
+            mut dash,
+            mut history,
+            mut loadout,
+            evo,
+            mut wallet,
+            mut life,
+            _,
+        )) = players.get_mut(entity)
+        else {
+            continue;
+        };
         if vitals.alive {
             continue;
         }

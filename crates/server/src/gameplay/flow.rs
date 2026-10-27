@@ -69,8 +69,10 @@ pub fn match_flow(
     mut reset: ResMut<ResetRequested>,
     mut place: ResMut<PendingStart>,
     config: Res<ServerConfig>,
-    ops: Res<OpsState>,
+    ops: Option<Res<OpsState>>,
     rng: Res<SimRng>,
+    mut tick: ResMut<SimTick>,
+    mut histories: Query<&mut PosHistory, With<Player>>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let private_room = settings.private_room;
@@ -110,6 +112,8 @@ pub fn match_flow(
                         &rng,
                         &mut outbox,
                         players.iter().count(),
+                        &mut tick,
+                        &mut histories,
                     );
                 }
             }
@@ -158,9 +162,11 @@ pub fn match_flow(
         Phase::Results => {
             state.ticks_left = state.ticks_left.saturating_sub(1);
             if state.ticks_left == 0 {
-                if config.single_match || ops.is_draining() {
+                if config.single_match || ops.as_ref().is_some_and(|ops| ops.is_draining()) {
                     info!("match finished, shutting down");
-                    ops.mark_exiting();
+                    if let Some(ops) = ops.as_ref() {
+                        ops.mark_exiting();
+                    }
                     exit.write(AppExit::Success);
                     return;
                 }
@@ -196,6 +202,8 @@ fn begin_playing(
     rng: &SimRng,
     outbox: &mut Outbox,
     combatants: usize,
+    tick: &mut SimTick,
+    histories: &mut Query<&mut PosHistory, With<Player>>,
 ) {
     state.phase = Phase::Playing;
     state.ticks_left = MATCH_TICKS;
@@ -204,6 +212,12 @@ fn begin_playing(
     state.countdown_active = false;
     // Streams 1-6 restart from this round's seed. Lobby draws stay on stream 0.
     rng.reinit_match(state.map_seed);
+    // Match ticks start at 0 so a replay that skips the lobby hits the same schedules
+    // (radiation, puddles, monster stride) as the process that played the lobby.
+    tick.0 = 0;
+    for mut history in histories.iter_mut() {
+        history.0.clear();
+    }
     for mut vitals in vitals.iter_mut() {
         if vitals.alive {
             vitals.shield = SPAWN_SHIELD_TICKS;
@@ -350,10 +364,14 @@ pub(super) fn empty_close(
     state: Query<&MatchState>,
     settings: Query<&RoomSettings>,
     humans: Query<&Human>,
-    ops: Res<OpsState>,
+    ops: Option<Res<OpsState>>,
     mut empty_for: Local<u32>,
     mut exit: MessageWriter<AppExit>,
 ) {
+    // Replay has no ops resource and must keep simulating with nobody connected.
+    let Some(ops) = ops else {
+        return;
+    };
     let Some(state) = state.iter().next() else {
         return;
     };
@@ -392,11 +410,16 @@ pub(super) fn empty_close(
 
 pub(super) fn flush_outbox(
     mut outbox: ResMut<Outbox>,
-    mut sender: ServerMultiMessageSender,
-    server: Single<&Endpoint, With<Server>>,
+    mut sender: If<ServerMultiMessageSender>,
+    server: Query<&Endpoint, With<Server>>,
     humans: Query<&Human>,
 ) {
-    let server = server.into_inner();
+    let Ok(server) = server.single() else {
+        outbox.reliable.clear();
+        outbox.fast.clear();
+        outbox.direct.clear();
+        return;
+    };
     for (entity, event) in outbox.direct.drain(..) {
         if let Ok(human) = humans.get(entity)
             && human.connected()
@@ -413,4 +436,11 @@ pub(super) fn flush_outbox(
     for event in outbox.fast.drain(..) {
         let _ = sender.send::<_, FastChannel>(&event, server, &NetworkTarget::All);
     }
+}
+
+/// Drops anything `flush_outbox` did not send (replay and tests have no endpoint).
+pub(super) fn clear_outbox(mut outbox: ResMut<Outbox>) {
+    outbox.reliable.clear();
+    outbox.fast.clear();
+    outbox.direct.clear();
 }

@@ -15,6 +15,7 @@ use lightyear::webtransport::prelude::endpoint::WebTransportEndpoint;
 
 use crate::config::ServerConfig;
 use crate::gameplay::{Outbox, SimSet, SimTick, spawn_combatant};
+use crate::journal::Trace;
 use crate::ops::OpsState;
 
 /// A disconnected player's body stays in the arena this long so a flaky
@@ -142,6 +143,7 @@ fn on_connected(
     tick: Option<Res<SimTick>>,
     mut outbox: ResMut<Outbox>,
     mut commands: Commands,
+    mut trace: Option<ResMut<Trace>>,
 ) {
     let link = trigger.entity;
     let Ok((remote, user_data)) = links.get(link) else {
@@ -162,6 +164,9 @@ fn on_connected(
         commands.entity(entity).insert(control);
         info!("{} ({peer:?}) reconnected", player.name);
         outbox.announce(format!("{} 重新连线", player.name));
+        if let Some(trace) = trace.as_mut() {
+            trace.push(format!("connect {client_id}"));
+        }
         return;
     }
 
@@ -194,6 +199,9 @@ fn on_connected(
             left: false,
         },
     ));
+    if let Some(trace) = trace.as_mut() {
+        trace.push(format!("connect {client_id}"));
+    }
 }
 
 /// When a dropped player's link is despawned, Bevy strips the `ControlledBy` relationship from
@@ -218,6 +226,7 @@ fn track_presence(
     mut humans: Query<(Entity, &mut Human, &Player, Option<&ControlledBy>)>,
     live_links: Query<(), With<Connected>>,
     mut outbox: ResMut<Outbox>,
+    mut trace: Option<ResMut<Trace>>,
 ) {
     for (entity, mut human, player, control) in &mut humans {
         if human.left {
@@ -230,11 +239,17 @@ fn track_presence(
         }
         if human.disconnected_ticks == 0 {
             info!("{} lost connection, holding slot", player.name);
+            if let Some(trace) = trace.as_mut() {
+                trace.push(format!("disconnect {}", player.client_id));
+            }
         }
         human.disconnected_ticks += 1;
         if human.disconnected_ticks > RECONNECT_GRACE_TICKS {
             info!("{} timed out", player.name);
             outbox.announce(format!("{} 离开了废土", player.name));
+            if let Some(trace) = trace.as_mut() {
+                trace.push(format!("leave {}", player.client_id));
+            }
             commands.entity(entity).despawn();
         }
     }

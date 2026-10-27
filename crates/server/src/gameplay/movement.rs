@@ -1,6 +1,7 @@
 //! Tick counter, human input, movement, position history and cooldowns.
 
 use super::*;
+use crate::journal::Injected;
 
 pub(super) fn advance_tick(mut tick: ResMut<SimTick>) {
     tick.0 = tick.0.wrapping_add(1);
@@ -12,20 +13,28 @@ pub fn read_human_inputs(
             &mut CurrentInput,
             &mut Rewind,
             &Human,
+            &Player,
             Option<&ActionState<PlayerInput>>,
             Option<&ControlledBy>,
         ),
         With<Human>,
     >,
     delays: Query<&InterpolationDelay>,
+    mut injected: Option<ResMut<Injected>>,
 ) {
-    for (mut current, mut rewind, human, action, control) in &mut humans {
+    let scripted = injected
+        .as_mut()
+        .map(|injected| std::mem::take(&mut injected.inputs))
+        .unwrap_or_default();
+    for (mut current, mut rewind, human, player, action, control) in &mut humans {
         if !human.connected() {
             // Disconnected bodies stand still instead of replaying the last held keys.
             current.0 = PlayerInput::default();
             continue;
         }
-        if let Some(action) = action {
+        if let Some((_, input)) = scripted.iter().find(|(id, _)| *id == player.client_id) {
+            current.0 = input.clone();
+        } else if let Some(action) = action {
             current.0 = action.0.clone();
         }
         rewind.0 = control

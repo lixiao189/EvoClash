@@ -170,12 +170,20 @@ fn spawn_props(
 
 fn track_obstacles(mut obstacles: ResMut<Obstacles>, props: Query<(&Pos, &Prop, &Vitals)>) {
     obstacles.0.clear();
-    obstacles.0.extend(
-        props
-            .iter()
-            .filter(|(.., v)| v.alive)
-            .map(|(p, prop, _)| (p.0, prop.kind.radius())),
-    );
+    let mut solids: Vec<(Vec2, f32)> = props
+        .iter()
+        .filter(|(.., v)| v.alive)
+        .map(|(p, prop, _)| (p.0, prop.kind.radius()))
+        .collect();
+    // Query order follows entity ids, which a replay does not reproduce.
+    solids.sort_by(|a, b| {
+        a.0.x
+            .to_bits()
+            .cmp(&b.0.x.to_bits())
+            .then(a.0.y.to_bits().cmp(&b.0.y.to_bits()))
+            .then(a.1.to_bits().cmp(&b.1.to_bits()))
+    });
+    obstacles.0.extend(solids);
 }
 
 /// Radiation chews through anyone not sealed in power armor.
@@ -348,6 +356,40 @@ fn crack_safes(
     });
 }
 
+/// Same target and attacker always resolve in the same order, independent of entity ids.
+fn sort_damage(
+    queue: &mut DamageQueue,
+    players: &Query<&Player>,
+    monsters: &Query<&crate::monsters::Brain>,
+    props: &Query<(&Prop, &Pos, &mut Vitals)>,
+) {
+    let target_key = |entity: Entity| -> (u8, u64, u32) {
+        if let Ok(player) = players.get(entity) {
+            return (0, player.client_id, 0);
+        }
+        if let Ok(brain) = monsters.get(entity) {
+            return (1, brain.serial as u64, 0);
+        }
+        if let Ok((_, pos, _)) = props.get(entity) {
+            return (2, pos.0.x.to_bits() as u64, pos.0.y.to_bits());
+        }
+        (9, 0, 0)
+    };
+    let attacker_key = |entity: Option<Entity>| -> (u8, u64) {
+        let Some(entity) = entity else {
+            return (9, 0);
+        };
+        let (class, id, _) = target_key(entity);
+        (class, id)
+    };
+    queue.0.sort_by(|a, b| {
+        target_key(a.target)
+            .cmp(&target_key(b.target))
+            .then(attacker_key(a.attacker).cmp(&attacker_key(b.attacker)))
+            .then(a.amount.to_bits().cmp(&b.amount.to_bits()))
+    });
+}
+
 /// Props take damage here; everything aimed elsewhere is left for the other resolvers.
 fn resolve_prop_damage(
     mut commands: Commands,
@@ -357,9 +399,11 @@ fn resolve_prop_damage(
     mut blasts: ResMut<Blasts>,
     mut props: Query<(&Prop, &Pos, &mut Vitals)>,
     players: Query<&Player>,
+    monsters: Query<&crate::monsters::Brain>,
     state: Query<&MatchState>,
     rng: Res<SimRng>,
 ) {
+    sort_damage(&mut queue, &players, &monsters, &props);
     let playing = state.iter().any(|s| s.phase == Phase::Playing);
     rng.with(playing, Stream::Loot, |mut rng| {
         queue.0.retain(|dmg| {
