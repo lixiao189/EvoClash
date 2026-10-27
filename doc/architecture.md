@@ -29,7 +29,7 @@ Rust · Bevy 0.20（客户端只在浏览器里跑，目标 `wasm32`）· lighty
 - `items/`：护甲、拾取和掉落。`inventory.rs` 是复制的 `Loadout`：枪、枪、近战、投掷，外加 6 格包和每种 `AmmoKind` 一个弹药袋。枪本身没有子弹。`weapons.rs` 里每种武器是一个类型，近战有距离和扇形（客户端的挥砍按这个画），远程有弹道、弹药和 `volley`。线上 id 经 `WeaponKind::arm` / `spec` / `melee` / `ranged` 取回。
 - `rng.rs`：`SplitMix64`、`mix`、`stream_seed`。公开房和私人房的对局随机都从这里来。
 - `net.rs`：tick 间隔、`PROTOCOL_ID`、netcode 密钥。线上格式一变就要改 `PROTOCOL_ID`，旧客户端在握手时被拒绝。
-- `api`（在 `lib.rs`）：匹配服务的 JSON。错误体是 `{error, message, retry_after?}`。
+- `api`（在 `lib.rs`）：匹配服务的 JSON。错误体是 `{error, message, retry_after?}`。加入响应 `JoinResponse` 的 `spectate: true` 表示以旁观者身份加入。
 
 道具（箱子、油桶、保险柜）按 `ArenaMap::props` 生成成复制实体，经 `Obstacles` 传进 `sim::step_movement`，会挡移动。
 
@@ -48,7 +48,7 @@ Rust · Bevy 0.20（客户端只在浏览器里跑，目标 `wasm32`）· lighty
 `logs/` 下两类文本日志（`--log-dir` 可改）：
 
 - `room-<match_id>.log`：房间种子、房间码、是否私人、设置、房主、`match_index`、阶段。每次变化追加一行。给以后的大厅恢复用，现在还不读它。
-- `match-<match_id>-<match_index>.log`：Playing 开始时写下 `PROTOCOL_ID`、构建号（`EVOCLASH_BUILD`，否则 `dev`）、种子、设置、按 `client_id` 排序的名单。之后每个 tick 只记外部输入：`PlayerInput`、`PlayerCommand`、`InventoryMove`、`RoomCommand`、连接 / 断线 / 离开。机器人、野怪和掉落不记，靠种子推出来。每 640 tick 一条摘要，哈希按 `client_id` 排序后的位置、血量、分数和经验。Results 结束时写分数、击杀序列和带时间戳的 `end`。
+- `match-<match_id>-<match_index>.log`：Playing 开始时写下 `PROTOCOL_ID`、构建号（`EVOCLASH_BUILD`，否则 `dev`）、种子、设置、按 `client_id` 排序的名单。之后每个 tick 只记外部输入：`PlayerInput`、`PlayerCommand`、`InventoryMove`、`RoomCommand`、连接 / 断线 / 离开，以及旁观者的进出（`spectate` / `unspectate`）和切换跟随。旁观者不进摘要哈希。机器人、野怪和掉落不记，靠种子推出来。每 640 tick 一条摘要，哈希按 `client_id` 排序后的位置、血量、分数和经验。Results 结束时写分数、击杀序列和带时间戳的 `end`。
 
 内存缓冲，每 16 tick 追加并 `fsync` 一次。崩溃最多丢 0.25 秒输入。带 `end` 的日志在 16 分钟后删除；没写完的留给崩溃恢复，现在不删。
 
@@ -60,9 +60,11 @@ Rust · Bevy 0.20（客户端只在浏览器里跑，目标 `wasm32`）· lighty
 
 席位预留、签名连接令牌（`tokens.rs`）、心跳喂出来的注册表（`registry.rs`）、房间码（`rooms.rs`）、本地拉起进程（`fleet.rs`；`--no-launch` 只接收外面已经启动的服务器）、在 `/play/` 提供网页（`--web-dir`，默认可执行文件旁边的 `web/`）。
 
-心跳每 2 秒一次，带人数、`max_players`（固定 8）、`tick_us`、证书哈希、阶段、`phase_left_secs`、真人 / 机器人数量、是否私人、房间码、`room_seed`、`match_index`、`join_mode`（`none` 或 `lobby`）、`exiting`。`players` 仍是真人数。匹配服务只信 `join_mode`，不自己重算阶段。主机名会展开成全部解析到的地址（headless Service 的每个副本）。大约 6 秒没有心跳就摘掉。`exiting: true` 表示正常退出前的最后一次心跳，用来和崩溃区分；崩溃后的自动拉起还没做。
+心跳每 2 秒一次，带人数、`max_players`（固定 8）、`tick_us`、证书哈希、阶段、`phase_left_secs`、真人 / 机器人数量、是否私人、房间码、`room_seed`、`match_index`、`join_mode`（`none`、`lobby` 或 `spectate`：Playing / Results 中旁观者少于 4 且没在排空）、`spectators`（旁观人数，不算在 `players` 里）、`exiting`。`players` 仍是真人数。匹配服务只信 `join_mode`，不自己重算阶段。主机名会展开成全部解析到的地址（headless Service 的每个副本）。大约 6 秒没有心跳就摘掉。`exiting: true` 表示正常退出前的最后一次心跳，用来和崩溃区分；崩溃后的自动拉起还没做。
 
-快速开始：跳过私人房和 `join_mode != lobby` 的局，按真人数从多到少，再按 `phase_left_secs` 从多到少（`None` 在最后）。
+快速开始：跳过私人房。先在 `join_mode == lobby` 的局里按真人数从多到少、再按 `phase_left_secs` 从多到少（`None` 在最后）挑；没有的话，在 `join_mode == spectate` 的局里挑「本局剩余 + 结算」最短的进旁观；都没有就拉起新局。旁观席有单独的预留，上限 4。私人房在对局中且 `join_mode == spectate` 时，房间码加入直接进旁观。
+
+旁观者是一条连接，不生成角色，带一个只复制给本人的 `Spectator { following, queue_pos }`。服务器用被跟随者的位置做可见性（`HiddenFrom`、陷阱受众），忽略旁观者的 `PlayerInput` / `PlayerCommand` / `InventoryMove`。席位只在 Lobby 的 `Input` 里升格（留下的真人 → 旁观者按到达顺序 → 机器人）。
 
 `POST /v1/rooms` 的请求体是 `{name}`，返回带 `room_code` 的加入响应。拉起参数是 `--private --room-code CODE --room-seed N --bots 8`，`--max-players` 固定 8，房间始终补满 8 人；不带 `--single-match`。
 
@@ -115,7 +117,7 @@ Rust · Bevy 0.20（客户端只在浏览器里跑，目标 `wasm32`）· lighty
 - **对局进程崩溃**：目前只影响这一局。匹配服务大约 6 秒内发现心跳中断并摘除，新人去别的局。本地 `fleet` 能看见子进程退出，但还不会用 `--recover` 重启。
 - **匹配服务重启**：对局进程不是它的子进程（`kill_on_drop(false)`），不受影响。新实例靠心跳在大约 2 秒内重新认领。重连密钥是 HMAC，不需要会话存储。注册表本身在内存里，重启会丢掉「正在恢复」这种还没落盘的状态。
 - **玩家断线**：角色保留 20 秒，装备和分数都在。客户端退避重连，用重连密钥换新令牌，接回原来的角色。
-- **多副本**：`--peer` 列出其他副本，新局向每一个发心跳。每个副本都有完整视图，都能分配。席位预留互不共享，偶尔超卖时由服务器的 netcode 人数上限（8 人）兜底，被拒的客户端会换一局。
+- **多副本**：`--peer` 列出其他副本，新局向每一个发心跳。每个副本都有完整视图，都能分配。席位预留互不共享，偶尔超卖时由服务器的 netcode 人数上限（8 名战斗者 + 4 名旁观者 = 12）兜底，被拒的客户端会换一局。
 - **客户端**：从哪个地址打开页面，就向哪个地址要匹配。原局没了就自动加入新局。
 - **排空**：`POST /v1/matches/{id}/drain`，或给进程发 SIGTERM（再发一次立刻退出）。当前局打完再退，不中途踢人。没有真人的局直接退出。匹配服务也响应 SIGTERM。
 - **令牌**：匹配服务用共享密钥签名，30 秒过期。名字在加密的 user data 里。生产必须设 `EVOCLASH_NETCODE_KEY`（64 位十六进制），否则用开发密钥。
