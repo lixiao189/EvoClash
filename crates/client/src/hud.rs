@@ -58,6 +58,8 @@ enum HudText {
     BossEta,
     /// Name and health numbers above the boss bar.
     BossName,
+    /// Final standings, under the results bar.
+    ResultsRanking,
 }
 
 /// The XP meter (bar behind the fill). Hidden in the lobby.
@@ -289,7 +291,7 @@ fn results_button(font: &UiFont, kind: ResultsButton, value: &str) -> impl Bundl
 }
 
 /// Under the winner line. Staying for the next round is automatic; 离开 asks the server to
-/// drop us and returns to the name page.
+/// drop us and returns to the name page. The final ranking sits below this row.
 fn spawn_results_bar(commands: &mut Commands, font: &UiFont) {
     commands
         .spawn((
@@ -297,22 +299,46 @@ fn spawn_results_bar(commands: &mut Commands, font: &UiFont) {
             Visibility::Hidden,
             Node {
                 position_type: PositionType::Absolute,
-                top: Val::Percent(50.0),
+                top: Val::Percent(48.0),
                 width: Val::Percent(100.0),
-                justify_content: JustifyContent::Center,
+                flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
-                column_gap: Val::Px(16.0),
+                row_gap: Val::Px(10.0),
                 ..default()
             },
         ))
-        .with_children(|row| {
-            row.spawn((
-                Text::new("留在房间即可进入下一局"),
-                font.sized(15.0),
-                TextColor(Color::srgba(1.0, 1.0, 1.0, 0.78)),
-                TextShadow::default(),
+        .with_children(|column| {
+            column
+                .spawn(Node {
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(16.0),
+                    ..default()
+                })
+                .with_children(|row| {
+                    row.spawn((
+                        Text::new("留在房间即可进入下一局"),
+                        font.sized(15.0),
+                        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.78)),
+                        TextShadow::default(),
+                    ));
+                    row.spawn(results_button(font, ResultsButton::Leave, "离开"));
+                });
+            column.spawn((
+                Node {
+                    padding: UiRect::axes(Val::Px(18.0), Val::Px(8.0)),
+                    border_radius: BorderRadius::all(Val::Px(6.0)),
+                    ..default()
+                },
+                BackgroundColor(PANEL_BG),
+                children![text_node(
+                    font,
+                    15.0,
+                    HudText::ResultsRanking,
+                    Node::default(),
+                    Justify::Center,
+                )],
             ));
-            row.spawn(results_button(font, ResultsButton::Leave, "离开"));
         });
 }
 
@@ -967,7 +993,10 @@ fn update_hud(
                 } else {
                     let mut rows: Vec<(&Player, &Stats)> = players.iter().collect();
                     rows.sort_by(|a, b| {
-                        b.1.score.cmp(&a.1.score).then(a.1.deaths.cmp(&b.1.deaths))
+                        b.1.score
+                            .cmp(&a.1.score)
+                            .then(b.1.kills.cmp(&a.1.kills))
+                            .then(a.1.deaths.cmp(&b.1.deaths))
                     });
                     let mut out = String::from("等级  分数  击杀/阵亡\n");
                     for (player, stats) in rows {
@@ -983,6 +1012,32 @@ fn update_hud(
                     out
                 }
             }
+            HudText::ResultsRanking => match state.filter(|s| s.phase == Phase::Results) {
+                Some(_) => {
+                    let mut rows: Vec<(&Player, &Stats)> = players.iter().collect();
+                    rows.sort_by(|a, b| {
+                        b.1.score
+                            .cmp(&a.1.score)
+                            .then(b.1.kills.cmp(&a.1.kills))
+                            .then(a.1.deaths.cmp(&b.1.deaths))
+                    });
+                    let mut out = String::from("最终排名");
+                    for (i, (player, stats)) in
+                        rows.iter().take(ROOM_COMBATANTS as usize).enumerate()
+                    {
+                        out.push_str(&format!(
+                            "\n{}. {}  {}  ({}/{})",
+                            i + 1,
+                            player.name,
+                            stats.score,
+                            stats.kills,
+                            stats.deaths
+                        ));
+                    }
+                    out
+                }
+                None => String::new(),
+            },
             HudText::Feed => feed
                 .0
                 .iter()

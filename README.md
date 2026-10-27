@@ -14,10 +14,10 @@
 make run
 ```
 
-然后用 Chrome、Edge 或 Firefox 打开 <http://127.0.0.1:8080>，输入名字即可开玩。匹配服务同时提供网页客户端（`/play/`）和匹配 API，并按需拉起对局进程（带 6 个机器人）。多开几个标签页就是多个玩家。
+然后用 Chrome、Edge 或 Firefox 打开 <http://127.0.0.1:8080>，输入名字即可开玩。匹配服务同时提供网页客户端（`/play/`）和匹配 API，并按需拉起对局进程；每局固定 6 名战斗者，机器人补位、真人加入时让位。多开几个标签页就是多个玩家。
 
 - `make watch`：另开一个终端，改客户端代码后自动重新构建，刷新页面即可。
-- `make run BOTS=0 LISTEN=127.0.0.1:9000`：调整机器人数量和端口。
+- `make run LISTEN=127.0.0.1:9000`：换个端口（每局固定 6 人，机器人由服务器补满）。
 - `make check`：本地跑一遍 CI 的 fmt / clippy（含 wasm）/ test。
 
 浏览器只允许 HTTPS 页面（`localhost` / `127.0.0.1` 除外）使用 WebTransport，所以局域网或公网上的玩家要通过 HTTPS 访问（见下文 Kubernetes 部署的 ingress）。
@@ -26,7 +26,7 @@ make run
 
 ## 玩法
 
-木棍出生，搜刮 T1–T4 的枪和护甲，死亡掉落全部装备。8 分钟一局，先拿到 25 分者获胜。公开房有 20 秒大厅，私人房用 4 位房间码。规则、数值和房间流程在 [doc/gameplay.md](doc/gameplay.md)。
+木棍出生，搜刮 T1–T4 的枪和护甲，死亡掉落全部装备。8 分钟一局，每局固定 6 名战斗者（真人优先、机器人补位）；没有先到分即胜的规则，打满 8 分钟后按最终分数排名决出胜者，同分先比击杀数、再比死亡数。公开房有 20 秒大厅，私人房用 4 位房间码。规则、数值和房间流程在 [doc/gameplay.md](doc/gameplay.md)。
 
 ## 架构
 
@@ -58,7 +58,7 @@ helm install evoclash oci://ghcr.io/lixiao189/charts/evoclash --version 0.1.0 -n
 # 3. 用浏览器打开 https://play.example.com/play/
 ```
 
-常用参数见 `deploy/helm/evoclash/values.yaml`：镜像标签（默认等于 chart 的 `appVersion`）、匹配服务副本与 HPA、每局人数/机器人、预热池大小、资源配额、节点调度等。只想预览生成的 Pod 清单：
+常用参数见 `deploy/helm/evoclash/values.yaml`：镜像标签（默认等于 chart 的 `appVersion`）、匹配服务副本与 HPA、每局人数与机器人（固定 6 人）、预热池大小、资源配额、节点调度等。只想预览生成的 Pod 清单：
 
 ```bash
 helm template evoclash deploy/helm/evoclash -n evoclash --set fleet.autoscaler.bufferSize=5

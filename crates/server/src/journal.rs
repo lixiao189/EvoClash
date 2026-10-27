@@ -1052,8 +1052,8 @@ fn blank_config(header: &Header) -> ServerConfig {
         port: 0,
         public_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         match_id: "replay".into(),
-        max_players: 8,
-        min_combatants: header.settings.bots.unwrap_or(0) as usize,
+        max_players: ROOM_COMBATANTS as usize,
+        min_combatants: ROOM_COMBATANTS as usize,
         matchmakers: Vec::new(),
         single_match: false,
         monsters: header.settings.monsters,
@@ -1407,13 +1407,13 @@ mod tests {
         *done = true;
     }
 
-    fn test_config(dir: &Path, seed: u64, bots: usize, monsters: bool) -> ServerConfig {
+    fn test_config(dir: &Path, seed: u64, monsters: bool) -> ServerConfig {
         ServerConfig {
             port: 0,
             public_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             match_id: "match".into(),
-            max_players: 8,
-            min_combatants: bots,
+            max_players: ROOM_COMBATANTS as usize,
+            min_combatants: ROOM_COMBATANTS as usize,
             matchmakers: Vec::new(),
             single_match: false,
             monsters,
@@ -1585,7 +1585,7 @@ mod tests {
     #[test]
     fn replay_bot_match_matches_scores_kills_and_digests() {
         let dir = temp("bots");
-        let app = recording_app(test_config(&dir, 0xB07, 6, true), 6);
+        let app = recording_app(test_config(&dir, 0xB07, true), 6);
         let played = play(app, 1280, None);
         assert_replay(&played);
     }
@@ -1593,7 +1593,7 @@ mod tests {
     #[test]
     fn replay_two_humans_matches_scores_kills_and_digests() {
         let dir = temp("humans");
-        let mut app = recording_app(test_config(&dir, 0xA11, 0, false), 2);
+        let mut app = recording_app(test_config(&dir, 0xA11, false), 2);
         spawn_humans(&mut app, &[11, 22]);
         let played = play(app, 1280, Some((11, 22)));
         let text = fs::read_to_string(&played.path).unwrap();
@@ -1607,7 +1607,7 @@ mod tests {
     #[test]
     fn replay_names_the_first_mismatched_digest_tick() {
         let dir = temp("poison");
-        let app = recording_app(test_config(&dir, 0xB07, 6, true), 6);
+        let app = recording_app(test_config(&dir, 0xB07, true), 6);
         let played = play(app, 1280, None);
         let report = replay_log(
             &played.path,
@@ -1647,7 +1647,7 @@ mod tests {
         let dir = temp("startup-purge");
         fs::write(dir.join("stale.log"), "end 1\n").unwrap();
         fs::write(dir.join("live.log"), "t 1 digest 0\n").unwrap();
-        let mut config = test_config(&dir, 1, 0, false);
+        let mut config = test_config(&dir, 1, false);
         config.logging = true;
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
@@ -1665,7 +1665,7 @@ mod tests {
     #[ignore]
     fn replay_eight_minutes() {
         let dir = temp("eight");
-        let app = recording_app(test_config(&dir, 0xB07, 6, true), 6);
+        let app = recording_app(test_config(&dir, 0xB07, true), 6);
         let played = play(app, 8 * 60 * 64, None);
         let started = std::time::Instant::now();
         let report = replay_log(&played.path, ReplayOptions::default());

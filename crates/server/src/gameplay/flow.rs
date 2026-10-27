@@ -1,9 +1,21 @@
 //! Loot spawns, match phases, reset and flushing outgoing events.
 
+use std::cmp::Reverse;
+
 use evoclash_game::rng::mix;
 
 use super::*;
 use crate::rng::{SimRng, Stream};
+
+/// Final-standings key: score desc, kills desc, deaths asc, client_id asc. Higher wins.
+pub(crate) fn final_rank(
+    score: u32,
+    kills: u32,
+    deaths: u32,
+    client_id: u64,
+) -> (u32, u32, Reverse<u32>, Reverse<u64>) {
+    (score, kills, Reverse(deaths), Reverse(client_id))
+}
 
 pub(super) fn loot_spawner(
     mut commands: Commands,
@@ -144,10 +156,15 @@ pub fn match_flow(
                     fire: false,
                 });
             }
-            let leader = players.iter().max_by_key(|(_, s)| s.score);
-            let won = leader.is_some_and(|(_, s)| s.score >= SCORE_TO_WIN);
-            if won || state.ticks_left == 0 {
-                let winner = leader.map(|(p, _)| p.name.clone());
+            // No point target: the match always runs the full 8 minutes, then the final
+            // scoreboard decides (score, then kills, then fewer deaths, then lower client_id).
+            if state.ticks_left == 0 {
+                let winner = players
+                    .iter()
+                    .max_by_key(|(player, stats)| {
+                        final_rank(stats.score, stats.kills, stats.deaths, player.client_id)
+                    })
+                    .map(|(player, _)| player.name.clone());
                 outbox.announce(match &winner {
                     Some(name) => format!("{name} 赢得了本局！"),
                     None => "本局结束".to_string(),
@@ -224,7 +241,10 @@ fn begin_playing(
         }
     }
     info!("match started with {combatants} combatants");
-    outbox.announce(format!("对局开始！先拿到 {SCORE_TO_WIN} 分者获胜"));
+    outbox.announce(format!(
+        "对局开始！{} 分钟后按积分排名决出胜者",
+        MATCH_TICKS / (60 * TICKS_PER_SEC)
+    ));
 }
 
 fn begin_lobby(

@@ -888,14 +888,14 @@ mod tests {
         let full = classify_join_error(
             "full",
             409,
-            "房间已满（8/8）。请稍后再试，或创建自己的房间。",
+            "房间已满（6/6）。请稍后再试，或创建自己的房间。",
             None,
             false,
         );
         assert_eq!(
             full,
             JoinAction::WaitForPlayer {
-                notice: "房间已满（8/8）。请稍后再试，或创建自己的房间。\n点击或按空格重试".into(),
+                notice: "房间已满（6/6）。请稍后再试，或创建自己的房间。\n点击或按空格重试".into(),
                 offers: vec![JoinOffer::CreateRoom, JoinOffer::ChangeRoom],
             }
         );

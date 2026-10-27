@@ -6,7 +6,7 @@
 use bevy::prelude::*;
 use bevy::ui::RelativeCursorPosition;
 use evoclash_game::protocol::{
-    CommandChannel, MatchState, Phase, Player, RoomCommand, RoomSettings,
+    CommandChannel, MatchState, Phase, Player, ROOM_COMBATANTS, RoomCommand, RoomSettings,
 };
 use lightyear::prelude::{Client, MessageSender};
 
@@ -30,7 +30,6 @@ const PUBLIC_ROOM: &str = "公开房间";
 const PRACTICE: &str = "练习场：不计分、不掉落，开局会重置";
 const RECOVERING: &str = "服务器恢复中…";
 const WAITING_HOST: &str = "等待房主开始";
-const NEED_TWO: &str = "至少需要 2 名玩家";
 
 const NORMAL_BG: Color = Color::srgba(0.12, 0.12, 0.12, 0.85);
 const HOVER_BG: Color = Color::srgba(0.3, 0.28, 0.2, 0.95);
@@ -82,12 +81,8 @@ enum Chrome {
     Leave,
     Start,
     Cancel,
-    Bots(u8),
     Monsters(bool),
 }
-
-#[derive(Component)]
-struct NeedPlayers;
 
 #[derive(Component)]
 struct SettingsPanel;
@@ -120,9 +115,7 @@ struct RoomView {
     host: bool,
     phase: Option<Phase>,
     countdown: bool,
-    bots: Option<u8>,
     monsters: bool,
-    humans: usize,
     code: String,
 }
 
@@ -131,7 +124,6 @@ impl RoomView {
         settings: &Query<&RoomSettings>,
         state: &Query<&MatchState>,
         me: &Query<&Player, With<LocalPlayer>>,
-        players: &Query<&Player>,
     ) -> Self {
         let settings = settings.iter().next();
         let state = state.iter().next();
@@ -144,9 +136,7 @@ impl RoomView {
             host,
             phase: state.map(|s| s.phase),
             countdown: state.is_some_and(|s| s.countdown_active),
-            bots: settings.and_then(|s| s.bots),
             monsters: settings.is_some_and(|s| s.monsters),
-            humans: players.iter().filter(|p| !p.bot).count(),
             code: settings.map(|s| s.code.clone()).unwrap_or_default(),
         }
     }
@@ -167,15 +157,11 @@ impl RoomView {
     }
 
     fn can_start(&self) -> bool {
-        self.host && self.lobby() && !self.countdown && (self.bots.is_some() || self.humans >= 2)
+        self.host && self.lobby() && !self.countdown
     }
 
     fn can_cancel(&self) -> bool {
         self.host && self.lobby() && self.countdown
-    }
-
-    fn need_two(&self) -> bool {
-        self.host && self.lobby() && !self.countdown && self.bots.is_none() && self.humans < 2
     }
 }
 
@@ -346,18 +332,6 @@ fn spawn_lobby_ui(mut commands: Commands, font: Res<UiFont>) {
                     row.spawn(chrome_button(&font, Chrome::Start, "开始"));
                     row.spawn(chrome_button(&font, Chrome::Cancel, "取消"));
                 });
-                body.spawn((
-                    NeedPlayers,
-                    Text::new(NEED_TWO),
-                    font.sized(14.0),
-                    TextColor(Color::srgb(1.0, 0.62, 0.45)),
-                    TextShadow::default(),
-                    Node {
-                        display: Display::None,
-                        margin: UiRect::top(Val::Px(2.0)),
-                        ..default()
-                    },
-                ));
             });
             col.spawn((
                 SettingsPanel,
@@ -384,11 +358,6 @@ fn spawn_lobby_ui(mut commands: Commands, font: Res<UiFont>) {
                     "房间设置",
                     Color::srgba(1.0, 0.9, 0.7, 0.9),
                 ));
-                panel.spawn(label(&font, 14.0, "补位至", Color::WHITE));
-                panel.spawn(chrome_button(&font, Chrome::Bots(0), "关"));
-                for n in 2..=8 {
-                    panel.spawn(chrome_button(&font, Chrome::Bots(n), &n.to_string()));
-                }
                 panel.spawn(label(&font, 14.0, "怪物", Color::WHITE));
                 panel.spawn(chrome_button(&font, Chrome::Monsters(false), "关"));
                 panel.spawn(chrome_button(&font, Chrome::Monsters(true), "开"));
@@ -475,7 +444,6 @@ fn layout_lobby(
     settings: Query<&RoomSettings>,
     state: Query<&MatchState>,
     me: Query<&Player, With<LocalPlayer>>,
-    players: Query<&Player>,
     mut column: Query<&mut Node, With<LobbyColumn>>,
     mut body: Query<&mut Node, (With<LobbyBody>, Without<LobbyColumn>)>,
     mut panel: Query<
@@ -486,17 +454,8 @@ fn layout_lobby(
             Without<LobbyBody>,
         ),
     >,
-    mut need: Query<
-        &mut Node,
-        (
-            With<NeedPlayers>,
-            Without<LobbyColumn>,
-            Without<LobbyBody>,
-            Without<SettingsPanel>,
-        ),
-    >,
 ) {
-    let view = RoomView::read(&settings, &state, &me, &players);
+    let view = RoomView::read(&settings, &state, &me);
     // Below the match clock and boss bar; the lobby itself stays at the top.
     let top = Val::Px(if view.lobby() { 12.0 } else { 148.0 });
     for mut node in &mut column {
@@ -522,16 +481,6 @@ fn layout_lobby(
     for mut node in &mut panel {
         if node.display != settings_display {
             node.display = settings_display;
-        }
-    }
-    let need_display = if view.need_two() {
-        Display::Flex
-    } else {
-        Display::None
-    };
-    for mut node in &mut need {
-        if node.display != need_display {
-            node.display = need_display;
         }
     }
 }
@@ -563,7 +512,7 @@ fn update_lobby(
     let countdown_on = s.countdown_active || private;
     for (kind, mut text, mut node) in &mut lines {
         let (value, on) = match kind {
-            LobbyLine::Humans => (format!("真人 {humans}/8"), true),
+            LobbyLine::Humans => (format!("真人 {humans}/{ROOM_COMBATANTS}"), true),
             LobbyLine::Bots => (format!("机器人 {bots}"), true),
             LobbyLine::Countdown => (countdown.clone(), countdown_on),
         };
@@ -696,7 +645,6 @@ fn drive_room_controls(
     mouse: Option<Res<ButtonInput<MouseButton>>>,
     settings: Query<&RoomSettings>,
     state: Query<&MatchState>,
-    players: Query<&Player>,
     me: Query<&Player, With<LocalPlayer>>,
     titles: Query<(&RelativeCursorPosition, &InheritedVisibility), With<RoomTitle>>,
     mut chrome: Query<(
@@ -713,7 +661,7 @@ fn drive_room_controls(
     if menu.0 {
         return;
     }
-    let view = RoomView::read(&settings, &state, &me, &players);
+    let view = RoomView::read(&settings, &state, &me);
     let pressed = mouse.is_some_and(|m| m.just_pressed(MouseButton::Left));
     let mut hit: Option<Chrome> = None;
     for (chrome, cursor, vis, mut node, mut bg, mut border) in &mut chrome {
@@ -721,8 +669,6 @@ fn drive_room_controls(
             Chrome::Leave => (true, view.lobby(), false),
             Chrome::Start => (view.host, view.can_start(), false),
             Chrome::Cancel => (view.host, view.can_cancel(), false),
-            Chrome::Bots(0) => (true, view.editable(), view.bots.is_none()),
-            Chrome::Bots(n) => (true, view.editable(), view.bots == Some(n)),
             Chrome::Monsters(on) => (true, view.editable(), view.monsters == on),
         };
         let display = if show { Display::Flex } else { Display::None };
@@ -749,16 +695,9 @@ fn drive_room_controls(
             Chrome::Leave => Some(RoomCommand::Leave),
             Chrome::Start => Some(RoomCommand::Start),
             Chrome::Cancel => Some(RoomCommand::Cancel),
-            Chrome::Bots(n) => {
-                let bots = (n >= 2).then_some(n);
-                (view.editable() && view.bots != bots).then_some(RoomCommand::SetSettings {
-                    bots,
-                    monsters: view.monsters,
-                })
-            }
             Chrome::Monsters(on) => {
                 (view.editable() && view.monsters != on).then_some(RoomCommand::SetSettings {
-                    bots: view.bots,
+                    bots: Some(ROOM_COMBATANTS),
                     monsters: on,
                 })
             }

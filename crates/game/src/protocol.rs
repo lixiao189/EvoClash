@@ -455,8 +455,11 @@ pub struct MatchState {
     pub boss_eta: u32,
 }
 
+/// Every room fields this many combatants: humans first, bots fill the rest.
+pub const ROOM_COMBATANTS: u8 = 6;
+
 /// Lobby settings for this room. One replicated entity, visible to everyone.
-/// `bots` is `None` when fill is off, or `Some(2..=8)` for the combatant target.
+/// `bots` is always `Some(ROOM_COMBATANTS)` in production; tests may override it.
 #[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Reflect, Default)]
 pub struct RoomSettings {
     pub bots: Option<u8>,
@@ -471,6 +474,8 @@ pub struct RoomSettings {
 /// Host (and Leave) commands on the ordered reliable command channel.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum RoomCommand {
+    // `bots` stays on the wire for compatibility, but production rooms always fill to
+    // `ROOM_COMBATANTS`; only `monsters` changes.
     SetSettings { bots: Option<u8>, monsters: bool },
     Start,
     Cancel,

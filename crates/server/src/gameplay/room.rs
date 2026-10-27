@@ -22,12 +22,8 @@ pub(super) enum RoomEffect {
 }
 
 pub(super) fn settings_from_config(config: &ServerConfig) -> RoomSettings {
-    let bots = match config.min_combatants {
-        0 | 1 => None,
-        n => Some(n.clamp(2, 8) as u8),
-    };
     RoomSettings {
-        bots,
+        bots: Some(ROOM_COMBATANTS),
         monsters: config.monsters,
         host: 0,
         private_room: config.private,
@@ -36,13 +32,6 @@ pub(super) fn settings_from_config(config: &ServerConfig) -> RoomSettings {
         } else {
             String::new()
         },
-    }
-}
-
-fn bots_ok(bots: Option<u8>) -> bool {
-    match bots {
-        None => true,
-        Some(n) => (2..=8).contains(&n),
     }
 }
 
@@ -61,7 +50,6 @@ pub fn apply_room_command(
     sender: u64,
     state: &mut MatchState,
     settings: &mut RoomSettings,
-    connected_humans: usize,
 ) -> RoomEffect {
     if matches!(cmd, RoomCommand::Leave) {
         return RoomEffect::Leave;
@@ -71,20 +59,18 @@ pub fn apply_room_command(
     }
     match cmd {
         RoomCommand::Leave => RoomEffect::Leave,
-        RoomCommand::SetSettings { bots, monsters } => {
+        RoomCommand::SetSettings { monsters, .. } => {
             // Lobby only, and not once the host has started the countdown.
-            if state.phase != Phase::Lobby || state.countdown_active || !bots_ok(*bots) {
+            if state.phase != Phase::Lobby || state.countdown_active {
                 return RoomEffect::Ignore;
             }
-            settings.bots = *bots;
+            // Every room fields ROOM_COMBATANTS: the host chooses monsters but not the fill.
+            settings.bots = Some(ROOM_COMBATANTS);
             settings.monsters = *monsters;
             RoomEffect::Updated
         }
         RoomCommand::Start => {
             if state.phase != Phase::Lobby || state.countdown_active {
-                return RoomEffect::Ignore;
-            }
-            if settings.bots.is_none() && connected_humans < 2 {
                 return RoomEffect::Ignore;
             }
             state.countdown_active = true;
@@ -149,10 +135,6 @@ pub(super) fn read_room_commands(
             inbox.push((link, cmds));
         }
     }
-    let connected = humans
-        .iter()
-        .filter(|(_, human, _, _)| human.connected() && !human.left)
-        .count();
     let scripted = injected
         .as_mut()
         .map(|injected| std::mem::take(&mut injected.rooms))
@@ -172,9 +154,7 @@ pub(super) fn read_room_commands(
         }) else {
             continue;
         };
-        if apply_room_command(&cmd, client_id, &mut state, &mut settings, connected)
-            != RoomEffect::Leave
-        {
+        if apply_room_command(&cmd, client_id, &mut state, &mut settings) != RoomEffect::Leave {
             continue;
         }
         if let Some((_, mut human, _, _)) = humans.iter_mut().find(|(e, ..)| *e == entity) {
@@ -199,9 +179,7 @@ pub(super) fn read_room_commands(
             if let Some(trace) = trace.as_mut() {
                 trace.push(format!("room {client_id} {}", fmt_room(cmd)));
             }
-            if apply_room_command(cmd, client_id, &mut state, &mut settings, connected)
-                != RoomEffect::Leave
-            {
+            if apply_room_command(cmd, client_id, &mut state, &mut settings) != RoomEffect::Leave {
                 continue;
             }
             if let Some((_, mut human, _, _)) = humans.iter_mut().find(|(e, ..)| *e == entity) {

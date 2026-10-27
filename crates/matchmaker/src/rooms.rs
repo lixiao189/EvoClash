@@ -15,7 +15,7 @@ pub const RESULTS_SECS: u32 = 12;
 
 pub const BAD_CODE: &str = "房间码是 4 位字母或数字。";
 pub const CLOSED: &str = "房间已关闭。你可以创建新的私人房间。";
-pub const FULL: &str = "房间已满（8/8）。请稍后再试，或创建自己的房间。";
+pub const FULL: &str = "房间已满（6/6）。请稍后再试，或创建自己的房间。";
 pub const STARTING: &str = "房间正在开局，请稍候。";
 pub const RESULTS: &str = "本局刚结束，马上回到等待大厅…";
 pub const RATE: &str = "尝试次数过多，请一分钟后再试。";

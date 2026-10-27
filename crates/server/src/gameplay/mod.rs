@@ -57,7 +57,6 @@ const PRIVATE_IDLE_CLOSE_TICKS: u32 = 30 * 60 * TICKS_PER_SEC;
 pub(super) const LOBBY_RESPAWN_TICKS: u16 = (2 * TICKS_PER_SEC) as u16;
 pub(crate) const FIRST_VAULT_TICKS: u32 = 60 * TICKS_PER_SEC;
 const VAULT_INTERVAL_TICKS: u32 = 90 * TICKS_PER_SEC;
-pub const SCORE_TO_WIN: u32 = 25;
 const DROP_TTL_TICKS: u32 = 30 * TICKS_PER_SEC;
 /// Fresh spawns can't be hurt for this long (or until they shoot), so nobody gets spawn-camped.
 pub(crate) const SPAWN_SHIELD_TICKS: u16 = (2.5 * TICKS_PER_SEC as f32) as u16;

@@ -382,12 +382,84 @@ fn lobby_kill_does_not_score_or_drop_a_bag() {
 
 fn private_settings(host: u64) -> RoomSettings {
     RoomSettings {
-        bots: Some(6),
+        bots: Some(ROOM_COMBATANTS),
         monsters: true,
         host,
         private_room: true,
         code: "ABCD".into(),
     }
+}
+
+fn server_config() -> ServerConfig {
+    ServerConfig {
+        port: 0,
+        public_addr: "127.0.0.1:0".parse().unwrap(),
+        match_id: "test".into(),
+        max_players: ROOM_COMBATANTS as usize,
+        min_combatants: ROOM_COMBATANTS as usize,
+        matchmakers: Vec::new(),
+        single_match: false,
+        monsters: false,
+        threads: 1,
+        agones: false,
+        room_seed: 1,
+        private: false,
+        room_code: String::new(),
+        log_dir: std::env::temp_dir(),
+        replay: None,
+        logging: false,
+    }
+}
+
+/// A `Playing` app at `ticks_left`, with players `(client_id, name, score, kills, deaths)`.
+fn flow_app(players: &[(u64, &str, u32, u32, u32)], ticks_left: u32) -> App {
+    let mut app = App::new();
+    app.init_resource::<Arena>()
+        .init_resource::<Outbox>()
+        .init_resource::<ResetRequested>()
+        .init_resource::<PendingStart>()
+        .init_resource::<SimTick>()
+        .insert_resource(server_config())
+        .insert_resource(SimRng::from_match_seed(1));
+    app.world_mut().spawn((
+        MatchState {
+            phase: Phase::Playing,
+            ticks_left,
+            ..default()
+        },
+        RoomSettings {
+            bots: Some(ROOM_COMBATANTS),
+            ..default()
+        },
+    ));
+    for (client_id, name, score, kills, deaths) in players {
+        app.world_mut().spawn((
+            Player {
+                client_id: *client_id,
+                name: (*name).into(),
+                color: [1.0; 3],
+                bot: false,
+            },
+            Stats {
+                score: *score,
+                kills: *kills,
+                deaths: *deaths,
+                ..default()
+            },
+        ));
+    }
+    app.add_systems(Update, match_flow);
+    app
+}
+
+/// Run one whistle tick and return the resulting phase, winner and ticks left.
+fn whistle(players: &[(u64, &str, u32, u32, u32)]) -> (Phase, Option<String>, u32) {
+    let mut app = flow_app(players, 1);
+    app.update();
+    let world = app.world_mut();
+    let mut query = world.query::<&MatchState>();
+    let state = query.single(world).expect("match state");
+    (state.phase, state.winner.clone(), state.ticks_left)
 }
 
 #[test]
@@ -405,24 +477,100 @@ fn non_host_room_command_does_not_change_settings() {
         2,
         &mut state,
         &mut settings,
-        2,
     );
     assert_eq!(effect, room::RoomEffect::Ignore);
-    assert_eq!(settings.bots, Some(6));
+    assert_eq!(settings.bots, Some(ROOM_COMBATANTS));
     assert!(settings.monsters);
-    let effect = room::apply_room_command(
-        &RoomCommand::SetSettings {
-            bots: Some(4),
-            monsters: false,
-        },
-        1,
-        &mut state,
-        &mut settings,
-        2,
+}
+
+#[test]
+fn host_cannot_disable_bots_and_only_changes_monsters() {
+    let mut state = MatchState {
+        phase: Phase::Lobby,
+        ..default()
+    };
+    let mut settings = private_settings(1);
+    for bots in [None, Some(2), Some(4), Some(8)] {
+        let effect = room::apply_room_command(
+            &RoomCommand::SetSettings {
+                bots,
+                monsters: false,
+            },
+            1,
+            &mut state,
+            &mut settings,
+        );
+        assert_eq!(effect, room::RoomEffect::Updated);
+        assert_eq!(settings.bots, Some(ROOM_COMBATANTS), "bots={bots:?}");
+        assert!(!settings.monsters);
+    }
+}
+
+#[test]
+fn production_settings_always_field_six_combatants() {
+    for bots in [0, 1, 2, 6, 8] {
+        let mut config = server_config();
+        config.min_combatants = bots;
+        let settings = room::settings_from_config(&config);
+        assert_eq!(
+            settings.bots,
+            Some(ROOM_COMBATANTS),
+            "min_combatants={bots}"
+        );
+    }
+}
+
+#[test]
+fn match_does_not_end_at_twenty_five_before_the_whistle() {
+    let mut app = flow_app(&[(1, "a", 25, 5, 0), (2, "b", 3, 0, 1)], MATCH_TICKS);
+    app.update();
+    let world = app.world_mut();
+    let mut query = world.query::<&MatchState>();
+    let state = query.single(world).expect("match state");
+    assert_eq!(
+        state.phase,
+        Phase::Playing,
+        "no point target ends the match"
     );
-    assert_eq!(effect, room::RoomEffect::Updated);
-    assert_eq!(settings.bots, Some(4));
-    assert!(!settings.monsters);
+    assert!(state.winner.is_none());
+    assert_eq!(state.ticks_left, MATCH_TICKS - 1);
+}
+
+#[test]
+fn whistle_ranks_by_score_then_kills_then_fewer_deaths_then_client_id() {
+    // Highest score wins.
+    assert_eq!(
+        whistle(&[(1, "a", 10, 9, 0), (2, "b", 11, 0, 5)])
+            .1
+            .as_deref(),
+        Some("b")
+    );
+    // Equal score: more kills wins.
+    assert_eq!(
+        whistle(&[(1, "a", 20, 3, 0), (2, "b", 20, 5, 4)])
+            .1
+            .as_deref(),
+        Some("b")
+    );
+    // Equal score and kills: fewer deaths wins.
+    assert_eq!(
+        whistle(&[(1, "a", 20, 5, 3), (2, "b", 20, 5, 1)])
+            .1
+            .as_deref(),
+        Some("b")
+    );
+    // Fully tied: lower client_id wins, whatever the spawn order.
+    assert_eq!(
+        whistle(&[(2, "b", 20, 5, 1), (1, "a", 20, 5, 1)])
+            .1
+            .as_deref(),
+        Some("a")
+    );
+    assert_eq!(
+        whistle(&[]),
+        (Phase::Results, None, RESULTS_TICKS),
+        "no players still ends the match without a winner"
+    );
 }
 
 #[test]
@@ -442,10 +590,9 @@ fn set_settings_during_countdown_is_ignored() {
         1,
         &mut state,
         &mut settings,
-        2,
     );
     assert_eq!(effect, room::RoomEffect::Ignore);
-    assert_eq!(settings.bots, Some(6));
+    assert_eq!(settings.bots, Some(ROOM_COMBATANTS));
     assert!(settings.monsters);
     assert!(state.countdown_active);
 }
@@ -459,7 +606,7 @@ fn cancel_during_starting_is_ignored() {
         ..default()
     };
     let mut settings = private_settings(1);
-    let effect = room::apply_room_command(&RoomCommand::Cancel, 1, &mut state, &mut settings, 2);
+    let effect = room::apply_room_command(&RoomCommand::Cancel, 1, &mut state, &mut settings);
     assert_eq!(effect, room::RoomEffect::Ignore);
     assert_eq!(state.phase, Phase::Starting);
     assert_eq!(state.ticks_left, STARTING_TICKS);

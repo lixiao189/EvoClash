@@ -73,7 +73,8 @@ impl Fleet {
             .ok_or("no free ports")?;
         let addr = SocketAddr::new(self.config.public_host, port);
         let id = format!("m{port}-{:06x}", rand::random::<u32>() & 0xff_ffff);
-        // Private rooms always start at 6 bots. The host can change that in the lobby.
+        // Every room is fixed at 6 combatants, private ones included: the host cannot
+        // disable bots or change the fill target.
         let bots = if room_code.is_some() {
             6
         } else {
