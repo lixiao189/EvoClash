@@ -23,6 +23,7 @@ mod minimap;
 mod perf;
 mod predict;
 mod render;
+mod results_ui;
 mod session;
 mod textures;
 
@@ -112,6 +113,7 @@ fn main() {
     app.add_plugins((
         effects::EffectsPlugin,
         hud::HudPlugin,
+        results_ui::ResultsUiPlugin,
         lobby_ui::LobbyUiPlugin,
         backpack::BackpackPlugin,
         minimap::MinimapPlugin,

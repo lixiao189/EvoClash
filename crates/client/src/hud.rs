@@ -2,7 +2,6 @@
 //! (level, XP, skill slots and the unspent-point hint).
 
 use bevy::prelude::*;
-use bevy::ui::RelativeCursorPosition;
 use evoclash_game::evolution::{
     EvoPath, Evolution, MAX_LEVEL, SKILL_A_RANK, SKILL_B_RANK, SkillState, xp_to_reach,
 };
@@ -10,18 +9,15 @@ use evoclash_game::items::{ArmorKind, HOTBAR_SLOTS, THROW_SLOT};
 use evoclash_game::map::PropKind;
 use evoclash_game::protocol::*;
 use evoclash_game::sim::{Arena, DASH_COOLDOWN, PLAYER_RADIUS};
-use lightyear::prelude::{Client, MessageSender};
 
 use crate::assets::{Loading, PendingAssets};
 use crate::backpack::{shots_left, slot_image};
-use crate::buttons::BlocksPointer;
 use crate::effects::{Banner, BossBar, KillFeed};
 use crate::evo_panel::EvoPanelOpen;
 use crate::input::{LocalPlayer, Selection};
-use crate::menu::MenuOpen;
 use crate::perf::SlowWarn;
 use crate::render::UiFont;
-use crate::session::{Depart, JoinNotice};
+use crate::session::JoinNotice;
 use crate::textures::Textures;
 
 pub struct HudPlugin;
@@ -29,16 +25,7 @@ pub struct HudPlugin;
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_hud);
-        app.add_systems(
-            Update,
-            (
-                update_hud,
-                update_evolution_hud,
-                update_hotbar,
-                update_results_bar,
-                click_results_bar,
-            ),
-        );
+        app.add_systems(Update, (update_hud, update_evolution_hud, update_hotbar));
     }
 }
 
@@ -58,8 +45,6 @@ enum HudText {
     BossEta,
     /// Name and health numbers above the boss bar.
     BossName,
-    /// Final standings, under the results bar.
-    ResultsRanking,
 }
 
 /// The XP meter (bar behind the fill). Hidden in the lobby.
@@ -263,145 +248,6 @@ fn spawn_hud(mut commands: Commands, font: Res<UiFont>) {
             Node::default(),
             Justify::Center,
         ));
-    spawn_results_bar(&mut commands, &font);
-}
-
-#[derive(Component, Clone, Copy, PartialEq, Eq)]
-enum ResultsButton {
-    Leave,
-}
-
-#[derive(Component)]
-struct ResultsBar;
-
-fn results_button(font: &UiFont, kind: ResultsButton, value: &str) -> impl Bundle {
-    (
-        kind,
-        BlocksPointer,
-        Node {
-            padding: UiRect::axes(Val::Px(14.0), Val::Px(8.0)),
-            border: UiRect::all(Val::Px(1.0)),
-            border_radius: BorderRadius::all(Val::Px(4.0)),
-            ..default()
-        },
-        BackgroundColor(PANEL_BG),
-        BorderColor::all(Color::srgba(1.0, 1.0, 1.0, 0.25)),
-        children![(Text::new(value), font.sized(18.0), TextColor(Color::WHITE))],
-    )
-}
-
-/// Under the winner line. Staying for the next round is automatic; 离开 asks the server to
-/// drop us and returns to the name page. The final ranking sits below this row.
-fn spawn_results_bar(commands: &mut Commands, font: &UiFont) {
-    commands
-        .spawn((
-            ResultsBar,
-            Visibility::Hidden,
-            Node {
-                position_type: PositionType::Absolute,
-                top: Val::Percent(48.0),
-                width: Val::Percent(100.0),
-                flex_direction: FlexDirection::Column,
-                align_items: AlignItems::Center,
-                row_gap: Val::Px(10.0),
-                ..default()
-            },
-        ))
-        .with_children(|column| {
-            column
-                .spawn(Node {
-                    justify_content: JustifyContent::Center,
-                    align_items: AlignItems::Center,
-                    column_gap: Val::Px(16.0),
-                    ..default()
-                })
-                .with_children(|row| {
-                    row.spawn((
-                        Text::new("留在房间即可进入下一局"),
-                        font.sized(15.0),
-                        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.78)),
-                        TextShadow::default(),
-                    ));
-                    row.spawn(results_button(font, ResultsButton::Leave, "离开"));
-                });
-            column.spawn((
-                Node {
-                    padding: UiRect::axes(Val::Px(18.0), Val::Px(8.0)),
-                    border_radius: BorderRadius::all(Val::Px(6.0)),
-                    ..default()
-                },
-                BackgroundColor(PANEL_BG),
-                children![text_node(
-                    font,
-                    15.0,
-                    HudText::ResultsRanking,
-                    Node::default(),
-                    Justify::Center,
-                )],
-            ));
-        });
-}
-
-fn update_results_bar(
-    state: Query<&MatchState>,
-    mut bars: Query<&mut Visibility, With<ResultsBar>>,
-    mut buttons: Query<(&RelativeCursorPosition, &mut BackgroundColor), With<ResultsButton>>,
-) {
-    let show = state.iter().any(|s| s.phase == Phase::Results);
-    let vis = if show {
-        Visibility::Inherited
-    } else {
-        Visibility::Hidden
-    };
-    for mut bar in &mut bars {
-        bar.set_if_neq(vis);
-    }
-    if !show {
-        return;
-    }
-    for (cursor, mut bg) in &mut buttons {
-        let color = if cursor.cursor_over() {
-            Color::srgba(0.3, 0.28, 0.2, 0.95)
-        } else {
-            PANEL_BG
-        };
-        if bg.0 != color {
-            bg.0 = color;
-        }
-    }
-}
-
-fn click_results_bar(
-    menu: Res<MenuOpen>,
-    mouse: Option<Res<ButtonInput<MouseButton>>>,
-    state: Query<&MatchState>,
-    buttons: Query<(
-        &ResultsButton,
-        &RelativeCursorPosition,
-        &InheritedVisibility,
-    )>,
-    mut senders: Query<&mut MessageSender<RoomCommand>, With<Client>>,
-    mut depart: ResMut<Depart>,
-) {
-    if menu.0 {
-        return;
-    }
-    if !state.iter().any(|s| s.phase == Phase::Results) {
-        return;
-    }
-    if !mouse.is_some_and(|m| m.just_pressed(MouseButton::Left)) {
-        return;
-    }
-    let leave = buttons.iter().any(|(button, cursor, vis)| {
-        *button == ResultsButton::Leave && vis.get() && cursor.cursor_over()
-    });
-    if !leave {
-        return;
-    }
-    for mut sender in &mut senders {
-        sender.send::<CommandChannel>(RoomCommand::Leave);
-    }
-    depart.request();
 }
 
 /// Four weapon slots along the bottom edge, under the evolution column.
@@ -977,13 +823,14 @@ fn update_hud(
             },
             HudText::Clock => match state {
                 Some(s) => match s.phase {
-                    Phase::Lobby | Phase::Starting | Phase::Recovering => String::new(),
+                    Phase::Lobby | Phase::Starting | Phase::Recovering | Phase::Results => {
+                        String::new()
+                    }
                     Phase::Playing => format!(
                         "剩余 {}    地堡开启 {}",
                         fmt_time(s.ticks_left),
                         fmt_time(s.vault_in)
                     ),
-                    Phase::Results => format!("下一局 {}", fmt_time(s.ticks_left)),
                 },
                 None => String::new(),
             },
@@ -1012,32 +859,6 @@ fn update_hud(
                     out
                 }
             }
-            HudText::ResultsRanking => match state.filter(|s| s.phase == Phase::Results) {
-                Some(_) => {
-                    let mut rows: Vec<(&Player, &Stats)> = players.iter().collect();
-                    rows.sort_by(|a, b| {
-                        b.1.score
-                            .cmp(&a.1.score)
-                            .then(b.1.kills.cmp(&a.1.kills))
-                            .then(a.1.deaths.cmp(&b.1.deaths))
-                    });
-                    let mut out = String::from("最终排名");
-                    for (i, (player, stats)) in
-                        rows.iter().take(ROOM_COMBATANTS as usize).enumerate()
-                    {
-                        out.push_str(&format!(
-                            "\n{}. {}  {}  ({}/{})",
-                            i + 1,
-                            player.name,
-                            stats.score,
-                            stats.kills,
-                            stats.deaths
-                        ));
-                    }
-                    out
-                }
-                None => String::new(),
-            },
             HudText::Feed => feed
                 .0
                 .iter()

@@ -356,7 +356,9 @@ fn update_death_screen(
                     );
                 }
             }
-            DeathUi::Countdown => set(countdown_line(vitals.respawn_in), None),
+            DeathUi::Countdown => {
+                set(countdown_block(vitals.respawn_in, vitals.deploy_in), None);
+            }
             DeathUi::DeployText => {
                 let c = if can_deploy(vitals.respawn_in) {
                     Color::WHITE
@@ -416,6 +418,25 @@ fn countdown_line(respawn_in: u16) -> String {
     }
 }
 
+/// Seconds until a Playing death is sent with DeployLast. Empty when that clock is not running.
+fn auto_deploy_line(deploy_in: u16) -> String {
+    if deploy_in == 0 {
+        String::new()
+    } else {
+        format!("{} 秒后自动沿用上次配置出发", deploy_in.div_ceil(64))
+    }
+}
+
+fn countdown_block(respawn_in: u16, deploy_in: u16) -> String {
+    let ready = countdown_line(respawn_in);
+    let auto = auto_deploy_line(deploy_in);
+    if auto.is_empty() {
+        ready
+    } else {
+        format!("{ready}\n{auto}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,5 +456,17 @@ mod tests {
         assert_eq!(countdown_line(1), "可出发");
         assert!(!countdown_line(RESPAWN_MAX_TICKS).contains("自动"));
         assert!(!countdown_line(1).contains("自动"));
+    }
+
+    #[test]
+    fn auto_deploy_line_uses_ceil_seconds() {
+        assert_eq!(auto_deploy_line(0), "");
+        assert_eq!(auto_deploy_line(1), "1 秒后自动沿用上次配置出发");
+        assert_eq!(auto_deploy_line(64), "1 秒后自动沿用上次配置出发");
+        assert_eq!(auto_deploy_line(65), "2 秒后自动沿用上次配置出发");
+        let block = countdown_block(1, 65);
+        assert!(block.starts_with("可出发\n"));
+        assert!(block.ends_with("2 秒后自动沿用上次配置出发"));
+        assert_eq!(countdown_block(1, 0), countdown_line(1));
     }
 }

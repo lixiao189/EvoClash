@@ -82,6 +82,8 @@ enum Chrome {
     Start,
     Cancel,
     Monsters(bool),
+    PauseAuto,
+    ResumeAuto,
 }
 
 #[derive(Component)]
@@ -92,6 +94,7 @@ enum LobbyLine {
     Humans,
     Bots,
     Countdown,
+    Paused,
 }
 
 #[derive(Component)]
@@ -117,6 +120,7 @@ struct RoomView {
     countdown: bool,
     monsters: bool,
     code: String,
+    auto_paused: bool,
 }
 
 impl RoomView {
@@ -138,6 +142,7 @@ impl RoomView {
             countdown: state.is_some_and(|s| s.countdown_active),
             monsters: settings.is_some_and(|s| s.monsters),
             code: settings.map(|s| s.code.clone()).unwrap_or_default(),
+            auto_paused: settings.is_some_and(|s| s.auto_paused),
         }
     }
 
@@ -162,6 +167,11 @@ impl RoomView {
 
     fn can_cancel(&self) -> bool {
         self.host && self.lobby() && self.countdown
+    }
+
+    /// Host pause/resume, only before the lobby countdown is running.
+    fn show_pause(&self) -> bool {
+        self.host && self.lobby() && !self.countdown
     }
 }
 
@@ -325,12 +335,21 @@ fn spawn_lobby_ui(mut commands: Commands, font: Res<UiFont>) {
                 body.spawn(Node {
                     margin: UiRect::top(Val::Px(8.0)),
                     column_gap: Val::Px(8.0),
+                    align_items: AlignItems::Center,
                     ..default()
                 })
                 .with_children(|row| {
                     row.spawn(chrome_button(&font, Chrome::Leave, "离开"));
                     row.spawn(chrome_button(&font, Chrome::Start, "开始"));
                     row.spawn(chrome_button(&font, Chrome::Cancel, "取消"));
+                    row.spawn(chrome_button(&font, Chrome::PauseAuto, "暂停续局"));
+                    row.spawn(chrome_button(&font, Chrome::ResumeAuto, "恢复续局"));
+                    row.spawn(line(
+                        &font,
+                        15.0,
+                        LobbyLine::Paused,
+                        Color::srgba(1.0, 0.86, 0.62, 0.95),
+                    ));
                 });
             });
             col.spawn((
@@ -488,7 +507,7 @@ fn layout_lobby(
 fn update_lobby(
     settings: Query<&RoomSettings>,
     state: Query<&MatchState>,
-    players: Query<&Player>,
+    players: Query<(&Player, Has<LocalPlayer>)>,
     mut lines: Query<(&LobbyLine, &mut Text, &mut Node)>,
     mut title: Query<
         (&mut Text, &mut TextFont, &mut TextColor),
@@ -500,8 +519,22 @@ fn update_lobby(
     };
     let settings = settings.iter().next();
     let private = settings.is_some_and(|room| room.private_room);
-    let humans = players.iter().filter(|p| !p.bot).count();
-    let bots = players.iter().filter(|p| p.bot).count();
+    let mut humans = 0usize;
+    let mut bots = 0usize;
+    let mut local_id = None;
+    for (player, local) in &players {
+        if player.bot {
+            bots += 1;
+        } else {
+            humans += 1;
+        }
+        if local {
+            local_id = Some(player.client_id);
+        }
+    }
+    let host_id = settings.map(|room| room.host).unwrap_or(0);
+    let host = private && host_id != 0 && local_id == Some(host_id);
+    let paused_note = settings.is_some_and(|room| room.auto_paused) && !host && !s.countdown_active;
     let countdown = if s.countdown_active {
         format!("{} 秒后开始", seconds_until_start(s.ticks_left))
     } else if private {
@@ -515,6 +548,7 @@ fn update_lobby(
             LobbyLine::Humans => (format!("真人 {humans}/{ROOM_COMBATANTS}"), true),
             LobbyLine::Bots => (format!("机器人 {bots}"), true),
             LobbyLine::Countdown => (countdown.clone(), countdown_on),
+            LobbyLine::Paused => ("房主已暂停续局".to_string(), paused_note),
         };
         node.display = if on { Display::Flex } else { Display::None };
         if text.0 != value {
@@ -670,6 +704,14 @@ fn drive_room_controls(
             Chrome::Start => (view.host, view.can_start(), false),
             Chrome::Cancel => (view.host, view.can_cancel(), false),
             Chrome::Monsters(on) => (true, view.editable(), view.monsters == on),
+            Chrome::PauseAuto => {
+                let on = view.show_pause() && !view.auto_paused;
+                (on, on, false)
+            }
+            Chrome::ResumeAuto => {
+                let on = view.show_pause() && view.auto_paused;
+                (on, on, false)
+            }
         };
         let display = if show { Display::Flex } else { Display::None };
         if node.display != display {
@@ -695,6 +737,8 @@ fn drive_room_controls(
             Chrome::Leave => Some(RoomCommand::Leave),
             Chrome::Start => Some(RoomCommand::Start),
             Chrome::Cancel => Some(RoomCommand::Cancel),
+            Chrome::PauseAuto => Some(RoomCommand::PauseAutoStart),
+            Chrome::ResumeAuto => Some(RoomCommand::ResumeAutoStart),
             Chrome::Monsters(on) => {
                 (view.editable() && view.monsters != on).then_some(RoomCommand::SetSettings {
                     bots: Some(ROOM_COMBATANTS),
