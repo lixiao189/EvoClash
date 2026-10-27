@@ -63,6 +63,27 @@ struct RoomSnap {
     match_index: u32,
     phase: Phase,
     paused: bool,
+    /// Canonical board payload. Empty means the line omits `board=`.
+    board: String,
+}
+
+fn encode_board(rows: &[BoardRow]) -> String {
+    let mut rows = rows.to_vec();
+    rows.sort_by_key(|row| row.client_id);
+    rows.iter()
+        .map(|row| {
+            format!(
+                "{}|{}|{}|{}|{}|{}",
+                row.client_id,
+                esc(&row.name),
+                row.points,
+                row.played,
+                row.last_place,
+                row.last_round
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";")
 }
 
 impl RoomSnap {
@@ -76,7 +97,7 @@ impl RoomSnap {
             .bots
             .map(|n| n.to_string())
             .unwrap_or_else(|| "off".into());
-        format!(
+        let base = format!(
             "room_seed={} code={code} private={} bots={bots} monsters={} host={} match_index={} phase={} paused={}",
             self.room_seed,
             u8::from(self.private),
@@ -85,7 +106,12 @@ impl RoomSnap {
             self.match_index,
             phase_name(self.phase),
             u8::from(self.paused),
-        )
+        );
+        if self.board.is_empty() {
+            base
+        } else {
+            format!("{base} board={}", self.board)
+        }
     }
 }
 
@@ -138,14 +164,36 @@ impl Journal {
         }
     }
 
-    fn note_room(&mut self, snap: RoomSnap) {
+    fn note_room(&mut self, snap: RoomSnap) -> bool {
         if self.room_snap.as_ref() == Some(&snap) {
-            return;
+            return false;
         }
         if let Some(room) = self.room.as_mut() {
             room.line(&snap.line());
         }
         self.room_snap = Some(snap);
+        true
+    }
+
+    /// Room line, including the standings. False when nothing changed.
+    pub(crate) fn note_standings(
+        &mut self,
+        state: &MatchState,
+        settings: &RoomSettings,
+        board: &RoomBoard,
+    ) -> bool {
+        self.note_room(RoomSnap {
+            room_seed: self.room_seed,
+            code: settings.code.clone(),
+            private: settings.private_room,
+            bots: settings.bots,
+            monsters: settings.monsters,
+            host: settings.host,
+            match_index: state.match_index,
+            phase: state.phase,
+            paused: settings.auto_paused,
+            board: encode_board(&board.rows),
+        })
     }
 
     fn open_match(
@@ -470,6 +518,7 @@ pub(super) fn journal_flow(
     tick: Res<SimTick>,
     state: Query<&MatchState>,
     settings: Query<&RoomSettings>,
+    boards: Query<&RoomBoard>,
     catching: Option<Res<CatchingUp>>,
     players: Query<(&Player, &Pos, &Vitals, &Stats, &Evolution)>,
     watchers: Query<(&crate::spectate::SpectatorSession, &Spectator)>,
@@ -483,19 +532,9 @@ pub(super) fn journal_flow(
         return;
     };
     let settings = settings.iter().next();
-    let room_seed = journal.room_seed;
+    let board = boards.iter().next().cloned().unwrap_or_default();
     if let Some(settings) = settings {
-        journal.note_room(RoomSnap {
-            room_seed,
-            code: settings.code.clone(),
-            private: settings.private_room,
-            bots: settings.bots,
-            monsters: settings.monsters,
-            host: settings.host,
-            match_index: state.match_index,
-            phase: state.phase,
-            paused: settings.auto_paused,
-        });
+        journal.note_standings(state, settings, &board);
     }
     if state.phase == Phase::Playing && journal.open_index != Some(state.match_index) {
         let roster: Vec<RosterEntry> = players

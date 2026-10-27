@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use bevy::prelude::World;
-use evoclash_game::protocol::{MatchState, Phase, RecoverWait, RoomSettings};
+use evoclash_game::protocol::{BoardRow, MatchState, Phase, RecoverWait, RoomBoard, RoomSettings};
 use evoclash_game::rng::mix;
 
 use super::parse::parse_log;
@@ -82,6 +82,7 @@ fn apply_lobby(world: &mut World, snap: &RoomFile, next_index: bool) -> Result<(
     if let Some(mut room) = world.get_mut::<RoomSettings>(entity) {
         *room = settings;
     }
+    install_board(world, snap.rows.clone());
     publish(
         world,
         "lobby",
@@ -153,8 +154,18 @@ fn catch_up_playing(
         .iter(world)
         .next()
         .map(|state| state.ticks_left / 64);
+    install_board(world, snap.rows.clone());
+    // Replay already applied leaves. A row for someone no longer here is dropped.
+    crate::gameplay::sync_present(world);
     publish(world, "recovering", left, "none");
     Ok(())
+}
+
+fn install_board(world: &mut World, rows: Vec<BoardRow>) {
+    let mut boards = world.query::<&mut RoomBoard>();
+    if let Some(mut board) = boards.iter_mut(world).next() {
+        board.rows = rows;
+    }
 }
 
 fn publish(world: &mut World, phase: &str, left: Option<u32>, join_mode: &str) {
@@ -190,6 +201,7 @@ struct RoomFile {
     match_index: u32,
     phase: String,
     paused: bool,
+    rows: Vec<BoardRow>,
 }
 
 impl RoomFile {
@@ -213,6 +225,11 @@ fn parse_room_line(line: &str) -> Option<RoomFile> {
     if !line.contains("room_seed=") {
         return None;
     }
+    // `board=` is last and may contain spaces. Names are `esc`'d (`\|` `\;` `\\`).
+    let (head, board_raw) = match line.split_once(" board=") {
+        Some((head, raw)) => (head, Some(raw)),
+        None => (line, None),
+    };
     let mut room_seed = None;
     let mut code = None;
     let mut private = None;
@@ -222,7 +239,7 @@ fn parse_room_line(line: &str) -> Option<RoomFile> {
     let mut match_index = None;
     let mut phase = None;
     let mut paused = false;
-    for part in line.split_whitespace() {
+    for part in head.split_whitespace() {
         let Some((key, value)) = part.split_once('=') else {
             continue;
         };
@@ -255,7 +272,54 @@ fn parse_room_line(line: &str) -> Option<RoomFile> {
         match_index: match_index?,
         phase: phase?,
         paused,
+        rows: board_raw.map(decode_board).unwrap_or_default(),
     })
+}
+
+fn decode_board(raw: &str) -> Vec<BoardRow> {
+    if raw.is_empty() || raw == "-" {
+        return Vec::new();
+    }
+    split_kept(raw, ';')
+        .into_iter()
+        .filter_map(|part| {
+            let fields = split_esc(&part);
+            if fields.len() < 6 {
+                return None;
+            }
+            Some(BoardRow {
+                client_id: fields[0].parse().ok()?,
+                name: fields[1].clone(),
+                points: fields[2].parse().ok()?,
+                played: fields[3].parse().ok()?,
+                last_place: fields[4].parse().ok()?,
+                last_round: fields[5].parse().ok()?,
+            })
+        })
+        .collect()
+}
+
+/// Split on `sep`, keeping a backslash escape with the following character.
+fn split_kept(text: &str, sep: char) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            cur.push('\\');
+            if let Some(next) = chars.next() {
+                cur.push(next);
+            }
+        } else if c == sep {
+            out.push(std::mem::take(&mut cur));
+        } else {
+            cur.push(c);
+        }
+    }
+    if !cur.is_empty() || text.contains(sep) {
+        out.push(cur);
+    }
+    out
 }
 
 /// Used by tests. Same path as `--recover`, without exiting the process.
