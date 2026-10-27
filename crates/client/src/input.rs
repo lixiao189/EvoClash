@@ -1,4 +1,7 @@
 //! Keyboard/mouse → `PlayerInput`, written into lightyear's input buffer every tick.
+//!
+//! The Esc stack lives here: it closes the backpack, then the evolution panel, then toggles the
+//! menu, so one key never opens two overlays.
 
 use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
@@ -9,6 +12,8 @@ use lightyear::prelude::input::native::{ActionState, InputMarker};
 use lightyear::prelude::*;
 
 use crate::buttons::PointerOverUi;
+use crate::evo_panel::EvoPanelOpen;
+use crate::menu::MenuOpen;
 
 /// Mouse position in world space, filled in by the renderer.
 #[derive(Resource, Default)]
@@ -116,6 +121,8 @@ fn hotbar_keys(
     scroll: Option<Res<AccumulatedMouseScroll>>,
     mut selection: ResMut<Selection>,
     mut open: ResMut<BackpackOpen>,
+    mut evo: ResMut<EvoPanelOpen>,
+    mut menu: ResMut<MenuOpen>,
     mut scrolled: Local<f32>,
     me: Query<&Loadout, With<LocalPlayer>>,
 ) {
@@ -128,11 +135,17 @@ fn hotbar_keys(
     let Some(keys) = keys else {
         return;
     };
-    if keys.just_pressed(KeyCode::KeyB) {
+    if keys.just_pressed(KeyCode::KeyB) && !menu.0 {
         open.0 = !open.0;
     }
     if keys.just_pressed(KeyCode::Escape) {
-        open.0 = false;
+        if open.0 {
+            open.0 = false;
+        } else if evo.0 {
+            evo.0 = false;
+        } else {
+            menu.0 = !menu.0;
+        }
     }
     let Ok(loadout) = me.single() else {
         return;
@@ -176,6 +189,7 @@ fn buffer_input(
     cursor: Res<CursorWorld>,
     selection: Res<Selection>,
     open: Res<BackpackOpen>,
+    menu: Res<MenuOpen>,
     over_ui: Res<PointerOverUi>,
     mut query: Query<(&mut ActionState<PlayerInput>, &Pos), With<InputMarker<PlayerInput>>>,
 ) {
@@ -190,14 +204,16 @@ fn buffer_input(
         input.move_y = axis(&keys, [KeyS, ArrowDown], [KeyW, ArrowUp]);
         input.dash = keys.any_pressed([Space, ShiftLeft]);
         input.interact = keys.any_pressed([KeyE, KeyF]);
-        // The mouse belongs to the backpack panel while it is open.
-        let mouse = mouse.filter(|_| !open.0);
+        // The mouse belongs to the backpack panel while it is open, and to the menu while that
+        // is open: a click there must not fire or throw.
+        let mouse = mouse.filter(|_| !open.0 && !menu.0);
         input.throw = keys.pressed(KeyQ)
             || mouse
                 .as_ref()
                 .is_some_and(|m| m.pressed(MouseButton::Right));
-        // Clicking a panel button must not also shoot.
-        input.fire = !over_ui.0
+        // Clicking a panel button must not also shoot, and the menu blocks shooting outright.
+        input.fire = !menu.0
+            && !over_ui.0
             && (keys.pressed(KeyJ) || mouse.as_ref().is_some_and(|m| m.pressed(MouseButton::Left)));
         input.select = selection.wire();
         input.skill_a = keys.pressed(KeyR);
