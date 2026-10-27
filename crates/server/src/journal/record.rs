@@ -62,6 +62,7 @@ struct RoomSnap {
     host: u64,
     match_index: u32,
     phase: Phase,
+    paused: bool,
 }
 
 impl RoomSnap {
@@ -76,13 +77,14 @@ impl RoomSnap {
             .map(|n| n.to_string())
             .unwrap_or_else(|| "off".into());
         format!(
-            "room_seed={} code={code} private={} bots={bots} monsters={} host={} match_index={} phase={}",
+            "room_seed={} code={code} private={} bots={bots} monsters={} host={} match_index={} phase={} paused={}",
             self.room_seed,
             u8::from(self.private),
             u8::from(self.monsters),
             self.host,
             self.match_index,
             phase_name(self.phase),
+            u8::from(self.paused),
         )
     }
 }
@@ -194,8 +196,32 @@ impl Journal {
         if tick == 0 || self.sealed {
             return;
         }
+        self.mark(tick, line);
+    }
+
+    /// Append a tick line even at tick 0. Used for freeze, thaw and departures during a wait.
+    pub(crate) fn mark(&mut self, tick: u32, line: &str) {
+        if self.sealed {
+            return;
+        }
         if let Some(log) = self.match_log.as_mut() {
             log.line(&format!("t {tick} {line}"));
+        }
+    }
+
+    pub(crate) fn record_plain(&mut self, line: &str) {
+        if let Some(log) = self.match_log.as_mut() {
+            log.line(line);
+        }
+    }
+
+    /// Keep writing the match log that catch-up just replayed, instead of truncating it.
+    pub(crate) fn adopt_match(&mut self, index: u32, path: PathBuf) {
+        self.open_index = Some(index);
+        self.match_path = Some(path.clone());
+        self.sealed = false;
+        if self.logging {
+            self.match_log = LogBuf::append(&path);
         }
     }
 
@@ -417,8 +443,12 @@ pub(super) fn apply_presence(
 pub(super) fn log_inputs(
     state: Query<&MatchState>,
     humans: Query<(&Player, &Human, &CurrentInput)>,
+    catching: Option<Res<CatchingUp>>,
     mut trace: ResMut<Trace>,
 ) {
+    if catching.is_some() {
+        return;
+    }
     let playing = state.iter().any(|s| s.phase == Phase::Playing);
     if !playing {
         return;
@@ -440,11 +470,15 @@ pub(super) fn journal_flow(
     tick: Res<SimTick>,
     state: Query<&MatchState>,
     settings: Query<&RoomSettings>,
+    catching: Option<Res<CatchingUp>>,
     players: Query<(&Player, &Pos, &Vitals, &Stats, &Evolution)>,
     watchers: Query<(&crate::spectate::SpectatorSession, &Spectator)>,
     outbox: Res<crate::gameplay::Outbox>,
     clock: Option<Res<LogClock>>,
 ) {
+    if catching.is_some() {
+        return;
+    }
     let Some(state) = state.iter().next() else {
         return;
     };
@@ -460,6 +494,7 @@ pub(super) fn journal_flow(
             host: settings.host,
             match_index: state.match_index,
             phase: state.phase,
+            paused: settings.auto_paused,
         });
     }
     if state.phase == Phase::Playing && journal.open_index != Some(state.match_index) {

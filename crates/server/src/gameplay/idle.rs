@@ -17,6 +17,18 @@ pub struct Idle {
     warned: bool,
 }
 
+impl Idle {
+    #[cfg(test)]
+    pub(crate) fn ticks(&self) -> u32 {
+        self.ticks
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_count(&mut self, ticks: u32) {
+        self.ticks = ticks;
+    }
+}
+
 pub(super) fn watch_idle(
     mut commands: Commands,
     state: Query<&MatchState>,
@@ -34,7 +46,12 @@ pub(super) fn watch_idle(
     )>,
     mut outbox: ResMut<Outbox>,
 ) {
-    let playing = state.iter().any(|s| s.phase == Phase::Playing);
+    let phase = state.iter().next().map(|s| s.phase);
+    // A crash recovery freezes the idle clock. Resetting it would forgive the wait.
+    if phase == Some(Phase::Recovering) {
+        return;
+    }
+    let playing = phase == Some(Phase::Playing);
     if !playing {
         for (_, _, _, mut idle, _, _, _, _, _) in &mut humans {
             idle.ticks = 0;

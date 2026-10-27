@@ -76,6 +76,9 @@ pub(super) fn roam(
     rng: Res<crate::rng::SimRng>,
     state: Query<&MatchState>,
 ) {
+    if state.iter().any(|s| s.phase == Phase::Recovering) {
+        return;
+    }
     let alive = prey(players.iter());
     let playing = state.iter().any(|s| s.phase == Phase::Playing);
     rng.with(playing, crate::rng::Stream::Monsters, |mut rng| {

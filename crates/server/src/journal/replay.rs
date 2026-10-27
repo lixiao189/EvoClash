@@ -5,6 +5,8 @@ use super::*;
 pub struct ReplayOptions {
     /// After this tick's systems, nudge one combatant. Not written to the log.
     pub nudge_after_tick: Option<u32>,
+    /// Wall-clock limit for a crash catch-up. Offline replay leaves this unset.
+    pub deadline: Option<std::time::Instant>,
 }
 
 pub struct ReplayReport {
@@ -65,12 +67,33 @@ pub fn replay_log(path: &Path, opts: ReplayOptions) -> ReplayReport {
         };
     }
     let mut app = boot_playing(&parsed.header);
+    replay_world(app.world_mut(), &parsed, &opts)
+}
+
+/// Step `world` (already booted to this log's opening roster) through every logged tick.
+/// `freeze` / `thaw` hold the sim the same way a live Recovering wait does.
+pub(super) fn replay_world(
+    world: &mut World,
+    parsed: &super::parse::Parsed,
+    opts: &ReplayOptions,
+) -> ReplayReport {
+    world.insert_resource(Replaying);
     let mut checked = 0;
     let mut tick = 0;
     while tick < parsed.max_tick {
+        if let Some(limit) = opts.deadline
+            && std::time::Instant::now() >= limit
+        {
+            return report_fail(
+                world,
+                checked,
+                Some(tick),
+                format!("fast-forward exceeded 30s at tick {tick}"),
+            );
+        }
         let next = tick + 1;
         if let Some(events) = parsed.events.get(&next) {
-            let mut injected = app.world_mut().resource_mut::<Injected>();
+            let mut injected = world.resource_mut::<Injected>();
             for event in events {
                 match event {
                     Event::Input(id, input) => injected.inputs.push((*id, input.clone())),
@@ -89,29 +112,32 @@ pub fn replay_log(path: &Path, opts: ReplayOptions) -> ReplayReport {
                 }
             }
         }
-        app.world_mut().run_schedule(FixedUpdate);
-        tick = app.world().resource::<SimTick>().0;
+        world.run_schedule(FixedUpdate);
+        tick = world.resource::<SimTick>().0;
         if let Some(expected) = parsed.digests.get(&tick) {
-            let got = combatant_digest(app.world_mut());
+            let got = combatant_digest(world);
             checked += 1;
             if got != *expected {
-                return ReplayReport {
-                    ok: false,
-                    mismatch_tick: Some(tick),
-                    scores: scoreboard(app.world_mut()),
-                    kills: app.world().resource::<Journal>().kills.clone(),
-                    digests_checked: checked,
-                    spectators: crate::spectate::spectator_rows(app.world_mut()),
-                    error: String::new(),
-                };
+                return report_fail(
+                    world,
+                    checked,
+                    Some(tick),
+                    format!("digest mismatch at tick {tick}"),
+                );
             }
         }
         if opts.nudge_after_tick == Some(tick) {
-            nudge(app.world_mut());
+            nudge(world);
+        }
+        // Markers apply after this tick's systems, so tick T itself still simulated.
+        if parsed.thaws.contains(&tick) {
+            crate::gameplay::resume_playing(world);
+        } else if parsed.freezes.contains(&tick) {
+            set_phase(world, Phase::Recovering);
         }
     }
-    let scores = scoreboard(app.world_mut());
-    let kills = app.world().resource::<Journal>().kills.clone();
+    let scores = scoreboard(world);
+    let kills = world.resource::<Journal>().kills.clone();
     if let Some(logged) = &parsed.scores
         && logged != &scores
     {
@@ -144,8 +170,32 @@ pub fn replay_log(path: &Path, opts: ReplayOptions) -> ReplayReport {
         scores,
         kills,
         digests_checked: checked,
-        spectators: crate::spectate::spectator_rows(app.world_mut()),
+        spectators: crate::spectate::spectator_rows(world),
         error: String::new(),
+    }
+}
+
+fn report_fail(
+    world: &mut World,
+    checked: usize,
+    tick: Option<u32>,
+    error: String,
+) -> ReplayReport {
+    ReplayReport {
+        ok: false,
+        mismatch_tick: tick,
+        scores: scoreboard(world),
+        kills: world.resource::<Journal>().kills.clone(),
+        digests_checked: checked,
+        spectators: crate::spectate::spectator_rows(world),
+        error,
+    }
+}
+
+fn set_phase(world: &mut World, phase: Phase) {
+    let mut states = world.query::<&mut MatchState>();
+    for mut state in states.iter_mut(world) {
+        state.phase = phase;
     }
 }
 
@@ -203,46 +253,48 @@ fn boot_playing(header: &Header) -> App {
     let mut config = blank_config(header);
     config.logging = false;
     let mut app = sim_app(config);
-    let match_seed = mix(header.room_seed, header.match_index);
-    {
-        let world = app.world_mut();
-        world.resource_mut::<Arena>().0 = evoclash_game::map::ArenaMap::generate(match_seed);
-        world.resource::<SimRng>().reinit_match(match_seed);
-        world.resource_mut::<SimTick>().0 = 0;
-        let settings = header.settings.clone();
-        let index = header.match_index;
-        let mut states = world.query::<(Entity, &MatchState)>();
-        let state_entity = states.iter(world).next().map(|(e, _)| e);
-        if let Some(entity) = state_entity {
-            if let Some(mut state) = world.get_mut::<MatchState>(entity) {
-                state.phase = Phase::Playing;
-                state.ticks_left = MATCH_TICKS;
-                state.countdown_active = false;
-                state.match_index = index;
-                state.vault_in = FIRST_VAULT_TICKS;
-                state.winner = None;
-                state.map_seed = match_seed;
-                state.boss_eta = 0;
-            }
-            if let Some(mut room) = world.get_mut::<RoomSettings>(entity) {
-                *room = settings;
-            }
-        }
-    }
-    spawn_roster(&mut app, &header.roster);
-    spawn_header_watchers(&mut app, &header.spectators);
-    stand_and_shield(app.world_mut());
+    prepare_playing(app.world_mut(), header);
     app
 }
 
-fn spawn_header_watchers(app: &mut App, watchers: &[SpectatorEntry]) {
+/// Opening roster, map and clocks for a Playing catch-up. Callers run [`replay_world`] next.
+pub(super) fn prepare_playing(world: &mut World, header: &Header) {
+    let match_seed = mix(header.room_seed, header.match_index);
+    world.resource_mut::<Arena>().0 = evoclash_game::map::ArenaMap::generate(match_seed);
+    world.resource::<SimRng>().reinit_match(match_seed);
+    world.resource_mut::<SimTick>().0 = 0;
+    let settings = header.settings.clone();
+    let index = header.match_index;
+    let mut states = world.query::<(Entity, &MatchState)>();
+    let state_entity = states.iter(world).next().map(|(e, _)| e);
+    if let Some(entity) = state_entity {
+        if let Some(mut state) = world.get_mut::<MatchState>(entity) {
+            state.phase = Phase::Playing;
+            state.ticks_left = MATCH_TICKS;
+            state.countdown_active = false;
+            state.match_index = index;
+            state.vault_in = FIRST_VAULT_TICKS;
+            state.winner = None;
+            state.map_seed = match_seed;
+            state.boss_eta = 0;
+            state.recover = RecoverWait::default();
+        }
+        if let Some(mut room) = world.get_mut::<RoomSettings>(entity) {
+            *room = settings;
+        }
+    }
+    spawn_roster(world, &header.roster);
+    spawn_header_watchers(world, &header.spectators);
+    stand_and_shield(world);
+}
+
+fn spawn_header_watchers(world: &mut World, watchers: &[SpectatorEntry]) {
     if watchers.is_empty() {
         return;
     }
-    let mut seq =
-        crate::spectate::SpectateSeq(app.world().resource::<crate::spectate::SpectateSeq>().0);
+    let mut seq = crate::spectate::SpectateSeq(world.resource::<crate::spectate::SpectateSeq>().0);
     {
-        let mut commands = app.world_mut().commands();
+        let mut commands = world.commands();
         for entry in watchers {
             crate::spectate::spawn_spectator(
                 &mut commands,
@@ -263,15 +315,13 @@ fn spawn_header_watchers(app: &mut App, watchers: &[SpectatorEntry]) {
             );
         }
     }
-    app.world_mut().flush();
-    app.world_mut()
-        .resource_mut::<crate::spectate::SpectateSeq>()
-        .0 = seq.0;
+    world.flush();
+    world.resource_mut::<crate::spectate::SpectateSeq>().0 = seq.0;
 }
 
-fn spawn_roster(app: &mut App, roster: &[RosterEntry]) {
+fn spawn_roster(world: &mut World, roster: &[RosterEntry]) {
     {
-        let mut commands = app.world_mut().commands();
+        let mut commands = world.commands();
         for entry in roster {
             let player = Player {
                 client_id: entry.client_id,
@@ -297,7 +347,7 @@ fn spawn_roster(app: &mut App, roster: &[RosterEntry]) {
             }
         }
     }
-    app.world_mut().flush();
+    world.flush();
 }
 
 fn stand_and_shield(world: &mut World) {
@@ -345,6 +395,7 @@ fn blank_config(header: &Header) -> ServerConfig {
         room_code: header.settings.code.clone(),
         log_dir: std::env::temp_dir(),
         replay: None,
+        recover: false,
         logging: false,
     }
 }

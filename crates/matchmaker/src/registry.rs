@@ -8,6 +8,7 @@ use evoclash_game::api::Heartbeat;
 use evoclash_game::protocol::MAX_SPECTATORS;
 use serde::Serialize;
 
+use crate::recovery;
 use crate::rooms::{self, RoomFailure, RoomSeat};
 
 /// A server that misses heartbeats for this long is considered dead and gets no new players.
@@ -48,6 +49,12 @@ pub struct MatchInfo {
     /// `none` | `lobby` | `spectate`. Trusted from the server; not re-derived here.
     pub join_mode: String,
     pub exiting: bool,
+    /// Fast-forward in progress, or the replacement process has not heartbeated ready yet.
+    pub catching_up: bool,
+    /// Log rejected or the room crashed too many times. Rejoin is 410.
+    pub abandoned: bool,
+    /// How many replacement processes have been launched. The third crash abandons.
+    pub recoveries: u8,
     /// Watcher tokens issued recently, so concurrent joins don't overfill the 4 seats.
     spec_reservations: Vec<Instant>,
 }
@@ -103,6 +110,9 @@ impl MatchInfo {
             match_index: 0,
             join_mode: "lobby".into(),
             exiting: false,
+            catching_up: false,
+            abandoned: false,
+            recoveries: 0,
             spec_reservations: Vec::new(),
         }
     }
@@ -132,8 +142,13 @@ impl MatchInfo {
         self.tick_us > OVERLOADED_TICK_US
     }
 
+    fn open_for_quick_start(&self) -> bool {
+        !self.catching_up && !self.abandoned && self.phase != "recovering"
+    }
+
     fn joinable(&mut self, now: Instant) -> bool {
-        self.healthy(now)
+        self.open_for_quick_start()
+            && self.healthy(now)
             && self.accepting
             && !self.draining
             && !self.overloaded()
@@ -144,7 +159,8 @@ impl MatchInfo {
 
     /// Public Playing or Results the server marked `spectate`, with a watcher seat left.
     fn spectatable(&mut self, now: Instant) -> bool {
-        self.healthy(now)
+        self.open_for_quick_start()
+            && self.healthy(now)
             && !self.draining
             && !self.overloaded()
             && !self.is_private
@@ -266,6 +282,13 @@ impl Registry {
 
     /// Record a heartbeat. Returns whether the server should drain.
     pub fn heartbeat(&mut self, beat: &Heartbeat) -> bool {
+        if self
+            .matches
+            .get(&beat.match_id)
+            .is_some_and(|m| m.abandoned)
+        {
+            return false;
+        }
         let now = Instant::now();
         let entry = self
             .matches
@@ -302,6 +325,15 @@ impl Registry {
         entry.join_mode = beat.join_mode.clone();
         entry.exiting = beat.exiting;
         entry.last_heartbeat = Some(now);
+        if entry.catching_up {
+            // The replacement process bound a new port.
+            if let Ok(addr) = beat.public_addr.parse() {
+                entry.addr = addr;
+            }
+            if recovery::catchup_done(&entry.phase, entry.phase_left_secs) {
+                entry.catching_up = false;
+            }
+        }
         entry.draining
     }
 
@@ -402,6 +434,7 @@ impl Registry {
                     m.accepting,
                     m.draining,
                     m.overloaded(),
+                    m.catching_up,
                 )
             });
         let Some((
@@ -415,6 +448,7 @@ impl Registry {
             accepting,
             draining,
             overloaded,
+            catching_up,
         )) = found
         else {
             return Err(if self.released.contains_key(&code) {
@@ -423,6 +457,14 @@ impl Registry {
                 RoomFailure::new(404, "not_found", rooms::not_found_message(&code), None)
             });
         };
+        if catching_up || phase == "recovering" {
+            return Err(RoomFailure::new(
+                503,
+                "recovering",
+                recovery::RECOVERING_MSG,
+                Some(recovery::RETRY_AFTER_SECS),
+            ));
+        }
         if phase == "playing" || phase == "results" {
             let retry_after = if phase == "playing" {
                 left.unwrap_or(0).saturating_add(rooms::RESULTS_SECS)
@@ -510,6 +552,110 @@ impl Registry {
             "服务器繁忙，请稍后再试。",
             None,
         ))
+    }
+
+    /// Non-zero exit or a signal. `Some(0)` and `exiting` are a normal shutdown.
+    /// Exit code [`recovery::ABANDON_EXIT`] gives up immediately.
+    pub fn on_process_exit(&mut self, id: &str, code: Option<i32>) -> recovery::Step {
+        let Some((abandoned, exiting)) = self.matches.get(id).map(|m| (m.abandoned, m.exiting))
+        else {
+            return recovery::Step::None;
+        };
+        if abandoned {
+            return recovery::Step::None;
+        }
+        if exiting || code == Some(0) {
+            self.forget(id);
+            return recovery::Step::Dropped(id.to_string());
+        }
+        if code == Some(recovery::ABANDON_EXIT) {
+            return self.abandon(id);
+        }
+        self.begin_crash(id)
+    }
+
+    /// Heartbeat gap. A process already marked `exiting` is removed. Others crash.
+    pub fn poll_crashes(&mut self, now: Instant) -> Vec<recovery::Step> {
+        let ids: Vec<String> = self.matches.keys().cloned().collect();
+        let mut steps = Vec::new();
+        for id in ids {
+            let Some((abandoned, healthy, exiting)) = self
+                .matches
+                .get(&id)
+                .map(|m| (m.abandoned, m.healthy(now), m.exiting))
+            else {
+                continue;
+            };
+            if abandoned || healthy {
+                continue;
+            }
+            if exiting {
+                self.forget(&id);
+                steps.push(recovery::Step::Dropped(id));
+                continue;
+            }
+            steps.push(self.begin_crash(&id));
+        }
+        steps
+    }
+
+    fn begin_crash(&mut self, id: &str) -> recovery::Step {
+        let Some((abandoned, recoveries)) =
+            self.matches.get(id).map(|m| (m.abandoned, m.recoveries))
+        else {
+            return recovery::Step::None;
+        };
+        if abandoned {
+            return recovery::Step::None;
+        }
+        if recoveries >= recovery::MAX_RECOVERIES {
+            return self.abandon(id);
+        }
+        let Some(m) = self.matches.get_mut(id) else {
+            return recovery::Step::None;
+        };
+        m.recoveries = m.recoveries.saturating_add(1);
+        m.catching_up = true;
+        m.phase = "recovering".into();
+        m.join_mode = "none".into();
+        m.phase_left_secs = None;
+        m.accepting = false;
+        m.cert_digest = None;
+        m.last_heartbeat = None;
+        m.launched_at = Instant::now();
+        let launch = recovery::Launch {
+            id: m.id.clone(),
+            room_seed: m.room_seed,
+            room_code: m.room_code.clone(),
+        };
+        recovery::Step::Relaunch(launch)
+    }
+
+    fn abandon(&mut self, id: &str) -> recovery::Step {
+        if let Some(m) = self.matches.get_mut(id) {
+            m.abandoned = true;
+            m.catching_up = false;
+            m.accepting = false;
+            m.join_mode = "none".into();
+            if let Some(code) = m.room_code.take() {
+                self.released.insert(code, Instant::now());
+            }
+        }
+        recovery::Step::Abandoned(id.to_string())
+    }
+
+    /// What `/v1/rejoin` should do before it tries to mint a token.
+    pub fn rejoin_gate(&self, id: &str) -> recovery::RejoinGate {
+        let Some(m) = self.matches.get(id) else {
+            return recovery::RejoinGate::Gone;
+        };
+        if m.abandoned {
+            return recovery::RejoinGate::Abandoned;
+        }
+        if m.catching_up || !m.healthy(Instant::now()) {
+            return recovery::RejoinGate::Recovering;
+        }
+        recovery::RejoinGate::Ready
     }
 
     pub fn views(&mut self) -> Vec<MatchView> {

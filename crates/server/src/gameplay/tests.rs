@@ -412,6 +412,7 @@ fn server_config() -> ServerConfig {
         room_code: String::new(),
         log_dir: std::env::temp_dir(),
         replay: None,
+        recover: false,
         logging: false,
     }
 }

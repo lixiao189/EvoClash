@@ -50,7 +50,13 @@ pub fn read_human_inputs(
 }
 
 /// Attacking gives up spawn protection. Runs after every input (human or bot) is in.
-pub(super) fn drop_shield_on_attack(mut players: Query<(&CurrentInput, &mut Vitals)>) {
+pub(super) fn drop_shield_on_attack(
+    state: Query<&MatchState>,
+    mut players: Query<(&CurrentInput, &mut Vitals)>,
+) {
+    if state.iter().any(|s| s.phase == Phase::Recovering) {
+        return;
+    }
     for (input, mut vitals) in &mut players {
         if vitals.shield > 0 && (input.0.fire || input.0.throw) {
             vitals.shield = 0;
@@ -72,6 +78,9 @@ pub(super) fn movement(
         &SkillState,
     )>,
 ) {
+    if state.iter().any(|s| s.phase == Phase::Recovering) {
+        return;
+    }
     let frozen = state.iter().any(|s| s.phase == Phase::Starting);
     for (pos, dash, mut aim, mut input, vitals, evo, skills) in &mut players {
         if frozen {
@@ -111,7 +120,13 @@ pub(super) fn record_history(tick: Res<SimTick>, mut players: Query<(&Pos, &mut 
     }
 }
 
-pub(super) fn tick_cooldowns(mut players: Query<(&mut Cooldowns, &mut Vitals)>) {
+pub(super) fn tick_cooldowns(
+    state: Query<&MatchState>,
+    mut players: Query<(&mut Cooldowns, &mut Vitals)>,
+) {
+    if state.iter().any(|s| s.phase == Phase::Recovering) {
+        return;
+    }
     for (mut cd, mut vitals) in &mut players {
         cd.fire = cd.fire.saturating_sub(1);
         cd.interact = cd.interact.saturating_sub(1);

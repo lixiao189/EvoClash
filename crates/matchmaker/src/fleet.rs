@@ -47,7 +47,7 @@ impl Fleet {
 
     /// Start a public match server on the first free port.
     pub fn launch(&self, used: &[SocketAddr]) -> Result<(String, SocketAddr), String> {
-        self.launch_room(used, rand::random(), None)
+        self.spawn(used, rand::random(), None, None)
     }
 
     /// `room_code` set means a private room: `--private --room-code CODE --bots 8`, monsters on.
@@ -57,9 +57,36 @@ impl Fleet {
         room_seed: u64,
         room_code: Option<&str>,
     ) -> Result<(String, SocketAddr), String> {
+        self.spawn(used, room_seed, room_code, None)
+    }
+
+    /// Relaunch a crashed room: same id and seed, plus `--recover`. The port is new.
+    pub fn launch_recover(
+        &self,
+        id: &str,
+        used: &[SocketAddr],
+        room_seed: u64,
+        room_code: Option<&str>,
+    ) -> Result<SocketAddr, String> {
+        self.spawn(used, room_seed, room_code, Some(id))
+            .map(|(_, addr)| addr)
+    }
+
+    fn spawn(
+        &self,
+        used: &[SocketAddr],
+        room_seed: u64,
+        room_code: Option<&str>,
+        recover_id: Option<&str>,
+    ) -> Result<(String, SocketAddr), String> {
         let mut children = self.children.lock().map_err(|_| "fleet lock poisoned")?;
-        if children.len() >= self.config.max_matches {
+        if recover_id.is_none() && children.len() >= self.config.max_matches {
             return Err("fleet at capacity".into());
+        }
+        if let Some(id) = recover_id
+            && let Some(mut child) = children.remove(id)
+        {
+            let _ = child.start_kill();
         }
         // Skip ports another process still holds (e.g. a match from before a restart that hasn't
         // heartbeated in yet), so a fresh server never dies on a bind error with a player en route.
@@ -73,7 +100,10 @@ impl Fleet {
             })
             .ok_or("no free ports")?;
         let addr = SocketAddr::new(self.config.public_host, port);
-        let id = format!("m{port}-{:06x}", rand::random::<u32>() & 0xff_ffff);
+        let id = match recover_id {
+            Some(id) => id.to_string(),
+            None => format!("m{port}-{:06x}", rand::random::<u32>() & 0xff_ffff),
+        };
         // Every room is fixed at ROOM_COMBATANTS, private ones included: the host cannot
         // disable bots or change the fill target.
         let bots = if room_code.is_some() {
@@ -108,6 +138,9 @@ impl Fleet {
             .kill_on_drop(false);
         if let Some(code) = room_code {
             command.arg("--private").arg("--room-code").arg(code);
+        }
+        if recover_id.is_some() {
+            command.arg("--recover");
         }
         if let Ok(key) = std::env::var(KEY_ENV) {
             command.env(KEY_ENV, key);

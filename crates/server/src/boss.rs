@@ -357,6 +357,10 @@ fn boss_flow(
         // The match is starting over; reset_match clears the arena.
         *boss = BossState::default();
     }
+    // Recovering keeps the frozen eta. The else branch below would clear it.
+    if state.phase == Phase::Recovering {
+        return;
+    }
     // Monsters off means no behemoth either. The vault timer lives in match flow and still runs.
     let monsters_on = settings
         .iter()

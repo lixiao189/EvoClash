@@ -339,6 +339,9 @@ pub fn respawn(
         Option<&Player>,
     )>,
 ) {
+    if state.iter().any(|s| s.phase == Phase::Recovering) {
+        return;
+    }
     let lobby = state.iter().any(|s| s.phase == Phase::Lobby);
     let playing = state.iter().any(|s| s.phase == Phase::Playing);
     let mut alive: Vec<(Entity, Vec2)> = players
@@ -449,7 +452,14 @@ pub fn respawn(
     }
 }
 
-pub(super) fn expire_drops(mut commands: Commands, mut drops: Query<(Entity, &mut Expires)>) {
+pub(super) fn expire_drops(
+    state: Query<&MatchState>,
+    mut commands: Commands,
+    mut drops: Query<(Entity, &mut Expires)>,
+) {
+    if state.iter().any(|s| s.phase == Phase::Recovering) {
+        return;
+    }
     for (entity, mut expires) in &mut drops {
         expires.0 = expires.0.saturating_sub(1);
         if expires.0 == 0 {
