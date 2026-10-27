@@ -10,6 +10,7 @@ use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
 use crate::gameplay::{Outbox, SimSet, resolve_damage};
+use crate::journal::{Injected, Trace};
 
 /// 再生组织 starts this long after the last hit.
 const REGEN_DELAY: u32 = 4 * 64;
@@ -172,26 +173,58 @@ fn read_commands(
     state: Query<&MatchState>,
     mut links: Query<(Entity, &mut MessageReceiver<PlayerCommand>), With<ClientOf>>,
     mut players: Query<(
-        &ControlledBy,
+        &Player,
+        Option<&ControlledBy>,
         &mut Evolution,
         &mut Wallet,
         &mut Vitals,
         &mut SkillState,
         &mut LifeLog,
     )>,
+    mut injected: Option<ResMut<Injected>>,
+    mut trace: Option<ResMut<Trace>>,
 ) {
     let allow_shop = state.iter().any(|s| s.phase == Phase::Playing);
+    if let Some(injected) = injected.as_mut() {
+        let cmds = std::mem::take(&mut injected.commands);
+        for (id, cmd) in cmds {
+            if let Some(trace) = trace.as_mut() {
+                trace.push(format!("cmd {id} {}", crate::journal::fmt_command(&cmd)));
+            }
+            let Some((_, _, mut evo, mut wallet, mut vitals, mut skills, mut life)) = players
+                .iter_mut()
+                .find(|(player, ..)| player.client_id == id)
+            else {
+                continue;
+            };
+            if handle_command(
+                &cmd,
+                &mut evo,
+                &mut wallet,
+                &mut vitals,
+                &mut life,
+                allow_shop,
+            ) {
+                apply_evolution(&evo, &mut skills, &mut vitals);
+            }
+        }
+    }
     for (link, mut receiver) in &mut links {
         if !receiver.has_messages() {
             continue;
         }
         let cmds: Vec<PlayerCommand> = receiver.receive().collect();
-        let Some((_, mut evo, mut wallet, mut vitals, mut skills, mut life)) =
-            players.iter_mut().find(|(c, ..)| c.owner == link)
+        let Some((player, _, mut evo, mut wallet, mut vitals, mut skills, mut life)) = players
+            .iter_mut()
+            .find(|(_, control, ..)| control.is_some_and(|c| c.owner == link))
         else {
             continue;
         };
+        let id = player.client_id;
         for cmd in &cmds {
+            if let Some(trace) = trace.as_mut() {
+                trace.push(format!("cmd {id} {}", crate::journal::fmt_command(cmd)));
+            }
             if handle_command(
                 cmd,
                 &mut evo,

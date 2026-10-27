@@ -55,12 +55,12 @@ const PRIVATE_IDLE_WARN_TICKS: u32 = 28 * 60 * TICKS_PER_SEC;
 const PRIVATE_IDLE_CLOSE_TICKS: u32 = 30 * 60 * TICKS_PER_SEC;
 /// Lobby deaths stand back up after this, with no death bag.
 pub(super) const LOBBY_RESPAWN_TICKS: u16 = (2 * TICKS_PER_SEC) as u16;
-const FIRST_VAULT_TICKS: u32 = 60 * TICKS_PER_SEC;
+pub(crate) const FIRST_VAULT_TICKS: u32 = 60 * TICKS_PER_SEC;
 const VAULT_INTERVAL_TICKS: u32 = 90 * TICKS_PER_SEC;
 pub const SCORE_TO_WIN: u32 = 25;
 const DROP_TTL_TICKS: u32 = 30 * TICKS_PER_SEC;
 /// Fresh spawns can't be hurt for this long (or until they shoot), so nobody gets spawn-camped.
-const SPAWN_SHIELD_TICKS: u16 = (2.5 * TICKS_PER_SEC as f32) as u16;
+pub(crate) const SPAWN_SHIELD_TICKS: u16 = (2.5 * TICKS_PER_SEC as f32) as u16;
 /// Killing someone whose gear is this many tiers above your weapon earns an extra point.
 const GIANT_SLAYER_GAP: u8 = 2;
 /// Upper bound on lag compensation (~220 ms) so high-ping players can't shoot far into the past.
@@ -133,6 +133,7 @@ impl Plugin for GameplayPlugin {
                     empty_close,
                     private_idle_cap,
                     flush_outbox,
+                    clear_outbox,
                 )
                     .chain()
                     .in_set(SimSet::Flow),

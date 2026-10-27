@@ -15,6 +15,7 @@ mod environment;
 mod evolution;
 mod gameplay;
 mod inventory;
+mod journal;
 mod monsters;
 mod ops;
 mod rng;
@@ -34,6 +35,11 @@ use crate::config::ServerConfig;
 
 fn main() {
     let mut config = ServerConfig::from_args();
+    if let Some(path) = config.replay.clone() {
+        // Offline: do not bind a port and do not talk to the matchmaker.
+        let code = journal::replay_cli(&path);
+        std::process::exit(code);
+    }
     let agones = config.agones.then(|| {
         let sdk = agones::AgonesSdk::from_env();
         let (name, public_addr) = sdk
@@ -77,6 +83,7 @@ fn main() {
         ops::OpsPlugin,
         evolution::EvolutionPlugin,
         skills::SkillsPlugin,
+        journal::JournalPlugin,
     ));
     if let Some(sdk) = &agones {
         app.add_plugins(agones::AgonesPlugin(sdk.clone()));

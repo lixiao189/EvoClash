@@ -166,7 +166,8 @@ pub(super) fn populate(
                 && live.elites < MAX_ELITES
                 && rng.random_ratio(1, 6);
             live.add(kind, elite, slot == 0);
-            let brain = Brain::new(kind, elite, spot, block.rect, pack, slot as u8, rng);
+            let mut brain = Brain::new(kind, elite, spot, block.rect, pack, slot as u8, rng);
+            brain.serial = spawner.alloc_serial();
             spawn_monster(&mut commands, kind, elite, pos, brain, None);
         }
         false

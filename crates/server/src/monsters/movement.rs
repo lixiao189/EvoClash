@@ -1,5 +1,7 @@
 //! Noticing prey, wandering, chasing and raider tactics.
 
+use std::collections::BTreeMap;
+
 use super::*;
 
 /// Nearest living combatant, if any.
@@ -27,7 +29,11 @@ pub fn nearest(players: &[Prey], from: Vec2) -> Option<(Entity, Vec2, f32)> {
         .map(|(e, p, c)| (*e, *p, p.distance(from), *c))
         .filter(|(.., d, c)| noticed(*c, *d))
         .map(|(e, p, d, _)| (e, p, d))
-        .min_by(|a, b| a.2.total_cmp(&b.2))
+        .min_by(|a, b| {
+            a.2.total_cmp(&b.2)
+                .then(a.1.x.to_bits().cmp(&b.1.x.to_bits()))
+                .then(a.1.y.to_bits().cmp(&b.1.y.to_bits()))
+        })
 }
 
 pub(super) fn wrap_angle(a: f32) -> f32 {
@@ -74,19 +80,23 @@ pub(super) fn roam(
     let playing = state.iter().any(|s| s.phase == Phase::Playing);
     rng.with(playing, crate::rng::Stream::Monsters, |mut rng| {
         // Each dog pack follows its lowest-slot member: (slot, position, heading).
-        let mut packs: HashMap<u32, (u8, Vec2, Vec2)> = HashMap::new();
+        // Serial order, then pack id: entity spawn order must not change who leads or who moves.
+        let mut dogs: Vec<(u32, u32, u8, Vec2, Vec2)> = Vec::new();
         for (_, monster, pos, brain, _, vitals) in &monsters {
             if monster.kind != MonsterKind::Dog || brain.pack == 0 || !vitals.alive {
                 continue;
             }
-            let entry = packs
-                .entry(brain.pack)
-                .or_insert((brain.slot, pos.0, brain.heading));
-            if brain.slot < entry.0 {
-                *entry = (brain.slot, pos.0, brain.heading);
+            dogs.push((brain.serial, brain.pack, brain.slot, pos.0, brain.heading));
+        }
+        dogs.sort_unstable_by_key(|(serial, ..)| *serial);
+        let mut packs: BTreeMap<u32, (u8, Vec2, Vec2)> = BTreeMap::new();
+        for (_, pack, slot, pos, heading) in dogs {
+            let entry = packs.entry(pack).or_insert((slot, pos, heading));
+            if slot < entry.0 {
+                *entry = (slot, pos, heading);
             }
         }
-        let pack_prey: HashMap<u32, Vec2> = packs
+        let pack_prey: BTreeMap<u32, Vec2> = packs
             .iter()
             .filter_map(|(id, (_, at, _))| {
                 nearest(&alive, *at)
@@ -95,7 +105,16 @@ pub(super) fn roam(
             })
             .collect();
 
-        for (entity, monster, mut pos, mut brain, mut state, vitals) in &mut monsters {
+        let mut order: Vec<(u32, Entity)> = monsters
+            .iter()
+            .map(|(entity, _, _, brain, _, _)| (brain.serial, entity))
+            .collect();
+        order.sort_unstable_by_key(|(serial, _)| *serial);
+        for (_, entity) in order {
+            let Ok((_, monster, mut pos, mut brain, mut state, vitals)) = monsters.get_mut(entity)
+            else {
+                continue;
+            };
             let kind = monster.kind;
             if !vitals.alive || matches!(kind, MonsterKind::Behemoth | MonsterKind::SporePod) {
                 continue;
@@ -103,7 +122,8 @@ pub(super) fn roam(
             let near = nearest(&alive, pos.0);
             brain.far = near.is_none_or(|(_, _, d)| d > FAR);
             let step = if brain.far {
-                if !(tick.0.wrapping_add(entity.to_bits() as u32)).is_multiple_of(FAR_STRIDE) {
+                // Serial, not entity id: a replay rebuilds the world and entity ids change.
+                if !(tick.0.wrapping_add(brain.serial)).is_multiple_of(FAR_STRIDE) {
                     continue;
                 }
                 FAR_STRIDE

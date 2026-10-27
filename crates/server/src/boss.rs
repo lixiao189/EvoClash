@@ -31,7 +31,8 @@ use crate::gameplay::{
 };
 use crate::inventory::spawn_loot;
 use crate::monsters::{
-    Brain, MAX_LIVE, nearest, over_building, prey, set_state, shoot, spawn_monster, spawn_puddle,
+    Brain, MAX_LIVE, Spawner, nearest, over_building, prey, set_state, shoot, spawn_monster,
+    spawn_puddle,
 };
 
 pub const ANNOUNCE_AT: u32 = 180 * TICKS_PER_SEC;
@@ -179,6 +180,8 @@ impl BossState {
 
 pub struct Contribution {
     pub entity: Entity,
+    /// Stable across a replay. Entity ids are not.
+    pub client_id: u64,
     pub credit: Credit,
     pub score: u32,
 }
@@ -203,6 +206,7 @@ pub fn awards(contributions: &[Contribution], leader_score: u32) -> Vec<Award> {
                 .recent
                 .total_cmp(&b.credit.recent)
                 .then(a.credit.total.total_cmp(&b.credit.total))
+                .then(a.client_id.cmp(&b.client_id))
         })
         .map(|c| c.entity);
     contributions
@@ -347,6 +351,7 @@ fn boss_flow(
     mut outbox: ResMut<Outbox>,
     mut decay_in: Local<u32>,
     rng: Res<crate::rng::SimRng>,
+    mut spawner: ResMut<Spawner>,
 ) {
     if reset.0 {
         // The match is starting over; reset_match clears the arena.
@@ -390,9 +395,10 @@ fn boss_flow(
             let hp = behemoth_hp(humans);
             let at = lair(&arena, &obstacles.0);
             let turf = Rect::from_center_size(at, Vec2::splat(800.0));
-            let brain = rng.with(true, crate::rng::Stream::Boss, |rng| {
+            let mut brain = rng.with(true, crate::rng::Stream::Boss, |rng| {
                 Brain::new(MonsterKind::Behemoth, false, at, turf, 0, 0, rng)
             });
+            brain.serial = spawner.alloc_serial();
             let entity = spawn_monster(
                 &mut commands,
                 MonsterKind::Behemoth,
@@ -436,18 +442,21 @@ fn reward(
         return;
     };
     let leader = players.iter().map(|(.., s)| s.score).max().unwrap_or(0);
-    let contributions: Vec<Contribution> = boss
+    let mut contributions: Vec<Contribution> = boss
         .credit
         .iter()
         .filter_map(|(entity, credit)| {
-            let (_, _, stats) = players.get(*entity).ok()?;
+            let (_, player, stats) = players.get(*entity).ok()?;
             Some(Contribution {
                 entity: *entity,
+                client_id: player.client_id,
                 credit: *credit,
                 score: stats.score,
             })
         })
         .collect();
+    // Hash iteration order is not stable across processes.
+    contributions.sort_by_key(|c| c.client_id);
     boss.credit.clear();
     let mut killer = None;
     for award in awards(&contributions, leader) {
@@ -504,6 +513,7 @@ fn behemoth(
     mut damage: ResMut<DamageQueue>,
     mut outbox: ResMut<Outbox>,
     rng: Res<crate::rng::SimRng>,
+    mut spawner: ResMut<Spawner>,
 ) {
     if state.phase != Phase::Playing {
         return;
@@ -674,7 +684,8 @@ fn behemoth(
                             continue;
                         }
                         let turf = Rect::from_center_size(spot, Vec2::splat(600.0));
-                        let brain = Brain::new(ghoul, false, spot, turf, 0, 0, rng);
+                        let mut brain = Brain::new(ghoul, false, spot, turf, 0, 0, rng);
+                        brain.serial = spawner.alloc_serial();
                         spawn_monster(&mut commands, ghoul, false, spot, brain, None);
                         live_monsters += 1;
                     }
@@ -783,6 +794,7 @@ mod tests {
         let e = |i| Entity::from_raw_u32(i).unwrap();
         let c = |i, recent, total, score| Contribution {
             entity: e(i),
+            client_id: i as u64,
             credit: Credit { recent, total },
             score,
         };

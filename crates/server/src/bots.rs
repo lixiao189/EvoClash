@@ -65,6 +65,23 @@ pub struct Bot {
     pub path: EvoPath,
 }
 
+impl Bot {
+    /// Placeholder brain. `seed_match_once` overwrites it when Playing starts.
+    pub fn fresh() -> Self {
+        Self {
+            goal: Vec2::ZERO,
+            last_pos: Vec2::ZERO,
+            stuck: 0,
+            strafe: 1.0,
+            think_in: 0,
+            aim_error: 0.0,
+            target: None,
+            locked_for: 0,
+            path: EvoPath::Mutant,
+        }
+    }
+}
+
 /// Walkable grid for the current arena; raiders path with it too.
 #[derive(Resource)]
 pub struct Nav(pub NavGrid);
@@ -145,7 +162,7 @@ impl Plugin for BotsPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             FixedUpdate,
-            (rebuild_nav, balance_bots, prepare, think)
+            (rebuild_nav, seed_match_once, balance_bots, prepare, think)
                 .chain()
                 .in_set(SimSet::Input),
         );
@@ -299,6 +316,47 @@ fn next_perk(evo: &Evolution, path: EvoPath) -> Option<Perk> {
 const GUNS: [ShopItem; 3] = [ShopItem::Rifle, ShopItem::PipeShotgun, ShopItem::Bow];
 const ARMORS: [ShopItem; 2] = [ShopItem::Kevlar, ShopItem::ScrapArmor];
 
+/// Playing start: personalities come from the match bot stream, in client_id order, so lobby
+/// wandering cannot leak into the round a replay rebuilds.
+fn seed_match_once(
+    mut armed: Local<bool>,
+    state: Query<&MatchState>,
+    rng: Res<SimRng>,
+    mut bots: Query<(Entity, &Player, &mut Bot)>,
+) {
+    let playing = state.iter().any(|s| s.phase == Phase::Playing);
+    if !playing {
+        *armed = false;
+        return;
+    }
+    if *armed {
+        return;
+    }
+    *armed = true;
+    let mut order: Vec<(u64, Entity)> = bots
+        .iter()
+        .map(|(entity, player, _)| (player.client_id, entity))
+        .collect();
+    order.sort_unstable_by_key(|(id, _)| *id);
+    rng.with(true, Stream::Bots, |rng| {
+        for (_, entity) in order {
+            let Ok((_, _, mut bot)) = bots.get_mut(entity) else {
+                continue;
+            };
+            bot.goal = Vec2::ZERO;
+            bot.last_pos = Vec2::ZERO;
+            bot.stuck = 0;
+            bot.strafe = 1.0;
+            bot.think_in = 0;
+            bot.target = None;
+            bot.locked_for = 0;
+            bot.aim_error = rng.random_range(-0.12..0.12);
+            let path_i = rng.random_range(0..EvoPath::ALL.len());
+            bot.path = EvoPath::ALL[path_i];
+        }
+    });
+}
+
 /// A bot's death prep, through the same commands a human sends: spend points on the build,
 /// and once it may deploy, buy the best gun, armor and EMPs it can afford and go.
 /// Returns true if the perks changed.
@@ -408,6 +466,7 @@ fn think(
         &Evolution,
         &SkillState,
         &Aggressors,
+        &Player,
     )>,
     others: Query<
         (Entity, &Pos, &Vitals, Option<&Monster>, Has<Human>),
@@ -429,9 +488,27 @@ fn think(
                 *claims.entry(target).or_default() += 1;
             }
         }
-        for (entity, mut bot, mut current, pos, vitals, mut loadout, evo, skills, aggressors) in
-            &mut bots
-        {
+        let mut order: Vec<(u64, Entity)> = bots
+            .iter()
+            .map(|(entity, .., player)| (player.client_id, entity))
+            .collect();
+        order.sort_unstable_by_key(|(id, _)| *id);
+        for (_, entity) in order {
+            let Ok((
+                entity,
+                mut bot,
+                mut current,
+                pos,
+                vitals,
+                mut loadout,
+                evo,
+                skills,
+                aggressors,
+                _,
+            )) = bots.get_mut(entity)
+            else {
+                continue;
+            };
             if !vitals.alive {
                 current.0 = PlayerInput::default();
                 bot.target = None;
@@ -491,7 +568,14 @@ fn think(
                     (e, p.0, v.armor_points, dist, dist * weight)
                 })
                 .filter(|(_, p, _, d, _)| *d < SIGHT && arena.line_of_sight(pos.0, *p))
-                .min_by(|a, b| a.4.total_cmp(&b.4));
+                .min_by(|a, b| {
+                    a.4.total_cmp(&b.4).then(
+                        a.1.x
+                            .to_bits()
+                            .cmp(&b.1.x.to_bits())
+                            .then(a.1.y.to_bits().cmp(&b.1.y.to_bits())),
+                    )
+                });
 
             bot.target = enemy.map(|(e, ..)| e);
             if bot.target != previous {

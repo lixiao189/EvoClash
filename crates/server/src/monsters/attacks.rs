@@ -32,7 +32,17 @@ pub(super) fn attack(
     let alive = prey(players.iter());
     let playing = state.phase == Phase::Playing;
     rng.with(playing, crate::rng::Stream::Monsters, |mut rng| {
-        for (entity, monster, pos, mut brain, mut mstate, mut vitals) in &mut monsters {
+        let mut order: Vec<(u32, Entity)> = monsters
+            .iter()
+            .map(|(entity, _, _, brain, _, _)| (brain.serial, entity))
+            .collect();
+        order.sort_unstable_by_key(|(serial, _)| *serial);
+        for (_, entity) in order {
+            let Ok((entity, monster, pos, mut brain, mut mstate, mut vitals)) =
+                monsters.get_mut(entity)
+            else {
+                continue;
+            };
             let kind = monster.kind;
             if !vitals.alive || kind == MonsterKind::Behemoth {
                 continue;
