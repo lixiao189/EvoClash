@@ -119,8 +119,9 @@ pub struct Vitals {
     pub armor: ArmorKind,
     pub armor_points: f32,
     pub alive: bool,
-    /// Ticks until the automatic respawn while dead (counts down from
-    /// `shop::RESPAWN_MAX_TICKS`; `shop::can_deploy` says when you may leave early).
+    /// Ticks left in the death window (counts down from `shop::RESPAWN_MAX_TICKS`,
+    /// then sticks at 1 until Deploy). `shop::can_deploy` says when you may leave.
+    /// Lobby deaths still reach 0 on their own.
     pub respawn_in: u16,
     /// Ticks of EMP-induced slowdown left.
     pub emp_slow: u16,

@@ -1,5 +1,6 @@
 //! Damage taken by monsters, death, loot drops and match reset.
 
+use evoclash_game::items::zone_ammo;
 use evoclash_game::shop::monster_scrap;
 
 use super::*;
@@ -14,6 +15,13 @@ pub fn crawler_mult(facing: f32, toward_attacker: Vec2) -> f32 {
     }
 }
 
+/// One `roll_ammo` (so the rolls after it stay in order), replaced by a full box of every
+/// family the zone stocks.
+fn ammo_drop(tier: u8, rng: &mut impl Rng) -> Vec<Item> {
+    let _rolled = roll_ammo(tier, rng);
+    zone_ammo(tier).iter().copied().map(Item::ammo).collect()
+}
+
 pub(super) fn drops(monster: Monster, brain: &Brain, rng: &mut impl Rng) -> Vec<Item> {
     let tier = spec(monster.kind).loot_tier;
     if monster.elite {
@@ -21,23 +29,21 @@ pub(super) fn drops(monster: Monster, brain: &Brain, rng: &mut impl Rng) -> Vec<
     }
     // Normal monsters pay in scrap; gear comes from the shop, crates and other fighters.
     match monster.kind {
-        MonsterKind::Roach if rng.random_bool(0.25) => vec![roll_ammo(tier, rng)],
+        MonsterKind::Roach if rng.random_bool(0.25) => ammo_drop(tier, rng),
         MonsterKind::Roach if rng.random_bool(0.2) => vec![Item::Medkit],
         MonsterKind::Dog if rng.random_bool(0.25) => vec![Item::Medkit],
         MonsterKind::SporePod | MonsterKind::Spitter | MonsterKind::Crawler => {
-            let mut items = vec![roll_ammo(tier, rng)];
+            let mut items = ammo_drop(tier, rng);
             if rng.random_bool(0.35) {
                 items.push(Item::Medkit);
             }
             items
         }
-        MonsterKind::Drone if rng.random_bool(0.4) => {
-            vec![match rng.random_range(0..3) {
-                0 => Item::Emp,
-                1 => Item::Medkit,
-                _ => roll_ammo(tier, rng),
-            }]
-        }
+        MonsterKind::Drone if rng.random_bool(0.4) => match rng.random_range(0..3) {
+            0 => vec![Item::Emp],
+            1 => vec![Item::Medkit],
+            _ => ammo_drop(tier, rng),
+        },
         MonsterKind::Raider => {
             // Whatever it carried, like any fallen fighter: the gun and its ammo.
             let gun = Item::weapon(brain.weapon);
@@ -203,5 +209,138 @@ pub(super) fn reset_monsters(
     if reset.0 {
         *spawner = Spawner::default();
         blasts.0.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy::prelude::*;
+    use evoclash_game::items::{AmmoKind, Item, roll_ammo, zone_ammo};
+    use evoclash_game::protocol::{Monster, MonsterKind};
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    use super::drops;
+    use crate::monsters::{Brain, spec};
+
+    fn brain(kind: MonsterKind, rng: &mut impl Rng) -> Brain {
+        Brain::new(
+            kind,
+            false,
+            Vec2::ZERO,
+            Rect::from_center_size(Vec2::ZERO, Vec2::splat(64.0)),
+            0,
+            0,
+            rng,
+        )
+    }
+
+    fn ammo_kinds(items: &[Item]) -> Vec<(AmmoKind, u16)> {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Ammo { kind, rounds } => Some((*kind, *rounds)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn normal_ammo_drops_are_both_zone_families() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let roach_brain = brain(MonsterKind::Roach, &mut rng);
+        let mut shadow = rng.clone();
+        let roach = Monster {
+            kind: MonsterKind::Roach,
+            elite: false,
+        };
+        let tier = spec(MonsterKind::Roach).loot_tier;
+        let mut saw_pair = false;
+        for _ in 0..40 {
+            let items = drops(roach, &roach_brain, &mut rng);
+            let expected = if shadow.random_bool(0.25) {
+                let _rolled = roll_ammo(tier, &mut shadow);
+                let boxes: Vec<Item> = zone_ammo(tier).iter().copied().map(Item::ammo).collect();
+                assert_eq!(boxes.len(), 2);
+                assert_ne!(boxes[0], boxes[1]);
+                saw_pair = true;
+                boxes
+            } else if shadow.random_bool(0.2) {
+                vec![Item::Medkit]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(items, expected);
+        }
+        assert!(saw_pair, "roach ammo chance never came up");
+
+        let mut rng = StdRng::seed_from_u64(8);
+        let pod_brain = brain(MonsterKind::SporePod, &mut rng);
+        let items = drops(
+            Monster {
+                kind: MonsterKind::SporePod,
+                elite: false,
+            },
+            &pod_brain,
+            &mut rng,
+        );
+        let ammo = ammo_kinds(&items);
+        assert_eq!(
+            ammo,
+            vec![
+                (AmmoKind::Bullet, AmmoKind::Bullet.box_rounds()),
+                (AmmoKind::Shell, AmmoKind::Shell.box_rounds()),
+            ]
+        );
+
+        let mut rng = StdRng::seed_from_u64(9);
+        let crawler_brain = brain(MonsterKind::Crawler, &mut rng);
+        let items = drops(
+            Monster {
+                kind: MonsterKind::Crawler,
+                elite: false,
+            },
+            &crawler_brain,
+            &mut rng,
+        );
+        assert_eq!(
+            ammo_kinds(&items),
+            vec![
+                (AmmoKind::Cell, AmmoKind::Cell.box_rounds()),
+                (AmmoKind::Bullet, AmmoKind::Bullet.box_rounds()),
+            ]
+        );
+    }
+
+    #[test]
+    fn elites_and_raiders_do_not_fan_out_ammo() {
+        let mut rng = StdRng::seed_from_u64(3);
+        let elite_brain = brain(MonsterKind::Crawler, &mut rng);
+        let elite = Monster {
+            kind: MonsterKind::Crawler,
+            elite: true,
+        };
+        for _ in 0..20 {
+            let items = drops(elite, &elite_brain, &mut rng);
+            assert_eq!(items.len(), 2);
+            assert_eq!(items[1], Item::Medkit);
+            assert!(ammo_kinds(&items).len() <= 1);
+        }
+
+        let mut rng = StdRng::seed_from_u64(4);
+        let raider_brain = brain(MonsterKind::Raider, &mut rng);
+        let raider = Monster {
+            kind: MonsterKind::Raider,
+            elite: false,
+        };
+        let gun = Item::weapon(raider_brain.weapon);
+        let Item::Ammo { kind, rounds } = gun.matching_ammo().expect("raider gun has ammo") else {
+            panic!("matching ammo");
+        };
+        for _ in 0..20 {
+            let items = drops(raider, &raider_brain, &mut rng);
+            assert!(items.contains(&gun));
+            assert_eq!(ammo_kinds(&items), vec![(kind, rounds)]);
+        }
     }
 }

@@ -4,7 +4,7 @@
 
 use bevy::prelude::*;
 use evoclash_game::evolution::{Evolution, VAULT_SAFE_XP, crate_xp, safe_xp};
-use evoclash_game::items::{ArmorKind, Item, roll_ammo, roll_container};
+use evoclash_game::items::{ArmorKind, Item, roll_ammo, roll_container, zone_ammo};
 use evoclash_game::map::{Biome, PropKind};
 use evoclash_game::protocol::*;
 use evoclash_game::shop::{VAULT_SAFE_SCRAP, crate_scrap, safe_scrap};
@@ -390,6 +390,15 @@ fn sort_damage(
     });
 }
 
+/// A crate's rolled item. Ammo becomes one full box of each family the zone stocks
+/// (nothing in the vault); guns, medkits and the rest stay a single drop.
+fn crate_loot(item: Item, tier: u8) -> Vec<Item> {
+    match item {
+        Item::Ammo { .. } => zone_ammo(tier).iter().copied().map(Item::ammo).collect(),
+        other => vec![other],
+    }
+}
+
 /// Props take damage here; everything aimed elsewhere is left for the other resolvers.
 fn resolve_prop_damage(
     mut commands: Commands,
@@ -449,7 +458,17 @@ fn resolve_prop_damage(
                         None
                     };
                     if let Some(item) = item {
-                        spawn_loot(&mut commands, item, pos.0, Some(LOOT_TTL));
+                        let items = crate_loot(item, prop.tier);
+                        let n = items.len();
+                        for (i, item) in items.into_iter().enumerate() {
+                            // Same fan as a monster that drops more than one thing.
+                            let offset = if n > 1 {
+                                Vec2::from_angle(i as f32 * std::f32::consts::TAU / n as f32) * 16.0
+                            } else {
+                                Vec2::ZERO
+                            };
+                            spawn_loot(&mut commands, item, pos.0 + offset, Some(LOOT_TTL));
+                        }
                     }
                 }
                 PropKind::Barrel => blasts.0.push(Blast {
@@ -462,4 +481,35 @@ fn resolve_prop_damage(
             false
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use evoclash_game::items::{AmmoKind, Item, WeaponKind};
+
+    use super::crate_loot;
+
+    #[test]
+    fn a_crate_ammo_roll_becomes_both_zone_boxes() {
+        let items = crate_loot(Item::ammo(AmmoKind::Bullet), 1);
+        assert_eq!(
+            items,
+            vec![Item::ammo(AmmoKind::Arrow), Item::ammo(AmmoKind::Shell)]
+        );
+        assert_ne!(items[0], items[1]);
+        assert!(items.iter().all(|item| match item {
+            Item::Ammo { kind, rounds } => *rounds == kind.box_rounds(),
+            _ => false,
+        }));
+        assert_eq!(
+            crate_loot(Item::ammo(AmmoKind::Shell), 2),
+            vec![Item::ammo(AmmoKind::Bullet), Item::ammo(AmmoKind::Shell)]
+        );
+        assert_eq!(
+            crate_loot(Item::weapon(WeaponKind::Rifle), 2),
+            vec![Item::weapon(WeaponKind::Rifle)]
+        );
+        assert_eq!(crate_loot(Item::Medkit, 0), vec![Item::Medkit]);
+        assert!(crate_loot(Item::ammo(AmmoKind::Cell), 4).is_empty());
+    }
 }
