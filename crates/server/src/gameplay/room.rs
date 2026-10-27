@@ -1,6 +1,7 @@
 //! Private-room host commands, host handoff and the 30 minute idle cap.
 
 use super::*;
+use crate::inbox::Inbox;
 use crate::journal::{Injected, Trace, fmt_room};
 use crate::spectate::{SpectateInbox, SpectatorSession};
 
@@ -159,7 +160,7 @@ fn forward_spectate(
 
 pub(crate) fn read_room_commands(
     mut commands: Commands,
-    mut links: Query<(Entity, &mut MessageReceiver<RoomCommand>), With<ClientOf>>,
+    mut links: Query<(Entity, &mut Inbox<RoomCommand>), With<ClientOf>>,
     mut humans: Query<(
         Entity,
         &mut Human,
@@ -184,8 +185,8 @@ pub(crate) fn read_room_commands(
         return;
     };
     let mut inbox = Vec::new();
-    for (link, mut receiver) in &mut links {
-        let cmds: Vec<RoomCommand> = receiver.receive().collect();
+    for (link, mut pending) in &mut links {
+        let cmds = pending.take();
         if !cmds.is_empty() {
             inbox.push((link, cmds));
         }
