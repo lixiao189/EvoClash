@@ -2,6 +2,10 @@
 
 use super::*;
 
+use crate::evo_panel::EvoPanelOpen;
+use crate::input::{BackpackOpen, panel_open};
+use crate::menu::MenuOpen;
+
 /// A melee swing: cock back over `SWING_WINDUP`, sweep through, then settle back on the aim.
 const SWING_WINDUP: f32 = 0.04;
 const SWING_SWEEP: f32 = 0.12;
@@ -334,6 +338,9 @@ pub(super) fn pose_players(
     tex: Res<Textures>,
     lpc_sprites: Res<LpcSprites>,
     cursor: Res<CursorWorld>,
+    backpack: Res<BackpackOpen>,
+    menu: Res<MenuOpen>,
+    evo: Res<EvoPanelOpen>,
     fixed: Res<Time<Fixed>>,
     time: Res<Time>,
     selection: Res<Selection>,
@@ -346,6 +353,7 @@ pub(super) fn pose_players(
         Option<&Strike>,
         &mut PlayerParts,
         Has<LocalPlayer>,
+        Option<&ActionState<PlayerInput>>,
     )>,
     mut parts_q: Query<(&mut Sprite, &mut Transform), Without<Player>>,
     mut shown: Query<&mut Visibility, Without<Player>>,
@@ -360,7 +368,7 @@ pub(super) fn pose_players(
             });
         }
     };
-    for (pos, samples, aim, loadout, vitals, strike, mut parts, local) in &mut players {
+    for (pos, samples, aim, loadout, vitals, strike, mut parts, local, action) in &mut players {
         // Your own hand follows your hotbar request without waiting for the server.
         let loadout = &if local {
             selection.apply(loadout)
@@ -370,9 +378,14 @@ pub(super) fn pose_players(
         let p = visual_pos(pos, samples, &fixed);
         let gun_at = p + Vec2::Y * GUN_HEIGHT;
         // Your own body follows the cursor directly instead of waiting for the server's aim.
-        let aim = match (local, cursor.0) {
-            (true, Some(c)) => (c - gun_at).normalize_or(aim.0),
-            _ => aim.0,
+        // An open panel uses the aim already in the input buffer, which stays frozen.
+        let aim = if local && panel_open(backpack.0, menu.0, evo.0) {
+            action.map(|a| a.0.aim.normalize_or(aim.0)).unwrap_or(aim.0)
+        } else {
+            match (local, cursor.0) {
+                (true, Some(c)) => (c - gun_at).normalize_or(aim.0),
+                _ => aim.0,
+            }
         };
         if vitals.alive {
             parts.died = None;

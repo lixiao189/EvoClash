@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Run one EvoClash Pi role (.pi/agents/<role>.md) non-interactively on a brief file.
+#
+#   scripts/pi-run [-C dir] [-m model] <role> <brief.md> [session]
+#
+# -C runs Pi in another checkout (a worktree); -m picks a stronger model (the role's `thinking`
+# level is appended unless the model already names one). Reusing a session name continues that
+# Pi conversation, which is how you follow up or answer a question. The event log, stderr and
+# the final report land in .pi/runs/<session>.{jsonl,err,md}; the report is also printed.
+# Watch a run with scripts/pi-status.
+set -euo pipefail
+
+usage() {
+    sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//' >&2
+    exit 2
+}
+
+dir=$PWD
+model=
+while getopts "C:m:h" opt; do
+    case $opt in
+        C) dir=$OPTARG ;;
+        m) model=$OPTARG ;;
+        *) usage ;;
+    esac
+done
+shift $((OPTIND - 1))
+[ $# -ge 2 ] || usage
+role=$1
+brief=$2
+session=${3:-$role-$(date +%Y%m%d-%H%M%S)}
+
+root=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
+agent=$root/.pi/agents/$role.md
+[ -f "$agent" ] || { echo "pi-run: no role '$role' in $root/.pi/agents" >&2; exit 2; }
+[ -f "$brief" ] || { echo "pi-run: no brief file $brief" >&2; exit 2; }
+command -v pi >/dev/null || { echo "pi-run: pi is not installed" >&2; exit 2; }
+command -v jq >/dev/null || { echo "pi-run: jq is not installed" >&2; exit 2; }
+
+runs=$root/.pi/runs
+mkdir -p "$runs"
+log=$runs/$session.jsonl
+err=$runs/$session.err
+report=$runs/$session.md
+prompt=$runs/$session.system.md
+pidfile=$runs/$session.pid
+
+# One frontmatter field of the role file.
+front() {
+    awk -v key="$1" 'NR == 1 && /^---$/ { f = 1; next } f && /^---$/ { exit }
+        f && index($0, key ":") == 1 { sub("^" key ":[ ]*", ""); print }' "$agent"
+}
+
+# `contact_supervisor` only exists when Pi itself is the lead; here the lead reads the report.
+tools=$(front tools | tr -d ' ' | tr ',' '\n' | grep -vx contact_supervisor | paste -sd, -)
+thinking=$(front thinking)
+
+awk 'NR == 1 && /^---$/ { f = 1; next } f && /^---$/ { f = 0; next } !f' "$agent" >|"$prompt"
+cat >>"$prompt" <<'EOF'
+
+You run non-interactively; nobody can answer mid-run. If a decision is missing, stop and make
+the first line of your report `需要决定：<the question>`. The lead replies in this same session.
+EOF
+
+args=(-p --mode json --session-id "evoclash-$session" --append-system-prompt "$prompt")
+[ -z "$tools" ] || args+=(--tools "$tools")
+if [ -n "$model" ]; then
+    [[ $model == *:* || -z $thinking ]] || model=$model:$thinking
+    args+=(--model "$model")
+fi
+
+# pi renames its process, so pi-status finds a live run through this file, not pgrep.
+echo $$ >|"$pidfile"
+trap 'rm -f "$pidfile"' EXIT
+
+echo "pi-run: $role in $dir, session $session" >&2
+echo "pi-run: log $log" >&2
+status=0
+# stdin from /dev/null: with an open stdin `pi -p` waits for it and never starts.
+(cd "$dir" && pi "${args[@]}" "$(cat "$brief")") </dev/null >|"$log" 2>|"$err" || status=$?
+
+# The report is the last assistant message with text. `fromjson?` skips a torn last line.
+jq -Rrs '[split("\n")[] | fromjson? | select(.type == "message_end" and .message.role == "assistant")
+    | [.message.content[]? | select(.type == "text") | .text] | join("")
+    | select(length > 0)] | last // ""' "$log" >|"$report"
+
+if [ -s "$report" ]; then
+    cat "$report"
+else
+    echo "pi-run: no report (exit $status); see $err" >&2
+    tail -5 "$err" >&2 || true
+    [ "$status" -ne 0 ] || status=1
+fi
+exit "$status"

@@ -54,6 +54,8 @@ The main session is the lead: it talks to the user, splits the work, briefs agen
 
 The same five roles live in two places. Pi discovers `.pi/agents/*.md` (`advertise: true`; aliases `策划` / `服务端` / `客户端` / `美术` / `测试`). Those agents inherit the session model; thinking is `medium` for `game-designer` and `artist`, `high` for `server-dev` and `client-dev`, `low` for `game-tester`. Claude Code uses `.claude/agents/`: designer, server, client, and artist on sonnet, tester on haiku.
 
+A Claude Code lead dispatches to the Pi roles by default: `scripts/pi-run [-C worktree] [-m model] <role> <brief.md> [session]` runs one role non-interactively (run it in the background) and prints its report; the log and report go to `.pi/runs/` (ignored). Reusing a session name continues that Pi conversation — follow-ups, or the answer when a report starts with `需要决定：`. `scripts/pi-status [session]` shows what each run is doing and flags a stalled one. Parallel runs use separate worktrees (`-C`). Fall back to `.claude/agents/` only when Pi is unavailable.
+
 | Agent | Owns | Use for |
 |---|---|---|
 | `game-designer` | `doc/gameplay.md` (no code) | rules, numbers, balance → short spec |
