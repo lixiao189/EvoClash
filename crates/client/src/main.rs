@@ -107,6 +107,9 @@ fn main() {
         input::InputPlugin,
         predict::PredictPlugin,
         render::RenderPlugin,
+    ));
+    // Bevy's Plugins tuple tops out at 15; keep this list in two groups.
+    app.add_plugins((
         effects::EffectsPlugin,
         hud::HudPlugin,
         lobby_ui::LobbyUiPlugin,
