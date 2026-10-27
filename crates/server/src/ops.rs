@@ -7,11 +7,11 @@ use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 use evoclash_game::api::Heartbeat;
-use evoclash_game::protocol::{MatchState, Player};
+use evoclash_game::protocol::{MatchState, Player, RoomSettings};
 
 use crate::config::ServerConfig;
 use crate::connections::{Human, TlsIdentity};
-use crate::gameplay::{lobby_open, phase_left_secs, phase_name};
+use crate::gameplay::{current_join_mode, phase_left_secs, phase_name};
 
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(2);
 /// The self-signed certificate is valid for 14 days; stop taking new players well before that
@@ -69,8 +69,9 @@ impl Plugin for OpsPlugin {
                 phase_left_secs: None,
                 humans: 0,
                 bots: 0,
-                is_private: false,
-                room_code: None,
+                is_private: config.private,
+                room_code: (config.private && !config.room_code.is_empty())
+                    .then(|| config.room_code.clone()),
                 room_seed: config.room_seed,
                 match_index: 0,
                 join_mode: "lobby".into(),
@@ -126,9 +127,10 @@ fn update_snapshot(
     humans: Query<&Human>,
     players: Query<&Player>,
     state: Query<&MatchState>,
+    settings: Query<&RoomSettings>,
     config: Res<ServerConfig>,
 ) {
-    let human_count = humans.iter().count() as u32;
+    let human_count = humans.iter().filter(|human| !human.left).count() as u32;
     let bots = players.iter().filter(|player| player.bot).count() as u32;
     let Ok(mut snapshot) = ops.snapshot.lock() else {
         return;
@@ -140,19 +142,18 @@ fn update_snapshot(
     snapshot.accepting = !ops.is_draining() && (human_count as usize) < config.max_players;
     snapshot.tick_us = timer.ema_us as u32;
     snapshot.room_seed = config.room_seed;
-    snapshot.is_private = false;
-    snapshot.room_code = None;
     snapshot.exiting = exiting;
+    let room = settings.iter().next();
+    let private_room = room.is_some_and(|settings| settings.private_room);
+    snapshot.is_private = private_room;
+    snapshot.room_code = room.and_then(|settings| {
+        (settings.private_room && !settings.code.is_empty()).then(|| settings.code.clone())
+    });
     if let Some(state) = state.iter().next() {
         snapshot.phase = phase_name(state.phase).to_string();
         snapshot.phase_left_secs = phase_left_secs(state);
         snapshot.match_index = state.match_index;
-        snapshot.join_mode = if lobby_open(state) && snapshot.accepting {
-            "lobby"
-        } else {
-            "none"
-        }
-        .to_string();
+        snapshot.join_mode = current_join_mode(state, private_room, snapshot.accepting).to_string();
     }
 }
 

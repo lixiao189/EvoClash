@@ -94,12 +94,18 @@ pub(super) fn populate(
     arena: Res<Arena>,
     obstacles: Res<Obstacles>,
     state: Single<&MatchState>,
+    settings: Query<&RoomSettings>,
     mut spawner: ResMut<Spawner>,
     monsters: Query<(&Monster, &Brain)>,
     players: Query<(&Pos, &Vitals), With<Player>>,
     rng: Res<crate::rng::SimRng>,
 ) {
-    if !config.monsters || state.phase != Phase::Playing {
+    let monsters_on = settings
+        .iter()
+        .next()
+        .map(|settings| settings.monsters)
+        .unwrap_or(config.monsters);
+    if !monsters_on || state.phase != Phase::Playing {
         return;
     }
     let mut live = census(monsters.iter().map(|(m, b)| (m.kind, m.elite, b.pack)));

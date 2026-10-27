@@ -34,6 +34,10 @@ pub struct ClientArgs {
     pub matchmaker: String,
     /// Simulated one-way latency in ms for testing prediction (dev only).
     pub fake_latency_ms: u64,
+    /// Private room code from `?room=`. Absent for a quick start.
+    pub room: Option<String>,
+    /// `?create=1` posts `/v1/rooms` instead of joining.
+    pub create_room: bool,
 }
 
 /// Read the page URL. `None` until the player has picked a name (index.html asks for one).
@@ -42,6 +46,10 @@ fn page_args() -> Option<ClientArgs> {
     let location = web_sys::window()?.location();
     let params = web_sys::UrlSearchParams::new_with_str(&location.search().ok()?).ok()?;
     let name = params.get("name").filter(|name| !name.trim().is_empty())?;
+    let room = params
+        .get("room")
+        .map(|code| code.trim().to_uppercase())
+        .filter(|code| !code.is_empty());
     Some(ClientArgs {
         name,
         matchmaker: location.origin().ok()?,
@@ -49,6 +57,8 @@ fn page_args() -> Option<ClientArgs> {
             .get("lag")
             .and_then(|lag| lag.parse().ok())
             .unwrap_or(0),
+        room,
+        create_room: params.get("create").as_deref() == Some("1"),
     })
 }
 

@@ -51,12 +51,16 @@ pub(super) fn loot_spawner(
 }
 
 fn connected_humans(humans: &Query<&Human>) -> usize {
-    humans.iter().filter(|human| human.connected()).count()
+    humans
+        .iter()
+        .filter(|human| human.connected() && !human.left)
+        .count()
 }
 
 pub fn match_flow(
     mut commands: Commands,
     mut state: Single<&mut MatchState>,
+    settings: Single<&RoomSettings>,
     mut arena: ResMut<Arena>,
     players: Query<(&Player, &Stats)>,
     humans: Query<&Human>,
@@ -69,6 +73,7 @@ pub fn match_flow(
     rng: Res<SimRng>,
     mut exit: MessageWriter<AppExit>,
 ) {
+    let private_room = settings.private_room;
     match state.phase {
         Phase::Lobby => {
             let humans_n = connected_humans(&humans);
@@ -77,8 +82,9 @@ pub fn match_flow(
                     state.countdown_active = false;
                     state.ticks_left = 0;
                 }
-            } else if !state.countdown_active && players.iter().count() >= 2 {
-                // First human (bots already fill the room) starts it. Later joins do not reset it.
+            } else if !private_room && !state.countdown_active && players.iter().count() >= 2 {
+                // Public rooms start on the first human. Later joins do not reset it.
+                // A private room waits for the host's Start.
                 state.countdown_active = true;
                 state.ticks_left = LOBBY_COUNTDOWN_TICKS;
             } else if state.countdown_active {
@@ -89,15 +95,23 @@ pub fn match_flow(
             }
         }
         Phase::Starting => {
-            state.ticks_left = state.ticks_left.saturating_sub(1);
-            if state.ticks_left == 0 {
-                begin_playing(
-                    &mut state,
-                    &mut vitals,
-                    &rng,
-                    &mut outbox,
-                    players.iter().count(),
-                );
+            // Start was valid, then someone left: don't begin a match with one combatant.
+            if players.iter().count() < 2 {
+                info!("not enough combatants to start, back to the lobby");
+                state.phase = Phase::Lobby;
+                state.countdown_active = false;
+                state.ticks_left = 0;
+            } else {
+                state.ticks_left = state.ticks_left.saturating_sub(1);
+                if state.ticks_left == 0 {
+                    begin_playing(
+                        &mut state,
+                        &mut vitals,
+                        &rng,
+                        &mut outbox,
+                        players.iter().count(),
+                    );
+                }
             }
         }
         Phase::Playing => {
@@ -151,7 +165,14 @@ pub fn match_flow(
                     return;
                 }
                 begin_lobby(
-                    &mut state, &mut arena, &config, &rng, &mut reset, &humans, &players,
+                    &mut state,
+                    &mut arena,
+                    &config,
+                    &rng,
+                    &mut reset,
+                    &humans,
+                    &players,
+                    private_room,
                 );
             }
         }
@@ -200,6 +221,7 @@ fn begin_lobby(
     reset: &mut ResetRequested,
     humans: &Query<&Human>,
     players: &Query<(&Player, &Stats)>,
+    private_room: bool,
 ) {
     state.match_index = state.match_index.saturating_add(1);
     state.map_seed = mix(config.room_seed, state.match_index);
@@ -210,7 +232,8 @@ fn begin_lobby(
     state.boss_eta = 0;
     state.vault_in = FIRST_VAULT_TICKS;
     // Whoever is still here starts the next public countdown immediately.
-    if connected_humans(humans) > 0 && players.iter().count() >= 2 {
+    // A private room waits for the host again.
+    if !private_room && connected_humans(humans) > 0 && players.iter().count() >= 2 {
         state.countdown_active = true;
         state.ticks_left = LOBBY_COUNTDOWN_TICKS;
     } else {
@@ -321,9 +344,11 @@ pub(super) fn place_starters(
     }
 }
 
-/// Public room with nobody in it closes itself. Draining an empty lobby leaves at once.
+/// A room with nobody in it closes itself. Draining an empty lobby leaves at once.
+/// Public lobbies wait 30s; private lobbies wait 120s. Playing and results stay 10s.
 pub(super) fn empty_close(
     state: Query<&MatchState>,
+    settings: Query<&RoomSettings>,
     humans: Query<&Human>,
     ops: Res<OpsState>,
     mut empty_for: Local<u32>,
@@ -342,8 +367,15 @@ pub(super) fn empty_close(
         exit.write(AppExit::Success);
         return;
     }
+    let private_room = settings.iter().next().is_some_and(|s| s.private_room);
     let limit = match state.phase {
-        Phase::Lobby => EMPTY_LOBBY_TICKS,
+        Phase::Lobby => {
+            if private_room {
+                PRIVATE_EMPTY_LOBBY_TICKS
+            } else {
+                EMPTY_LOBBY_TICKS
+            }
+        }
         Phase::Playing | Phase::Results => EMPTY_MATCH_TICKS,
         _ => {
             *empty_for = 0;

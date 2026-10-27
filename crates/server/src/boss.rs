@@ -336,6 +336,7 @@ impl Plugin for BossPlugin {
 fn boss_flow(
     mut commands: Commands,
     mut state: Single<&mut MatchState>,
+    settings: Query<&RoomSettings>,
     mut boss: ResMut<BossState>,
     reset: Res<ResetRequested>,
     arena: Res<Arena>,
@@ -351,7 +352,13 @@ fn boss_flow(
         // The match is starting over; reset_match clears the arena.
         *boss = BossState::default();
     }
-    let eta = if state.phase == Phase::Playing && boss.stage == Stage::Countdown {
+    // Monsters off means no behemoth either. The vault timer lives in match flow and still runs.
+    let monsters_on = settings
+        .iter()
+        .next()
+        .map(|settings| settings.monsters)
+        .unwrap_or(true);
+    let eta = if monsters_on && state.phase == Phase::Playing && boss.stage == Stage::Countdown {
         SPAWN_AT.saturating_sub(MATCH_TICKS.saturating_sub(state.ticks_left))
     } else {
         0
@@ -359,7 +366,7 @@ fn boss_flow(
     if state.boss_eta != eta {
         state.boss_eta = eta;
     }
-    if state.phase != Phase::Playing {
+    if state.phase != Phase::Playing || !monsters_on {
         return;
     }
     if boss.stage == Stage::Alive {
