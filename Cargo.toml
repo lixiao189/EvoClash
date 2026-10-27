@@ -69,7 +69,9 @@ lto = "thin"
 codegen-units = 1
 
 # The browser client (`make web`): stripped and size-optimized, since players download it.
-[profile.web]
+# Not named `web`: cargo keeps a profile's host build scripts and proc-macros in target/<profile>/,
+# and target/web is trunk's dist dir, which trunk replaces on every build.
+[profile.wasm]
 inherits = "release"
 opt-level = "s"
 strip = true
