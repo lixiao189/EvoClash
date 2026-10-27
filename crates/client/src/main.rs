@@ -9,13 +9,16 @@
 mod assets;
 mod backpack;
 mod buttons;
+mod connect_ui;
 mod death_screen;
 mod effects;
 mod evo_panel;
 mod hud;
 mod input;
+mod loading_ui;
 mod lobby_ui;
 mod lpc;
+mod menu;
 mod minimap;
 mod predict;
 mod render;
@@ -97,6 +100,9 @@ fn main() {
     app.add_plugins((
         assets::AssetsPlugin,
         session::SessionPlugin,
+        connect_ui::ConnectUiPlugin,
+        loading_ui::LoadingUiPlugin,
+        menu::MenuPlugin,
         input::InputPlugin,
         predict::PredictPlugin,
         render::RenderPlugin,
