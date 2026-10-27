@@ -6,22 +6,32 @@ BOTS   ?= 8
 
 CARGO_BINS := -p evoclash-server -p evoclash-matchmaker
 WASM_TARGET := wasm32-unknown-unknown
+# Empty for the debug client (cargo `dev` profile); `--release` uses the size-optimized `wasm` profile.
+TRUNK_FLAGS := --release
 
-.PHONY: run web watch server check clean-logs
+.PHONY: run dev web watch watch-dev server check clean-logs
 
 ## run: build everything and serve the game at http://$(LISTEN)
 run: web server
 	@echo "→ open http://$(LISTEN)"
 	target/debug/evoclash-matchmaker --listen $(LISTEN) --bots $(BOTS) --web-dir target/web
 
+## dev: like `run`, but with a debug client: much faster to rebuild, slower in the browser
+dev: TRUNK_FLAGS :=
+dev: run
+
 ## web: build the browser client into target/web (needs `trunk`: cargo install trunk)
 web:
 	@rustup target list --installed | grep -qx $(WASM_TARGET) || rustup target add $(WASM_TARGET)
-	cd crates/client && trunk build --release
+	cd crates/client && trunk build $(TRUNK_FLAGS)
 
 ## watch: rebuild the browser client on every change (run `make run` in another terminal)
 watch:
-	cd crates/client && trunk watch --release
+	cd crates/client && trunk watch $(TRUNK_FLAGS)
+
+## watch-dev: `watch` for the debug client (pair with `make dev`)
+watch-dev: TRUNK_FLAGS :=
+watch-dev: watch
 
 ## server: build the match server and matchmaker
 server:
