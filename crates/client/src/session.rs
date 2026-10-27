@@ -21,8 +21,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::ClientArgs;
 use crate::assets::assets_ready;
+use crate::connect_ui::{ConnectionStatus, LinkStatus};
 
 const MAX_RECONNECT_ATTEMPTS: u32 = 12;
+/// A matchmaker call that has not answered by now is treated as lost (browser fetch can hang).
+const CALL_TIMEOUT_SECS: f32 = 12.0;
+/// Hold the link open this long after 离开 so `RoomCommand::Leave` leaves the client.
+const DEPART_FLUSH_SECS: f32 = 0.4;
 
 #[derive(Deserialize)]
 struct ErrorBody {
@@ -53,6 +58,8 @@ enum CallError {
 pub enum JoinOffer {
     QuickStart,
     CreateRoom,
+    /// Reload `/play/` with no `name` query: the player re-enters their name.
+    ChangeRoom,
 }
 
 #[derive(Component, Clone, Copy, Debug)]
@@ -82,7 +89,19 @@ enum JoinAction {
         offers: Vec<JoinOffer>,
     },
     /// Show `notice` and wait for a click or Space. Does not loop.
-    WaitForPlayer { notice: String },
+    WaitForPlayer {
+        notice: String,
+        offers: Vec<JoinOffer>,
+    },
+}
+
+fn offer_join_intent(offer: JoinOffer) -> Option<JoinIntent> {
+    match offer {
+        JoinOffer::QuickStart => Some(JoinIntent::Quick),
+        JoinOffer::CreateRoom => Some(JoinIntent::Create),
+        // Not a new request: leave the match and reload the name form.
+        JoinOffer::ChangeRoom => None,
+    }
 }
 
 fn server_text(error: &str, message: &str) -> String {
@@ -109,25 +128,29 @@ fn classify_join_error(
         return JoinAction::RetrySame {
             notice: server_text(error, message),
             secs: retry_after.unwrap_or(1) as f32,
-            offers: vec![JoinOffer::QuickStart],
+            offers: vec![JoinOffer::QuickStart, JoinOffer::ChangeRoom],
         };
     }
     if error == "bad_code" {
         return JoinAction::Choose {
             notice: server_text(error, message),
-            offers: Vec::new(),
+            offers: vec![JoinOffer::ChangeRoom],
         };
     }
     if error == "not_found" {
         return JoinAction::Choose {
             notice: server_text(error, message),
-            offers: vec![JoinOffer::QuickStart, JoinOffer::CreateRoom],
+            offers: vec![
+                JoinOffer::QuickStart,
+                JoinOffer::CreateRoom,
+                JoinOffer::ChangeRoom,
+            ],
         };
     }
     if error == "closed" {
         return JoinAction::Choose {
             notice: server_text(error, message),
-            offers: vec![JoinOffer::CreateRoom],
+            offers: vec![JoinOffer::CreateRoom, JoinOffer::ChangeRoom],
         };
     }
     let busy = error == "busy" || status == 503;
@@ -136,8 +159,15 @@ fn classify_join_error(
     } else {
         server_text(error, message)
     };
+    // A full room already suggests creating one; everything else can at least go back.
+    let offers = if error == "full" {
+        vec![JoinOffer::CreateRoom, JoinOffer::ChangeRoom]
+    } else {
+        vec![JoinOffer::ChangeRoom]
+    };
     JoinAction::WaitForPlayer {
         notice: format!("{text}\n点击或按空格重试"),
+        offers,
     }
 }
 
@@ -223,8 +253,8 @@ impl Seat {
 #[derive(Resource, Default)]
 pub struct JoinNotice(pub String);
 
-/// The player pressed 离开. Hold the link open long enough for `RoomCommand::Leave` to
-/// flush, then go back to the name page and do not reconnect.
+/// The player pressed 离开 or chose 返回首页. Hold the link open long enough for
+/// `RoomCommand::Leave` to flush, then reload `/play/` (the name form) and do not reconnect.
 #[derive(Resource, Default)]
 pub struct Depart {
     since: Option<f32>,
@@ -270,6 +300,8 @@ enum NoticeWait {
 pub struct Session {
     seat: Option<Seat>,
     pending: Option<PendingCall>,
+    /// `Time::elapsed_secs` when the call in flight was sent. `None` when nothing is in flight.
+    pending_since: Option<f32>,
     /// Already quick-started once after `started` in this attempt.
     started_retried: bool,
     intent: JoinIntent,
@@ -295,7 +327,7 @@ impl Session {
     }
 
     /// Create a room, or join (quick start when `room` is absent).
-    fn dispatch(&mut self, args: &ClientArgs) {
+    fn dispatch(&mut self, args: &ClientArgs, now: f32) {
         if self.creating(args) {
             let request = CreateRoomRequest {
                 name: args.name.clone(),
@@ -310,11 +342,12 @@ impl Session {
             };
             self.pending = Some(post(&args.matchmaker, "/v1/join", &request));
         }
+        self.pending_since = Some(now);
     }
 
     /// Ask for a fresh token for the same match (tokens are single-use and short-lived). If the
     /// match is gone, or `new_match` is set because this one never let us in, join another one.
-    fn refresh(&mut self, args: &ClientArgs, new_match: bool) {
+    fn refresh(&mut self, args: &ClientArgs, new_match: bool, now: f32) {
         match &self.seat {
             Some(seat) if !new_match => {
                 let request = RejoinRequest {
@@ -323,8 +356,9 @@ impl Session {
                     reconnect_key: seat.reconnect_key.clone(),
                 };
                 self.pending = Some(post(&args.matchmaker, "/v1/rejoin", &request));
+                self.pending_since = Some(now);
             }
-            _ => self.dispatch(args),
+            _ => self.dispatch(args, now),
         }
     }
 
@@ -332,6 +366,7 @@ impl Session {
     fn poll(&mut self) -> Option<Result<JoinResponse, CallError>> {
         let reply = self.pending.as_ref()?.lock().ok()?.take()?;
         self.pending = None;
+        self.pending_since = None;
         Some(reply)
     }
 }
@@ -420,8 +455,8 @@ fn spawn_client(commands: &mut Commands, seat: &Seat, args: &ClientArgs) -> Resu
     Ok(entity)
 }
 
-fn connect(mut session: ResMut<Session>, args: Res<ClientArgs>) {
-    session.dispatch(&args);
+fn connect(mut session: ResMut<Session>, args: Res<ClientArgs>, time: Res<Time>) {
+    session.dispatch(&args, time.elapsed_secs());
 }
 
 fn apply_join_action(
@@ -430,6 +465,7 @@ fn apply_join_action(
     offers: &mut JoinOffers,
     action: JoinAction,
     args: &ClientArgs,
+    now: f32,
 ) {
     match action {
         JoinAction::QuickStartAgain { notice: text } => {
@@ -438,7 +474,7 @@ fn apply_join_action(
             session.wait = NoticeWait::Idle;
             notice.0 = text;
             offers.buttons.clear();
-            session.dispatch(args);
+            session.dispatch(args, now);
         }
         JoinAction::RetrySame {
             notice: text,
@@ -457,12 +493,28 @@ fn apply_join_action(
             notice.0 = text;
             offers.buttons = next;
         }
-        JoinAction::WaitForPlayer { notice: text } => {
+        JoinAction::WaitForPlayer {
+            notice: text,
+            offers: next,
+        } => {
             session.wait = NoticeWait::Click;
             notice.0 = text;
-            offers.buttons.clear();
+            offers.buttons = next;
         }
     }
+}
+
+/// A failed matchmaker call still leaves the player a way out.
+fn failed_notice(error: &str) -> JoinAction {
+    JoinAction::WaitForPlayer {
+        notice: format!("连接失败：{error}\n点击或按空格重试"),
+        offers: vec![JoinOffer::ChangeRoom],
+    }
+}
+
+/// The pending call has been unanswered for longer than [`CALL_TIMEOUT_SECS`].
+fn call_timed_out(pending_since: Option<f32>, now: f32) -> bool {
+    pending_since.is_some_and(|since| now - since >= CALL_TIMEOUT_SECS)
 }
 
 fn take_join_offer(
@@ -486,40 +538,27 @@ fn take_join_offer(
     })
 }
 
-fn depart(time: Res<Time>, mut depart: ResMut<Depart>, args: Res<ClientArgs>) {
+fn depart(time: Res<Time>, mut depart: ResMut<Depart>) {
     let Some(since) = depart.since.as_mut() else {
         return;
     };
     *since += time.delta_secs();
-    if *since >= 0.4 {
-        leave_page(&args.name);
+    if *since >= DEPART_FLUSH_SECS {
+        leave_page();
     }
 }
 
 #[cfg(target_family = "wasm")]
-fn leave_page(name: &str) {
+fn leave_page() {
     let Some(window) = web_sys::window() else {
         return;
     };
-    let _ = window
-        .location()
-        .set_href(&format!("/play/?name={}", query_escape(name)));
+    // No `name` query: `/play/` asks for a name instead of re-queueing immediately.
+    let _ = window.location().set_href("/play/");
 }
 
 #[cfg(not(target_family = "wasm"))]
-fn leave_page(_name: &str) {}
-
-#[cfg(target_family = "wasm")]
-fn query_escape(value: &str) -> String {
-    let mut out = String::new();
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => out.push(byte as char),
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
-}
+fn leave_page() {}
 
 fn watch_connection(
     mut commands: Commands,
@@ -527,9 +566,10 @@ fn watch_connection(
     mut link: ResMut<LinkState>,
     mut session: ResMut<Session>,
     mut notice: ResMut<JoinNotice>,
-    depart: Res<Depart>,
+    mut depart: ResMut<Depart>,
     args: Res<ClientArgs>,
     mut offers: ResMut<JoinOffers>,
+    mut status: ResMut<ConnectionStatus>,
     keys: Option<Res<ButtonInput<KeyCode>>>,
     mouse: Option<Res<ButtonInput<MouseButton>>>,
     offer_buttons: Query<(
@@ -548,9 +588,23 @@ fn watch_connection(
             With<MatchState>,
         )>,
     >,
-    mut exit: MessageWriter<AppExit>,
 ) {
+    // The overlay reads this; attempts/max must stay accurate even while a request is in flight.
+    status.attempts = link.attempts;
+    status.max = MAX_RECONNECT_ATTEMPTS;
     if depart.pending() {
+        return;
+    }
+    let now = time.elapsed_secs();
+    if call_timed_out(session.pending_since, now) {
+        warn!("matchmaker call timed out");
+        session.pending = None;
+        session.pending_since = None;
+        session.started_retried = false;
+        session.wait = NoticeWait::Click;
+        notice.0 = "连接超时，请重试。\n点击或按空格重试".to_string();
+        offers.buttons = vec![JoinOffer::QuickStart, JoinOffer::ChangeRoom];
+        status.status = LinkStatus::Connecting;
         return;
     }
     if let Some(reply) = session.poll() {
@@ -571,7 +625,7 @@ fn watch_connection(
                 session.seat = None;
                 session.wait = NoticeWait::Idle;
                 offers.buttons.clear();
-                session.dispatch(&args);
+                session.dispatch(&args, now);
                 return;
             }
             Err(CallError::Api(err)) => {
@@ -582,37 +636,64 @@ fn watch_connection(
                     err.retry_after,
                     session.started_retried,
                 );
-                apply_join_action(&mut session, &mut notice, &mut offers, action, &args);
+                apply_join_action(&mut session, &mut notice, &mut offers, action, &args, now);
+                // The player now has buttons to pick from; don't cover them with the overlay.
+                status.status = LinkStatus::Connecting;
                 link.since_change = 0.0;
                 return;
             }
             Err(CallError::Failed(e)) => Err(e),
         };
-        match seat.and_then(|seat| {
+        let failed = seat.and_then(|seat| {
             let entity = spawn_client(&mut commands, &seat, &args)?;
             session.seat = Some(seat);
             Ok(entity)
-        }) {
+        });
+        match failed {
             Ok(entity) => link.entity = Some(entity),
-            Err(e) => warn!("could not get into a match: {e}"),
+            Err(e) => {
+                warn!("could not get into a match: {e}");
+                apply_join_action(
+                    &mut session,
+                    &mut notice,
+                    &mut offers,
+                    failed_notice(&e),
+                    &args,
+                    now,
+                );
+                status.status = LinkStatus::Connecting;
+            }
         }
         link.since_change = 0.0;
         return;
     }
     if session.pending.is_some() {
+        if status.status == LinkStatus::Idle {
+            status.status = LinkStatus::Connecting;
+        }
         return;
     }
-    // Offer buttons (快速开始 / 创建房间) cancel a wait without touching the reconnect budget.
+    // Offer buttons (快速开始 / 创建房间 / 返回首页) cancel a wait without touching the
+    // reconnect budget.
     if let Some(offer) = take_join_offer(&offers, &mouse, &offer_buttons) {
-        session.intent = match offer {
-            JoinOffer::QuickStart => JoinIntent::Quick,
-            JoinOffer::CreateRoom => JoinIntent::Create,
-        };
-        session.wait = NoticeWait::Idle;
-        session.started_retried = false;
-        notice.0.clear();
-        offers.buttons.clear();
-        session.dispatch(&args);
+        match offer_join_intent(offer) {
+            Some(intent) => {
+                session.intent = intent;
+                session.wait = NoticeWait::Idle;
+                session.started_retried = false;
+                notice.0.clear();
+                offers.buttons.clear();
+                session.dispatch(&args, now);
+            }
+            None => {
+                // 返回首页: flush `RoomCommand::Leave`, then reload the name form.
+                session.wait = NoticeWait::Idle;
+                session.started_retried = false;
+                notice.0.clear();
+                offers.buttons.clear();
+                depart.request();
+            }
+        }
         return;
     }
     match session.wait {
@@ -622,7 +703,7 @@ fn watch_connection(
             if left <= 0.0 {
                 session.wait = NoticeWait::Idle;
                 offers.buttons.clear();
-                session.dispatch(&args);
+                session.dispatch(&args, now);
             } else {
                 session.wait = NoticeWait::Retry(left);
             }
@@ -637,7 +718,7 @@ fn watch_connection(
                 session.wait = NoticeWait::Idle;
                 session.started_retried = false;
                 notice.0.clear();
-                session.dispatch(&args);
+                session.dispatch(&args, now);
             }
             return;
         }
@@ -662,7 +743,14 @@ fn watch_connection(
         session.intent = JoinIntent::FromArgs;
         offers.buttons.clear();
         notice.0.clear();
+        status.status = LinkStatus::Connected;
+        status.attempts = 0;
         return;
+    }
+    if disconnected {
+        status.status = LinkStatus::Reconnecting;
+        // Show the attempt that is about to start, not the number that already failed.
+        status.attempts = (link.attempts + 1).min(MAX_RECONNECT_ATTEMPTS);
     }
     link.since_change += time.delta_secs();
     // Give each attempt time to complete the handshake before retrying, backing off a little.
@@ -671,12 +759,18 @@ fn watch_connection(
         return;
     }
     if link.attempts >= MAX_RECONNECT_ATTEMPTS {
-        error!("giving up after {} reconnect attempts", link.attempts);
-        exit.write(AppExit::error());
+        // Keep the app alive: the reconnect overlay offers 返回首页 instead of a hard exit.
+        if status.status != LinkStatus::Failed {
+            error!("giving up after {} reconnect attempts", link.attempts);
+        }
+        status.status = LinkStatus::Failed;
+        status.attempts = link.attempts;
         return;
     }
     link.attempts += 1;
     link.since_change = 0.0;
+    status.status = LinkStatus::Reconnecting;
+    status.attempts = link.attempts;
     warn!("disconnected, reconnecting (attempt {})", link.attempts);
 
     // Start from a clean slate; the server resends the full world after the handshake.
@@ -687,7 +781,7 @@ fn watch_connection(
         commands.entity(e).despawn();
     }
     let new_match = !link.ever_connected && link.attempts > NEW_MATCH_AFTER_ATTEMPTS;
-    session.refresh(&args, new_match);
+    session.refresh(&args, new_match, now);
 }
 
 #[cfg(test)]
@@ -708,6 +802,7 @@ mod tests {
             stop,
             JoinAction::WaitForPlayer {
                 notice: "这局已经开始\n点击或按空格重试".into(),
+                offers: vec![JoinOffer::ChangeRoom],
             }
         );
     }
@@ -721,7 +816,7 @@ mod tests {
             JoinAction::RetrySame {
                 notice: "房间正在开局，请稍候。".into(),
                 secs: 2.0,
-                offers: vec![JoinOffer::QuickStart],
+                offers: vec![JoinOffer::QuickStart, JoinOffer::ChangeRoom],
             }
         );
         let playing = classify_join_error("in_match", 409, "对局中", None, false);
@@ -730,7 +825,7 @@ mod tests {
             JoinAction::RetrySame {
                 notice: "对局中".into(),
                 secs: 1.0,
-                offers: vec![JoinOffer::QuickStart],
+                offers: vec![JoinOffer::QuickStart, JoinOffer::ChangeRoom],
             }
         );
         let results = classify_join_error(
@@ -745,7 +840,7 @@ mod tests {
             JoinAction::RetrySame {
                 notice: "本局刚结束，马上回到等待大厅…".into(),
                 secs: 5.0,
-                offers: vec![JoinOffer::QuickStart],
+                offers: vec![JoinOffer::QuickStart, JoinOffer::ChangeRoom],
             }
         );
     }
@@ -757,7 +852,7 @@ mod tests {
             bad,
             JoinAction::Choose {
                 notice: "房间码是 4 位字母或数字。".into(),
-                offers: vec![],
+                offers: vec![JoinOffer::ChangeRoom],
             }
         );
         let missing = classify_join_error("not_found", 404, "找不到房间 AB3K", None, false);
@@ -765,7 +860,11 @@ mod tests {
             missing,
             JoinAction::Choose {
                 notice: "找不到房间 AB3K".into(),
-                offers: vec![JoinOffer::QuickStart, JoinOffer::CreateRoom],
+                offers: vec![
+                    JoinOffer::QuickStart,
+                    JoinOffer::CreateRoom,
+                    JoinOffer::ChangeRoom,
+                ],
             }
         );
         let closed = classify_join_error(
@@ -779,25 +878,35 @@ mod tests {
             closed,
             JoinAction::Choose {
                 notice: "房间已关闭。你可以创建新的私人房间。".into(),
-                offers: vec![JoinOffer::CreateRoom],
+                offers: vec![JoinOffer::CreateRoom, JoinOffer::ChangeRoom],
             }
         );
     }
 
     #[test]
     fn full_and_rate_wait_for_a_click_with_the_server_message() {
-        for (error, message) in [
-            ("full", "房间已满（8/8）。请稍后再试，或创建自己的房间。"),
-            ("rate", "尝试次数过多，请一分钟后再试。"),
-        ] {
-            let action = classify_join_error(error, 409, message, None, false);
-            assert_eq!(
-                action,
-                JoinAction::WaitForPlayer {
-                    notice: format!("{message}\n点击或按空格重试"),
-                }
-            );
-        }
+        let full = classify_join_error(
+            "full",
+            409,
+            "房间已满（8/8）。请稍后再试，或创建自己的房间。",
+            None,
+            false,
+        );
+        assert_eq!(
+            full,
+            JoinAction::WaitForPlayer {
+                notice: "房间已满（8/8）。请稍后再试，或创建自己的房间。\n点击或按空格重试".into(),
+                offers: vec![JoinOffer::CreateRoom, JoinOffer::ChangeRoom],
+            }
+        );
+        let rate = classify_join_error("rate", 409, "尝试次数过多，请一分钟后再试。", None, false);
+        assert_eq!(
+            rate,
+            JoinAction::WaitForPlayer {
+                notice: "尝试次数过多，请一分钟后再试。\n点击或按空格重试".into(),
+                offers: vec![JoinOffer::ChangeRoom],
+            }
+        );
     }
 
     #[test]
@@ -808,8 +917,65 @@ mod tests {
                 action,
                 JoinAction::WaitForPlayer {
                     notice: "服务器繁忙，请稍后再试。\n点击或按空格重试".into(),
+                    offers: vec![JoinOffer::ChangeRoom],
                 }
             );
         }
+    }
+
+    #[test]
+    fn every_join_failure_offers_a_next_step() {
+        for (error, status) in [
+            ("bad_code", 400),
+            ("not_found", 404),
+            ("closed", 410),
+            ("full", 409),
+            ("rate", 409),
+            ("busy", 503),
+            ("started", 409),
+            ("in_match", 409),
+            ("results", 409),
+            ("other", 500),
+        ] {
+            let action = classify_join_error(error, status, "ignored", None, true);
+            let offers = match action {
+                JoinAction::QuickStartAgain { .. } => Vec::new(),
+                JoinAction::RetrySame { offers, .. } => offers,
+                JoinAction::Choose { offers, .. } => offers,
+                JoinAction::WaitForPlayer { offers, .. } => offers,
+            };
+            assert!(!offers.is_empty(), "{error} left no way out");
+            assert!(
+                offers.contains(&JoinOffer::ChangeRoom),
+                "{error} cannot go back to the name form"
+            );
+        }
+    }
+
+    #[test]
+    fn change_room_returns_to_the_name_form() {
+        assert_eq!(offer_join_intent(JoinOffer::ChangeRoom), None);
+        assert_eq!(
+            offer_join_intent(JoinOffer::QuickStart),
+            Some(JoinIntent::Quick)
+        );
+        assert_eq!(
+            offer_join_intent(JoinOffer::CreateRoom),
+            Some(JoinIntent::Create)
+        );
+        assert_eq!(
+            failed_notice("the network is down"),
+            JoinAction::WaitForPlayer {
+                notice: "连接失败：the network is down\n点击或按空格重试".into(),
+                offers: vec![JoinOffer::ChangeRoom],
+            }
+        );
+    }
+
+    #[test]
+    fn matchmaker_calls_time_out_after_twelve_seconds() {
+        assert!(!call_timed_out(None, 100.0));
+        assert!(!call_timed_out(Some(10.0), 21.9));
+        assert!(call_timed_out(Some(10.0), 22.0));
     }
 }
