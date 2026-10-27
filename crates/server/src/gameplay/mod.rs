@@ -26,6 +26,7 @@ use crate::rng::SimRng;
 use crate::skills::HiddenFrom;
 
 mod damage;
+mod finale;
 mod flow;
 mod idle;
 mod movement;
@@ -136,6 +137,7 @@ impl Plugin for GameplayPlugin {
                     watch_idle,
                     loot_spawner,
                     match_flow,
+                    finale::step_finale,
                     reset_match,
                     place_starters,
                     maintain_host,

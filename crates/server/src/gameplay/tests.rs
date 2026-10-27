@@ -1244,3 +1244,425 @@ fn pause_auto_start_is_host_only_and_ignored_once_the_countdown_runs() {
     );
     assert!(!state.countdown_active);
 }
+
+fn announces(app: &App) -> Vec<String> {
+    app.world()
+        .resource::<Outbox>()
+        .reliable
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::Announce(text) => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn flash_of(app: &mut App) -> Option<LeaderFlash> {
+    let world = app.world_mut();
+    let mut query = world.query::<&LeaderPing>();
+    query.single(world).expect("leader ping").latest
+}
+
+struct Spot {
+    id: u64,
+    name: &'static str,
+    score: u32,
+    kills: u32,
+    deaths: u32,
+    scored_at: u32,
+    pos: Vec2,
+    alive: bool,
+    bot: bool,
+}
+
+fn spot(id: u64, name: &'static str, score: u32, pos: Vec2) -> Spot {
+    Spot {
+        id,
+        name,
+        score,
+        kills: 0,
+        deaths: 0,
+        scored_at: 0,
+        pos,
+        alive: true,
+        bot: false,
+    }
+}
+
+/// Playing, one tick before `ticks_left` becomes the value passed in.
+fn finale_app(spots: &[Spot], ticks_left: u32) -> (App, Vec<Entity>) {
+    let mut app = App::new();
+    app.init_resource::<Arena>()
+        .init_resource::<Outbox>()
+        .init_resource::<ResetRequested>()
+        .init_resource::<PendingStart>()
+        .insert_resource(SimTick(100))
+        .insert_resource(server_config())
+        .insert_resource(SimRng::from_match_seed(1));
+    app.world_mut().spawn((
+        MatchState {
+            phase: Phase::Playing,
+            ticks_left,
+            vault_in: 1_000_000,
+            ..default()
+        },
+        RoomSettings {
+            bots: Some(ROOM_COMBATANTS),
+            ..default()
+        },
+        LeaderPing::default(),
+    ));
+    let mut entities = Vec::new();
+    for spot in spots {
+        entities.push(
+            app.world_mut()
+                .spawn((
+                    Player {
+                        client_id: spot.id,
+                        name: spot.name.into(),
+                        color: [1.0; 3],
+                        bot: spot.bot,
+                    },
+                    Stats {
+                        score: spot.score,
+                        kills: spot.kills,
+                        deaths: spot.deaths,
+                        last_score_tick: spot.scored_at,
+                        ..default()
+                    },
+                    Pos(spot.pos),
+                    Vitals {
+                        alive: spot.alive,
+                        ..default()
+                    },
+                ))
+                .id(),
+        );
+    }
+    app.add_systems(Update, (match_flow, super::finale::step_finale).chain());
+    (app, entities)
+}
+
+fn run_flow(app: &mut App, n: u32) {
+    for _ in 0..n {
+        app.update();
+    }
+}
+
+#[test]
+fn finale_clock_is_the_last_two_minutes_of_playing() {
+    assert_eq!(FINALE_TICKS, 2 * 60 * TICKS_PER_SEC);
+    assert_eq!(super::finale::FINALE_PING_TICKS, 10 * TICKS_PER_SEC);
+    let mut state = MatchState {
+        phase: Phase::Playing,
+        ticks_left: FINALE_TICKS + 1,
+        ..default()
+    };
+    assert!(!state.finale());
+    // Resolve still sees this pre-decrement value, so the entry tick already pays.
+    assert!(super::finale::finale_for_kills(&state));
+    state.ticks_left = FINALE_TICKS;
+    assert!(state.finale());
+    state.ticks_left = 1;
+    assert!(state.finale());
+    assert!(super::finale::finale_for_kills(&state));
+    state.ticks_left = 0;
+    assert!(!state.finale());
+    assert!(!super::finale::finale_for_kills(&state));
+    state.phase = Phase::Lobby;
+    state.ticks_left = FINALE_TICKS;
+    assert!(!state.finale());
+    assert!(!super::finale::finale_for_kills(&state));
+    // Resolve sees the clock before this tick's decrement, so the entry tick counts.
+    state.phase = Phase::Playing;
+    state.ticks_left = FINALE_TICKS + 1;
+    assert!(super::finale::finale_for_kills(&state));
+    state.ticks_left = FINALE_TICKS + 2;
+    assert!(!super::finale::finale_for_kills(&state));
+}
+
+#[test]
+fn finale_broadcast_fires_once_at_two_minutes_left() {
+    let mut lead = spot(2, "bee", 8, Vec2::new(9.0, 3.0));
+    lead.bot = true;
+    lead.kills = 4;
+    let mut other = spot(1, "ann", 8, Vec2::new(1.0, 0.0));
+    other.kills = 1;
+    let (mut app, _) = finale_app(&[other, lead], FINALE_TICKS + 2);
+    app.update();
+    assert!(
+        !announces(&app).iter().any(|text| text.contains("终局")),
+        "one second early"
+    );
+    assert!(flash_of(&mut app).is_none());
+    app.update();
+    let notes = announces(&app);
+    assert_eq!(notes.iter().filter(|text| text.contains("终局")).count(), 1);
+    assert_eq!(notes[0], super::finale::FINALE_ANNOUNCE);
+    let flash = flash_of(&mut app).expect("flash at second 0");
+    assert_eq!(flash.client_id, 2, "more kills wins the tie, bots included");
+    assert_eq!(flash.pos, Vec2::new(9.0, 3.0));
+    assert_eq!(flash.tick, 100);
+    let world = app.world_mut();
+    let mut query = world.query::<&MatchState>();
+    assert!(query.single(world).unwrap().finale());
+}
+
+#[test]
+fn leader_ping_repeats_every_ten_seconds() {
+    let (mut app, ids) = finale_app(&[spot(1, "ann", 3, Vec2::new(1.0, 2.0))], FINALE_TICKS + 1);
+    app.update();
+    assert_eq!(flash_of(&mut app).unwrap().tick, 100);
+    app.world_mut().resource_mut::<SimTick>().0 = 101;
+    run_flow(&mut app, super::finale::FINALE_PING_TICKS - 1);
+    assert_eq!(flash_of(&mut app).unwrap().tick, 100, "not between flashes");
+    assert_eq!(
+        announces(&app)
+            .iter()
+            .filter(|text| text.contains("终局"))
+            .count(),
+        1,
+        "the banner is once"
+    );
+    app.world_mut().get_mut::<Pos>(ids[0]).unwrap().0 = Vec2::new(20.0, -5.0);
+    app.world_mut().resource_mut::<SimTick>().0 = 250;
+    app.update();
+    let flash = flash_of(&mut app).unwrap();
+    assert_eq!(flash.tick, 250);
+    assert_eq!(flash.pos, Vec2::new(20.0, -5.0));
+    assert_eq!(flash.client_id, 1);
+}
+
+#[test]
+fn dead_leader_skips_the_flash_and_keeps_the_last_one() {
+    let mut leader = spot(2, "bee", 8, Vec2::new(4.0, 4.0));
+    leader.alive = false;
+    leader.bot = true;
+    let (mut app, ids) = finale_app(
+        &[spot(1, "ann", 1, Vec2::new(1.0, 1.0)), leader],
+        FINALE_TICKS + 1,
+    );
+    app.update();
+    assert!(
+        flash_of(&mut app).is_none(),
+        "do not fall through to second"
+    );
+    assert!(announces(&app).iter().any(|text| text.contains("终局")));
+    // A later boundary still skips, and does not wipe a flash from earlier.
+    let world = app.world_mut();
+    let mut query = world.query::<&mut LeaderPing>();
+    query.single_mut(world).unwrap().latest = Some(LeaderFlash {
+        client_id: 2,
+        pos: Vec2::new(4.0, 4.0),
+        tick: 3,
+    });
+    app.world_mut().resource_mut::<SimTick>().0 = 9;
+    run_flow(&mut app, super::finale::FINALE_PING_TICKS);
+    assert_eq!(
+        flash_of(&mut app),
+        Some(LeaderFlash {
+            client_id: 2,
+            pos: Vec2::new(4.0, 4.0),
+            tick: 3,
+        })
+    );
+    app.world_mut().get_mut::<Vitals>(ids[1]).unwrap().alive = true;
+    app.world_mut().get_mut::<Pos>(ids[1]).unwrap().0 = Vec2::new(7.0, 8.0);
+    app.world_mut().resource_mut::<SimTick>().0 = 40;
+    run_flow(&mut app, super::finale::FINALE_PING_TICKS);
+    let flash = flash_of(&mut app).unwrap();
+    assert_eq!(flash.client_id, 2);
+    assert_eq!(flash.pos, Vec2::new(7.0, 8.0));
+    assert_eq!(flash.tick, 40);
+}
+
+#[test]
+fn zero_scores_have_no_leader_to_flash() {
+    let mut killer = spot(1, "ann", 0, Vec2::new(1.0, 0.0));
+    killer.kills = 9;
+    let (mut app, _) = finale_app(&[killer, spot(2, "bee", 0, Vec2::ZERO)], FINALE_TICKS + 1);
+    app.update();
+    assert!(flash_of(&mut app).is_none());
+    assert!(announces(&app).iter().any(|text| text.contains("终局")));
+}
+
+#[test]
+fn match_start_clears_the_leader_ping() {
+    let mut app = App::new();
+    app.init_resource::<Arena>()
+        .init_resource::<Outbox>()
+        .init_resource::<ResetRequested>()
+        .init_resource::<PendingStart>()
+        .init_resource::<SimTick>()
+        .insert_resource(server_config())
+        .insert_resource(SimRng::from_match_seed(1));
+    app.world_mut().spawn((
+        MatchState {
+            phase: Phase::Starting,
+            ticks_left: 1,
+            ..default()
+        },
+        RoomSettings {
+            bots: Some(ROOM_COMBATANTS),
+            ..default()
+        },
+        LeaderPing {
+            latest: Some(LeaderFlash {
+                client_id: 9,
+                pos: Vec2::new(3.0, 4.0),
+                tick: 8,
+            }),
+        },
+    ));
+    for id in 1..=2 {
+        app.world_mut().spawn((
+            Player {
+                client_id: id,
+                name: format!("p{id}"),
+                color: [1.0; 3],
+                bot: false,
+            },
+            Stats::default(),
+        ));
+    }
+    app.add_systems(Update, (match_flow, super::finale::step_finale).chain());
+    app.update();
+    assert!(flash_of(&mut app).is_none());
+    let world = app.world_mut();
+    let mut query = world.query::<&MatchState>();
+    let state = query.single(world).unwrap();
+    assert_eq!(state.phase, Phase::Playing);
+    assert!(!state.finale());
+}
+
+fn duel(phase: Phase, ticks_left: u32) -> (App, Entity, Entity) {
+    let mut app = App::new();
+    app.init_resource::<DamageQueue>()
+        .init_resource::<Outbox>()
+        .init_resource::<XpQueue>()
+        .init_resource::<Dealt>()
+        .insert_resource(SimTick(42));
+    app.world_mut().spawn(MatchState {
+        phase,
+        ticks_left,
+        ..default()
+    });
+    app.add_systems(Update, resolve_damage);
+    let killer = combatant(&mut app, 1, "ann");
+    let victim = combatant(&mut app, 2, "bee");
+    {
+        let world = app.world_mut();
+        let mut killer_stats = world.get_mut::<Stats>(killer).unwrap();
+        killer_stats.score = 1;
+        killer_stats.streak = 0;
+        let mut victim_stats = world.get_mut::<Stats>(victim).unwrap();
+        victim_stats.score = 9;
+        victim_stats.streak = 0;
+        world.get_mut::<Player>(victim).unwrap().bot = true;
+    }
+    (app, killer, victim)
+}
+
+fn strike(app: &mut App, attacker: Option<Entity>, victim: Entity) {
+    app.world_mut()
+        .resource_mut::<DamageQueue>()
+        .0
+        .push(Damage {
+            target: victim,
+            attacker,
+            amount: 500.0,
+            armor_mult: 1.0,
+            weapon: Some(WeaponKind::Stick),
+            emp: false,
+            cause: None,
+        });
+    app.update();
+}
+
+#[test]
+fn killing_the_leader_in_finale_stacks_two_on_the_bounty() {
+    let (mut app, killer, victim) = duel(Phase::Playing, FINALE_TICKS + 1);
+    app.world_mut().get_mut::<Stats>(victim).unwrap().streak = sim::BOUNTY_STREAK;
+    strike(&mut app, Some(killer), victim);
+    let stats = app.world().get::<Stats>(killer).unwrap();
+    assert_eq!(
+        stats.score, 6,
+        "bounty 3 plus finale 2, on top of the 1 already held"
+    );
+    assert_eq!(stats.kills, 1);
+    assert_eq!(stats.last_score_tick, 42);
+    assert!(
+        announces(&app)
+            .iter()
+            .any(|text| text == "ann 击杀了第一名 bee，+2")
+    );
+    // The last tick of the match is still finale for a kill.
+    let (mut app, killer, victim) = duel(Phase::Playing, 1);
+    strike(&mut app, Some(killer), victim);
+    assert_eq!(app.world().get::<Stats>(killer).unwrap().score, 4);
+}
+
+#[test]
+fn killing_the_leader_outside_finale_adds_no_bonus() {
+    let (mut app, killer, victim) = duel(Phase::Playing, FINALE_TICKS + 2);
+    strike(&mut app, Some(killer), victim);
+    assert_eq!(app.world().get::<Stats>(killer).unwrap().score, 2);
+    assert!(!announces(&app).iter().any(|text| text.contains("第一名")));
+
+    let (mut app, killer, victim) = duel(Phase::Playing, MATCH_TICKS);
+    app.world_mut().get_mut::<Stats>(victim).unwrap().streak = sim::BOUNTY_STREAK;
+    strike(&mut app, Some(killer), victim);
+    assert_eq!(
+        app.world().get::<Stats>(killer).unwrap().score,
+        4,
+        "bounty stays 3, with no finale 2"
+    );
+    assert!(!announces(&app).iter().any(|text| text.contains("第一名")));
+}
+
+#[test]
+fn lobby_and_suicide_do_not_pay_the_finale_bonus() {
+    let (mut app, killer, victim) = duel(Phase::Lobby, FINALE_TICKS);
+    strike(&mut app, Some(killer), victim);
+    assert_eq!(app.world().get::<Stats>(killer).unwrap().score, 1);
+    assert_eq!(app.world().get::<Stats>(victim).unwrap().score, 9);
+    assert!(announces(&app).is_empty());
+
+    let (mut app, killer, victim) = duel(Phase::Playing, FINALE_TICKS + 1);
+    strike(&mut app, Some(victim), victim);
+    assert_eq!(app.world().get::<Stats>(killer).unwrap().score, 1);
+    assert_eq!(app.world().get::<Stats>(victim).unwrap().score, 9);
+    assert!(!announces(&app).iter().any(|text| text.contains("第一名")));
+}
+
+#[test]
+fn monster_and_wasteland_kills_do_not_pay_the_finale_bonus() {
+    let (mut app, killer, victim) = duel(Phase::Playing, FINALE_TICKS + 1);
+    let roach = app
+        .world_mut()
+        .spawn(Monster {
+            kind: MonsterKind::Roach,
+            elite: false,
+        })
+        .id();
+    strike(&mut app, Some(roach), victim);
+    assert_eq!(app.world().get::<Stats>(killer).unwrap().score, 1);
+    assert!(!announces(&app).iter().any(|text| text.contains("第一名")));
+
+    let (mut app, killer, victim) = duel(Phase::Playing, 1);
+    app.world_mut()
+        .resource_mut::<DamageQueue>()
+        .0
+        .push(Damage {
+            target: victim,
+            attacker: None,
+            amount: 500.0,
+            armor_mult: 1.0,
+            weapon: None,
+            emp: false,
+            cause: Some("辐射"),
+        });
+    app.update();
+    assert_eq!(app.world().get::<Stats>(killer).unwrap().score, 1);
+    assert!(!announces(&app).iter().any(|text| text.contains("第一名")));
+}

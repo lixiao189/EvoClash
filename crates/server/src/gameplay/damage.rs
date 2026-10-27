@@ -47,6 +47,16 @@ pub fn resolve_damage(
         return;
     }
     let playing = state.phase == Phase::Playing;
+    // Snapshot first place before this tick's deaths change kills or deaths.
+    let leader = if super::finale::finale_for_kills(&state) {
+        super::finale::leader_client_id(
+            players
+                .iter()
+                .map(|(player, _, _, _, stats, ..)| (player.client_id, stats)),
+        )
+    } else {
+        None
+    };
     // (victim, killer, how, victim's gear tier and level at the moment of death)
     let mut deaths: Vec<(Entity, Option<Entity>, &'static str, u8, u8)> = Vec::new();
     for dmg in queue.0.drain(..) {
@@ -157,7 +167,9 @@ pub fn resolve_damage(
             continue;
         };
         let victim_name = player.name.clone();
+        let victim_id = player.client_id;
         let had_bounty = stats.has_bounty();
+        let was_leader = leader == Some(victim_id);
         stats.deaths += 1;
         stats.streak = 0;
 
@@ -198,7 +210,19 @@ pub fn resolve_damage(
                         killer_stats.kills += 1;
                         killer_life.kills += 1;
                         killer_stats.streak += 1;
-                        killer_stats.add_score(if had_bounty { 3 } else { 1 }, tick.0);
+                        let points = (if had_bounty { 3 } else { 1 })
+                            + if was_leader {
+                                super::finale::FINALE_LEADER_BONUS
+                            } else {
+                                0
+                            };
+                        killer_stats.add_score(points, tick.0);
+                        if was_leader {
+                            outbox.announce(format!(
+                                "{} 击杀了第一名 {victim_name}，+2",
+                                killer_player.name
+                            ));
+                        }
                         let killer_tier = killer_loadout.weapon().spec().tier();
                         let giant_slayer = victim_tier >= killer_tier + GIANT_SLAYER_GAP;
                         xp.0.push(XpAward {

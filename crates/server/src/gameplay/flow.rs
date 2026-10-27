@@ -165,6 +165,7 @@ pub fn match_flow(
             }
             // No point target: the match always runs the full 8 minutes, then the final
             // scoreboard decides (score, kills, fewer deaths, earlier final score, client_id).
+            // The finale (last two minutes) is `finale::step_finale`, chained right after this.
             if state.ticks_left == 0 {
                 let winner = players
                     .iter()

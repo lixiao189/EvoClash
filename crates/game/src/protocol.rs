@@ -475,6 +475,35 @@ pub struct MatchState {
     pub boss_eta: u32,
 }
 
+/// Playing ticks left when the finale starts (2 minutes at 64 Hz, `TICKS_PER_SEC`).
+/// Not a separate flag: [`MatchState::finale`] reads this clock, so the two cannot drift.
+pub const FINALE_TICKS: u32 = 2 * 60 * 64;
+
+impl MatchState {
+    /// Last two minutes of a live match.
+    /// False in the lobby, during countdown, on the results screen, and when the clock is 0.
+    pub fn finale(&self) -> bool {
+        self.phase == Phase::Playing && self.ticks_left > 0 && self.ticks_left <= FINALE_TICKS
+    }
+}
+
+/// One minimap flash of the current first place. Same entity as [`MatchState`].
+/// `latest` is `None` until the first flash of the round, and after the round resets.
+/// A skipped flash (the leader is dead, or every score is still 0) keeps the previous value.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Reflect, Default)]
+pub struct LeaderPing {
+    pub latest: Option<LeaderFlash>,
+}
+
+/// One finale flash. Clients blip `pos` when `tick` changes.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Reflect)]
+pub struct LeaderFlash {
+    pub client_id: u64,
+    pub pos: Vec2,
+    /// Sim tick of this flash.
+    pub tick: u32,
+}
+
 /// Every room fields this many combatants: humans first, bots fill the rest.
 pub const ROOM_COMBATANTS: u8 = 8;
 
@@ -649,6 +678,7 @@ impl Plugin for ProtocolPlugin {
         app.component::<Puddle>().replicate();
         app.component::<Prop>().replicate();
         app.component::<MatchState>().replicate();
+        app.component::<LeaderPing>().replicate();
         app.component::<RoomSettings>().replicate();
         app.component::<Departed>().replicate();
 
