@@ -1,5 +1,7 @@
 //! Results screen: standings, leavers, the next-round countdown, and leave.
 //! A private-room host can pause or resume automatic continue from here.
+//! A placed human shows "+N" (including "+0") when their board row's last round is this
+//! match. Bots and leavers do not.
 
 use std::cmp::Ordering;
 
@@ -7,11 +9,12 @@ use bevy::prelude::*;
 use bevy::ui::RelativeCursorPosition;
 use evoclash_game::evolution::{EvoPath, Evolution};
 use evoclash_game::protocol::{
-    CommandChannel, Departed, MatchState, Phase, Player, RoomCommand, RoomSettings, Spectator,
-    Stats,
+    CommandChannel, Departed, MatchState, Phase, Player, RoomBoard, RoomCommand, RoomSettings,
+    Spectator, Stats,
 };
 use lightyear::prelude::{Client, MessageSender};
 
+use crate::board_ui::{gain_label, round_gain};
 use crate::buttons::BlocksPointer;
 use crate::hud::{GOLD, PANEL_BG, path_color};
 use crate::input::LocalPlayer;
@@ -97,6 +100,8 @@ struct Standing {
     level: u8,
     path: Option<EvoPath>,
     local: bool,
+    /// Room-board bonus for this match. `None` for bots and for rows that did not place.
+    gain: Option<u16>,
 }
 
 struct DepartedLine {
@@ -309,6 +314,8 @@ fn spawn_ranked(parent: &mut ChildSpawnerCommands, font: &UiFont, rank: usize, r
     let score = row.key.score.to_string();
     let kd = format!("{}/{}", row.key.kills, row.key.deaths);
     let level = row.level.to_string();
+    let tag = row.gain.map(gain_label).unwrap_or_default();
+    let tag_color = if row.gain.is_some() { GOLD } else { fg };
     let bg = if row.local {
         YOU_BG
     } else {
@@ -327,7 +334,7 @@ fn spawn_ranked(parent: &mut ChildSpawnerCommands, font: &UiFont, rank: usize, r
             (kd.as_str(), fg, W_KD),
             (level.as_str(), fg, W_LEVEL),
             (path.as_str(), path_tint, W_PATH),
-            ("", fg, W_TAG),
+            (tag.as_str(), tag_color, W_TAG),
         ],
     );
 }
@@ -364,6 +371,7 @@ fn sync_results_table(
     mut commands: Commands,
     font: Res<UiFont>,
     state: Query<&MatchState>,
+    boards: Query<&RoomBoard>,
     players: Query<(&Player, &Stats, Option<&Evolution>, Has<LocalPlayer>)>,
     specs: Query<&Spectator>,
     departed: Query<&Departed>,
@@ -371,8 +379,11 @@ fn sync_results_table(
     existing: Query<Entity, With<ResultsRow>>,
     mut signature: Local<String>,
 ) {
-    let show = state.iter().any(|s| s.phase == Phase::Results);
-    if !show {
+    let Some(match_index) = state
+        .iter()
+        .find(|s| s.phase == Phase::Results)
+        .map(|s| s.match_index)
+    else {
         if !signature.is_empty() {
             signature.clear();
             for entity in existing.iter().collect::<Vec<_>>() {
@@ -380,7 +391,8 @@ fn sync_results_table(
             }
         }
         return;
-    }
+    };
+    let board = boards.iter().next();
     let Ok(root) = roots.single() else {
         return;
     };
@@ -405,6 +417,16 @@ fn sync_results_table(
             path: evo.and_then(|evo| evo.lead_path()),
             // Highlight whoever we are watching the same way our own row is highlighted.
             local: local || follow == Some(player.client_id),
+            gain: round_gain(
+                player.bot,
+                board.and_then(|board| {
+                    board
+                        .rows
+                        .iter()
+                        .find(|row| row.client_id == player.client_id)
+                }),
+                match_index,
+            ),
         })
         .collect();
     sort_by_rank(&mut rows, |row| row.key);
@@ -423,7 +445,7 @@ fn sync_results_table(
     let mut sig = String::new();
     for row in &rows {
         sig.push_str(&format!(
-            "r {} {} {} {} {} {} {} {} {:?}\n",
+            "r {} {} {} {} {} {} {} {} {:?} {:?}\n",
             row.key.client_id,
             row.key.score,
             row.key.kills,
@@ -432,6 +454,7 @@ fn sync_results_table(
             row.level,
             row.bot,
             row.local,
+            row.gain,
             row.path,
         ));
         sig.push_str(&row.name);

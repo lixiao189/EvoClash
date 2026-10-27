@@ -25,6 +25,7 @@ use crate::ops::OpsState;
 use crate::rng::SimRng;
 use crate::skills::HiddenFrom;
 
+mod board;
 mod damage;
 mod finale;
 mod flow;
@@ -36,6 +37,7 @@ mod spawning;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use board::sync_present;
 pub use damage::*;
 pub use flow::*;
 pub(crate) use idle::Idle;
@@ -143,8 +145,10 @@ impl Plugin for GameplayPlugin {
                 (
                     watch_idle,
                     loot_spawner,
+                    board::score_if_ending,
                     match_flow,
                     recovering::step_recovering,
+                    board::prune_board,
                     finale::step_finale,
                     reset_match,
                     place_starters,

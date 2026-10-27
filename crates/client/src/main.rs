@@ -8,6 +8,7 @@
 
 mod assets;
 mod backpack;
+mod board_ui;
 mod buttons;
 mod connect_ui;
 mod death_screen;
@@ -119,6 +120,7 @@ fn main() {
         finale_ui::FinaleUiPlugin,
         results_ui::ResultsUiPlugin,
         lobby_ui::LobbyUiPlugin,
+        board_ui::BoardUiPlugin,
         recover_ui::RecoverUiPlugin,
         backpack::BackpackPlugin,
         minimap::MinimapPlugin,

@@ -519,6 +519,46 @@ pub struct LeaderFlash {
     pub tick: u32,
 }
 
+/// Room standings across rounds. Same entity as [`MatchState`]. Shown in Lobby and Results only.
+/// Rows are humans still in the room with at least one scored round, unsorted.
+#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Reflect, Default)]
+pub struct RoomBoard {
+    pub rows: Vec<BoardRow>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Reflect)]
+pub struct BoardRow {
+    pub client_id: u64,
+    pub name: String,
+    pub points: u16,
+    /// Rounds that scored for this player (placed rounds, including +0).
+    pub played: u16,
+    /// 1-based final rank in the last scored round, bots included.
+    pub last_place: u8,
+    /// `match_index` of that round. Results shows "+N" when this equals the current index.
+    pub last_round: u32,
+}
+
+/// Room points by final rank (index 0 is first place). Ranks past the table score 0.
+pub const BOARD_POINTS: [u16; 8] = [8, 6, 5, 4, 3, 2, 1, 0];
+
+/// Points for a 1-based final rank.
+pub fn board_points(place: u8) -> u16 {
+    usize::from(place)
+        .checked_sub(1)
+        .and_then(|i| BOARD_POINTS.get(i).copied())
+        .unwrap_or(0)
+}
+
+/// Board order: points high, rounds played low, last place low, `client_id` low.
+pub fn board_order(a: &BoardRow, b: &BoardRow) -> std::cmp::Ordering {
+    b.points
+        .cmp(&a.points)
+        .then(a.played.cmp(&b.played))
+        .then(a.last_place.cmp(&b.last_place))
+        .then(a.client_id.cmp(&b.client_id))
+}
+
 /// Every room fields this many combatants: humans first, bots fill the rest.
 pub const ROOM_COMBATANTS: u8 = 8;
 
@@ -710,6 +750,7 @@ impl Plugin for ProtocolPlugin {
         app.component::<Prop>().replicate();
         app.component::<MatchState>().replicate();
         app.component::<LeaderPing>().replicate();
+        app.component::<RoomBoard>().replicate();
         app.component::<RoomSettings>().replicate();
         app.component::<Departed>().replicate();
         app.component::<Spectator>().replicate();

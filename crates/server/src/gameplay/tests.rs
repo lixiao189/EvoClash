@@ -1764,3 +1764,204 @@ fn join_mode_is_spectate_in_playing_and_results_until_four_watchers() {
     };
     assert_eq!(current_join_mode(&starting, false, false, true, 0), "none");
 }
+
+fn board_body(id: u64, name: &str, bot: bool, score: u32) -> (Player, Stats) {
+    (
+        Player {
+            client_id: id,
+            name: name.into(),
+            color: [1.0; 3],
+            bot,
+        },
+        Stats { score, ..default() },
+    )
+}
+
+fn board_row(id: u64, name: &str, points: u16, played: u16, place: u8, round: u32) -> BoardRow {
+    BoardRow {
+        client_id: id,
+        name: name.into(),
+        points,
+        played,
+        last_place: place,
+        last_round: round,
+    }
+}
+
+#[test]
+fn board_points_follow_place_bots_are_absent_and_a_round_is_not_scored_twice() {
+    let mut players = vec![board_body(1, "ai", true, 100)];
+    for id in 2..=8 {
+        players.push(board_body(
+            id,
+            &format!("p{id}"),
+            false,
+            100 - u32::try_from(id).unwrap(),
+        ));
+    }
+    let mut board = RoomBoard {
+        rows: vec![board_row(2, "old", 0, 1, 4, 1)],
+    };
+    assert!(super::board::award(&mut board, 9, &players));
+    assert!(
+        board.rows.iter().all(|row| row.client_id != 1),
+        "a bot takes a place and is not listed"
+    );
+    let second = board.rows.iter().find(|row| row.client_id == 2).unwrap();
+    assert_eq!(second.name, "p2");
+    assert_eq!(second.points, 6, "bot in 1st, so this human is 2nd");
+    assert_eq!(second.played, 2);
+    assert_eq!(second.last_place, 2);
+    assert_eq!(second.last_round, 9);
+    let eighth = board.rows.iter().find(|row| row.client_id == 8).unwrap();
+    assert_eq!(eighth.points, 0);
+    assert_eq!(eighth.played, 1);
+    assert_eq!(eighth.last_place, 8);
+    let snap = board.clone();
+    assert!(!super::board::award(&mut board, 9, &players));
+    assert_eq!(board, snap);
+    assert!(super::board::award(&mut board, 10, &players));
+    let second = board.rows.iter().find(|row| row.client_id == 2).unwrap();
+    assert_eq!(second.points, 12);
+    assert_eq!(second.played, 3);
+    let eighth = board.rows.iter().find(|row| row.client_id == 8).unwrap();
+    assert_eq!(eighth.points, 0);
+    assert_eq!(eighth.played, 2);
+}
+
+#[test]
+fn a_watcher_is_not_scored_and_keeps_the_old_row() {
+    let mut board = RoomBoard {
+        rows: vec![board_row(4, "eye", 5, 2, 3, 1)],
+    };
+    let players = vec![
+        board_body(1, "ai", true, 50),
+        board_body(8, "neo", false, 10),
+    ];
+    assert!(super::board::award(&mut board, 2, &players));
+    let kept = board.rows.iter().find(|row| row.client_id == 4).unwrap();
+    assert_eq!((kept.points, kept.played, kept.last_round), (5, 2, 1));
+    let neo = board.rows.iter().find(|row| row.client_id == 8).unwrap();
+    assert_eq!(neo.points, 6);
+    assert_eq!(neo.played, 1);
+    assert!(board.rows.iter().all(|row| row.client_id != 1));
+}
+
+fn prune_app(rows: Vec<BoardRow>, humans: &[(u64, u32)], watchers: &[u64]) -> App {
+    use crate::spectate::SpectatorSession;
+
+    let mut app = App::new();
+    app.world_mut().spawn((
+        MatchState {
+            phase: Phase::Playing,
+            ..default()
+        },
+        RoomSettings::default(),
+        RoomBoard { rows },
+    ));
+    for (id, disconnected) in humans {
+        app.world_mut().spawn((
+            Player {
+                client_id: *id,
+                name: format!("p{id}"),
+                color: [1.0; 3],
+                bot: false,
+            },
+            Human {
+                peer: PeerId::Netcode(*id),
+                disconnected_ticks: *disconnected,
+                joined_at: 0,
+                left: false,
+            },
+        ));
+    }
+    for id in watchers {
+        app.world_mut().spawn(SpectatorSession {
+            client_id: *id,
+            name: format!("w{id}"),
+            peer: PeerId::Netcode(*id),
+            link: Entity::PLACEHOLDER,
+            order: 1,
+            watched: true,
+            disconnected_ticks: 0,
+        });
+    }
+    app.add_systems(Update, super::board::prune_board);
+    app
+}
+
+fn board_ids(app: &mut App) -> Vec<u64> {
+    let world = app.world_mut();
+    let mut query = world.query::<&RoomBoard>();
+    let mut ids: Vec<u64> = query
+        .iter(world)
+        .next()
+        .unwrap()
+        .rows
+        .iter()
+        .map(|row| row.client_id)
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+#[test]
+fn leaving_drops_a_row_but_a_grace_disconnect_does_not() {
+    let mut app = prune_app(
+        vec![
+            board_row(5, "hold", 4, 1, 2, 1),
+            board_row(6, "gone", 3, 1, 3, 1),
+        ],
+        &[(5, 9_000), (6, 0)],
+        &[],
+    );
+    app.update();
+    assert_eq!(board_ids(&mut app), vec![5, 6]);
+    let gone = {
+        let world = app.world_mut();
+        let mut players = world.query::<(Entity, &Player)>();
+        players
+            .iter(world)
+            .find(|(_, player)| player.client_id == 6)
+            .map(|(entity, _)| entity)
+            .unwrap()
+    };
+    app.world_mut().despawn(gone);
+    app.update();
+    assert_eq!(board_ids(&mut app), vec![5]);
+}
+
+#[test]
+fn a_restored_row_waits_through_the_lobby_then_goes_if_nobody_came_back() {
+    let mut app = prune_app(vec![board_row(5, "later", 4, 1, 1, 1)], &[], &[]);
+    let set_phase = |app: &mut App, phase: Phase| {
+        let world = app.world_mut();
+        let mut states = world.query::<&mut MatchState>();
+        states.iter_mut(world).next().unwrap().phase = phase;
+    };
+    set_phase(&mut app, Phase::Lobby);
+    app.update();
+    assert_eq!(board_ids(&mut app), vec![5]);
+    set_phase(&mut app, Phase::Playing);
+    app.update();
+    assert!(board_ids(&mut app).is_empty());
+}
+
+#[test]
+fn a_watcher_who_leaves_drops_their_row() {
+    let mut app = prune_app(vec![board_row(4, "eye", 5, 2, 3, 1)], &[], &[4]);
+    app.update();
+    assert_eq!(board_ids(&mut app), vec![4]);
+    let gone = {
+        let world = app.world_mut();
+        let mut watchers = world.query::<(Entity, &crate::spectate::SpectatorSession)>();
+        watchers
+            .iter(world)
+            .find(|(_, session)| session.client_id == 4)
+            .map(|(entity, _)| entity)
+            .unwrap()
+    };
+    app.world_mut().despawn(gone);
+    app.update();
+    assert!(board_ids(&mut app).is_empty());
+}

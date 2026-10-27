@@ -47,7 +47,7 @@ Rust · Bevy 0.20（客户端只在浏览器里跑，目标 `wasm32`）· lighty
 
 `logs/` 下两类文本日志（`--log-dir` 可改）：
 
-- `room-<match_id>.log`：房间种子、房间码、是否私人、设置、房主、`match_index`、阶段。每次变化追加一行。`--recover` 读最后一行。
+- `room-<match_id>.log`：房间种子、房间码、是否私人、设置、房主、`match_index`、阶段，以及房间累计榜（`board=`，每行 `client_id|名字|分|局数|名次|局号`，多行用 `;` 分隔，空榜省略）。每次变化追加一行；带本局加分的那行先于 `phase=results` 落盘。`--recover` 读最后一行。
 - `match-<match_id>-<match_index>.log`：Playing 开始时写下 `PROTOCOL_ID`、构建号（`EVOCLASH_BUILD`，否则 `dev`）、种子、设置、按 `client_id` 排序的名单。之后每个 tick 只记外部输入：`PlayerInput`、`PlayerCommand`、`InventoryMove`、`RoomCommand`、连接 / 断线 / 离开，以及旁观者的进出（`spectate` / `unspectate`）和切换跟随。旁观者不进摘要哈希。机器人、野怪和掉落不记，靠种子推出来。每 640 tick 一条摘要，哈希按 `client_id` 排序后的位置、血量、分数和经验。Results 结束时写分数、击杀序列和带时间戳的 `end`。
 
 内存缓冲，每 16 tick 追加并 `fsync` 一次。崩溃最多丢 0.25 秒输入。带 `end` 的日志在 16 分钟后删除；没写完的留给崩溃恢复。

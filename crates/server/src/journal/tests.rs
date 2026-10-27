@@ -736,4 +736,226 @@ fn lobby_and_results_restore_the_room() {
     assert_eq!(settings.host, 9);
     assert!(settings.code.is_empty());
     assert!(!settings.private_room);
+    let board = world.query::<&RoomBoard>().iter(world).next().unwrap();
+    assert!(board.rows.is_empty());
+}
+
+fn sorted_rows(app: &mut App) -> Vec<BoardRow> {
+    let world = app.world_mut();
+    let mut query = world.query::<&RoomBoard>();
+    let mut rows = query.iter(world).next().unwrap().rows.clone();
+    rows.sort_by_key(|row| row.client_id);
+    rows
+}
+
+fn set_board(app: &mut App, phase: Phase, index: u32, rows: Vec<BoardRow>) {
+    let world = app.world_mut();
+    let mut query = world.query::<(&mut MatchState, &mut RoomBoard)>();
+    let (mut state, mut board) = query.single_mut(world).unwrap();
+    state.phase = phase;
+    state.match_index = index;
+    board.rows = rows;
+}
+
+fn write_standings(app: &mut App) {
+    let (state, settings, board) = {
+        let world = app.world_mut();
+        let mut query = world.query::<(&MatchState, &RoomSettings, &RoomBoard)>();
+        let (state, settings, board) = query.single(world).unwrap();
+        (state.clone(), settings.clone(), board.clone())
+    };
+    {
+        let mut journal = app.world_mut().resource_mut::<Journal>();
+        journal.note_standings(&state, &settings, &board);
+        journal.flush();
+    }
+}
+
+#[test]
+fn board_log_round_trips_spaced_and_escaped_names() {
+    let dir = temp("board-names");
+    let mut app = fresh_app(&dir, 42);
+    let fancy = "Ann Bob|x;y\\z";
+    set_board(
+        &mut app,
+        Phase::Lobby,
+        6,
+        vec![
+            BoardRow {
+                client_id: 15,
+                name: fancy.into(),
+                points: 14,
+                played: 3,
+                last_place: 2,
+                last_round: 6,
+            },
+            BoardRow {
+                client_id: 3,
+                name: "Cara".into(),
+                points: 8,
+                played: 1,
+                last_place: 1,
+                last_round: 6,
+            },
+        ],
+    );
+    write_standings(&mut app);
+    drop(app);
+    let text = fs::read_to_string(dir.join("room-match.log")).unwrap();
+    assert!(
+        text.contains("Ann Bob\\|x\\;y\\\\z"),
+        "name was not escaped: {text}"
+    );
+    assert!(
+        text.contains(";3|Cara|") || text.contains("3|Cara|"),
+        "{text}"
+    );
+    let mut again = fresh_app(&dir, 42);
+    super::recover::recover_into(again.world_mut()).unwrap();
+    again.world_mut().run_schedule(FixedUpdate);
+    let rows = sorted_rows(&mut again);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].name, "Cara");
+    assert_eq!(rows[0].points, 8);
+    assert_eq!(rows[1].name, fancy);
+    assert_eq!(
+        (
+            rows[1].points,
+            rows[1].played,
+            rows[1].last_place,
+            rows[1].last_round
+        ),
+        (14, 3, 2, 6)
+    );
+}
+
+#[test]
+fn results_recover_does_not_score_again_and_playing_recover_keeps_the_board() {
+    let dir = temp("board-recover");
+    let mut app = fresh_app(&dir, 42);
+    set_board(
+        &mut app,
+        Phase::Results,
+        4,
+        vec![BoardRow {
+            client_id: 9,
+            name: "Ada".into(),
+            points: 8,
+            played: 1,
+            last_place: 1,
+            last_round: 4,
+        }],
+    );
+    write_standings(&mut app);
+    drop(app);
+    let mut again = fresh_app(&dir, 42);
+    super::recover::recover_into(again.world_mut()).unwrap();
+    again.world_mut().run_schedule(FixedUpdate);
+    assert_eq!(phase_of(&mut again), Phase::Lobby);
+    {
+        let world = again.world_mut();
+        let state = world.query::<&MatchState>().iter(world).next().unwrap();
+        assert_eq!(state.match_index, 5);
+    }
+    let rows = sorted_rows(&mut again);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].points, 8, "results recovery must not grant again");
+    assert_eq!(rows[0].played, 1);
+    assert_eq!(rows[0].last_round, 4);
+    drop(again);
+
+    let mut app = fresh_app(&dir, 42);
+    set_board(
+        &mut app,
+        Phase::Playing,
+        4,
+        vec![BoardRow {
+            client_id: 15,
+            name: "Bea".into(),
+            points: 6,
+            played: 2,
+            last_place: 2,
+            last_round: 3,
+        }],
+    );
+    write_standings(&mut app);
+    drop(app);
+    let bits = 1.0f32.to_bits();
+    fs::write(
+        dir.join("match-match-4.log"),
+        format!(
+            "EVOCLASH match v1\nprotocol {PROTOCOL_ID}\nbuild {}\nroom_seed 42\nmatch_index 4\nsettings 8 0 0 0 - 0\nplayer 15 0 {bits} {bits} {bits} Bea\n\n",
+            build_id()
+        ),
+    )
+    .unwrap();
+    let mut playing = fresh_app(&dir, 42);
+    super::recover::recover_into(playing.world_mut()).unwrap();
+    playing.world_mut().run_schedule(FixedUpdate);
+    assert_eq!(phase_of(&mut playing), Phase::Recovering);
+    let rows = sorted_rows(&mut playing);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "Bea");
+    assert_eq!(rows[0].points, 6);
+    assert_eq!(rows[0].played, 2);
+    assert_eq!(rows[0].last_place, 2);
+    assert_eq!(rows[0].last_round, 3);
+}
+
+#[test]
+fn scored_board_is_written_before_phase_results() {
+    let dir = temp("board-score");
+    let mut app = fresh_app(&dir, 7);
+    spawn_humans(&mut app, &[11, 22]);
+    {
+        let world = app.world_mut();
+        let mut players = world.query::<(&Player, &mut Stats)>();
+        for (player, mut stats) in players.iter_mut(world) {
+            stats.score = if player.client_id == 11 { 500 } else { 400 };
+        }
+        let mut states = world.query::<&mut MatchState>();
+        let mut state = states.single_mut(world).unwrap();
+        state.phase = Phase::Playing;
+        state.ticks_left = 1;
+        state.match_index = 3;
+        state.countdown_active = false;
+        state.vault_in = 50_000;
+    }
+    app.world_mut().run_schedule(FixedUpdate);
+    let rows = sorted_rows(&mut app);
+    assert!(
+        rows.iter()
+            .all(|row| row.client_id == 11 || row.client_id == 22),
+        "bots stay off the board: {rows:?}"
+    );
+    let first = rows.iter().find(|row| row.client_id == 11).unwrap();
+    let second = rows.iter().find(|row| row.client_id == 22).unwrap();
+    assert_eq!(
+        (
+            first.points,
+            first.played,
+            first.last_place,
+            first.last_round
+        ),
+        (8, 1, 1, 3)
+    );
+    assert_eq!((second.points, second.played, second.last_place), (6, 1, 2));
+    assert_eq!(phase_of(&mut app), Phase::Results);
+    app.world_mut().resource_mut::<Journal>().flush();
+    let text = fs::read_to_string(dir.join("room-match.log")).unwrap();
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("room_seed="))
+        .collect();
+    let playing = lines
+        .iter()
+        .position(|line| line.contains("phase=playing") && line.contains("board="))
+        .expect(&text);
+    let results = lines
+        .iter()
+        .position(|line| line.contains("phase=results"))
+        .expect(&text);
+    assert!(playing < results, "{text}");
+    assert!(lines[playing].contains("11|"), "{text}");
+    assert!(lines[results].contains("board="), "{text}");
 }
