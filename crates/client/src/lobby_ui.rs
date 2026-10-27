@@ -432,6 +432,7 @@ fn spawn_lobby_ui(mut commands: Commands, font: Res<UiFont>) {
             .with_children(|row| {
                 row.spawn(join_button(&font, JoinOffer::QuickStart, "快速开始"));
                 row.spawn(join_button(&font, JoinOffer::CreateRoom, "创建房间"));
+                row.spawn(join_button(&font, JoinOffer::ChangeRoom, "返回首页"));
             });
         });
 }
