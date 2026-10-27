@@ -1,5 +1,5 @@
 use evoclash_game::evolution::{Perk, xp_to_reach};
-use evoclash_game::shop::{PlayerCommand, RESPAWN_MIN_TICKS, ShopItem};
+use evoclash_game::shop::{PlayerCommand, RESPAWN_MIN_TICKS, ShopItem, can_deploy};
 
 use super::*;
 use crate::evolution::handle_command;
@@ -55,8 +55,13 @@ fn evolution_resets_when_a_match_starts() {
 }
 
 fn respawn_app() -> App {
+    respawn_app_in(Phase::Playing)
+}
+
+fn respawn_app_in(phase: Phase) -> App {
     let mut app = App::new();
     app.init_resource::<Arena>().init_resource::<SimTick>();
+    app.world_mut().spawn(MatchState { phase, ..default() });
     app.add_systems(Update, respawn);
     app
 }
@@ -92,9 +97,12 @@ fn alive(app: &App, e: Entity) -> bool {
 }
 
 #[test]
-fn deploy_is_allowed_after_4s_and_automatic_at_8s() {
+fn deploy_is_allowed_after_4s_and_idle_humans_stay_dead() {
     let mut app = respawn_app();
-    let early = spawn_dead(&mut app, default(), default(), default());
+    let mut evo = Evolution::default();
+    evo.add_xp(xp_to_reach(2));
+    assert!(evo.points > 0, "unspent points must not block deploy");
+    let early = spawn_dead(&mut app, evo, default(), default());
     let idle = spawn_dead(&mut app, default(), default(), default());
     for _ in 0..RESPAWN_MIN_TICKS {
         command(&mut app, early, PlayerCommand::Deploy);
@@ -102,16 +110,18 @@ fn deploy_is_allowed_after_4s_and_automatic_at_8s() {
         app.update();
     }
     assert!(!alive(&app, early));
+    assert!(app.world().get::<Evolution>(early).unwrap().points > 0);
     command(&mut app, early, PlayerCommand::Deploy);
     app.update();
     assert!(alive(&app, early));
+    assert!(app.world().get::<Evolution>(early).unwrap().points > 0);
     assert!(!alive(&app, idle));
-    for _ in RESPAWN_MIN_TICKS + 1..RESPAWN_MAX_TICKS - 1 {
+    for _ in 0..RESPAWN_MAX_TICKS - RESPAWN_MIN_TICKS {
         app.update();
     }
-    assert!(!alive(&app, idle));
-    app.update();
-    assert!(alive(&app, idle));
+    let idle_vitals = app.world().get::<Vitals>(idle).unwrap();
+    assert!(!idle_vitals.alive);
+    assert_eq!(idle_vitals.respawn_in, 1, "stuck until Deploy");
 }
 
 #[test]
@@ -137,7 +147,8 @@ fn deploy_last_waits_for_4s_and_brings_the_last_cart() {
         app.world().get::<Evolution>(p).unwrap().rank(Perk::Claws),
         1
     );
-    for _ in 0..RESPAWN_MIN_TICKS - 1 {
+    assert!(app.world().get::<LifeLog>(p).unwrap().deploy_asap);
+    for _ in 0..RESPAWN_MIN_TICKS {
         app.update();
     }
     assert!(!alive(&app, p));
@@ -148,6 +159,28 @@ fn deploy_last_waits_for_4s_and_brings_the_last_cart() {
     let wallet = world.get::<Wallet>(p).unwrap();
     assert_eq!((wallet.scrap, wallet.cart.len()), (15, 0));
     assert!(!world.get::<LifeLog>(p).unwrap().deploy_asap);
+}
+
+#[test]
+fn lobby_stands_up_when_the_timer_ends() {
+    let mut app = respawn_app_in(Phase::Lobby);
+    let p = spawn_dead(
+        &mut app,
+        default(),
+        default(),
+        LifeLog {
+            deploy_asap: true,
+            ..default()
+        },
+    );
+    app.world_mut().get_mut::<Vitals>(p).unwrap().respawn_in = LOBBY_RESPAWN_TICKS;
+    for _ in 0..LOBBY_RESPAWN_TICKS - 1 {
+        app.update();
+        assert!(!alive(&app, p), "lobby ignores the playing confirm hold");
+    }
+    app.update();
+    assert!(alive(&app, p));
+    assert!(!app.world().get::<LifeLog>(p).unwrap().deploy_asap);
 }
 
 #[test]
@@ -221,9 +254,13 @@ fn scrap_and_perks_survive_death_and_the_cart_is_equipped() {
 
     command(&mut app, p, PlayerCommand::Buy(ShopItem::Rifle));
     command(&mut app, p, PlayerCommand::Buy(ShopItem::ScrapArmor));
-    for _ in 0..RESPAWN_MAX_TICKS {
+    for _ in 0..RESPAWN_MIN_TICKS {
         app.update();
     }
+    assert!(!alive(&app, p), "still dead until deploy");
+    assert!(can_deploy(app.world().get::<Vitals>(p).unwrap().respawn_in));
+    command(&mut app, p, PlayerCommand::Deploy);
+    app.update();
     let world = app.world();
     assert!(alive(&app, p));
     let wallet = world.get::<Wallet>(p).unwrap();

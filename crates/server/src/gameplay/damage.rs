@@ -286,8 +286,9 @@ pub(super) fn salvage_target(loadout: &Loadout) -> Option<WeaponKind> {
         })
 }
 
-/// Bring the dead back: when the timer runs out, or once 沿用上次配置 may go. Whatever was
-/// bought in the shop is equipped on the spot.
+/// Bring the dead back. Playing: only after Deploy / DeployLast (`deploy_asap`); an
+/// unconfirmed human sticks at `respawn_in == 1`. Lobby: the 2s timer counts down to 0 on
+/// its own. Whatever was bought in the shop is equipped on the spot.
 pub(super) fn respawn(
     arena: Res<Arena>,
     tick: Res<SimTick>,
@@ -307,6 +308,7 @@ pub(super) fn respawn(
     )>,
 ) {
     let lobby = state.iter().any(|s| s.phase == Phase::Lobby);
+    let playing = state.iter().any(|s| s.phase == Phase::Playing);
     let mut alive: Vec<(Entity, Vec2)> = players
         .iter()
         .filter(|(_, _, v, ..)| v.alive)
@@ -339,9 +341,15 @@ pub(super) fn respawn(
         if vitals.alive {
             continue;
         }
-        vitals.respawn_in = vitals.respawn_in.saturating_sub(1);
-        if life.deploy_asap && can_deploy(vitals.respawn_in) {
-            vitals.respawn_in = 0;
+        if playing {
+            if life.deploy_asap && can_deploy(vitals.respawn_in) {
+                vitals.respawn_in = 0;
+            } else if vitals.respawn_in > 1 {
+                vitals.respawn_in -= 1;
+            }
+        } else {
+            // Lobby (and any other non-playing phase): ignore the confirm flag.
+            vitals.respawn_in = vitals.respawn_in.saturating_sub(1);
         }
         if vitals.respawn_in > 0 {
             continue;
@@ -385,6 +393,7 @@ pub(super) fn respawn(
         for item in wallet.take_cart() {
             take(item, &mut vitals, &mut loadout, evo);
         }
+        // Death already wrote a fresh log; revival only stamps this life and drops the confirm.
         life.born = tick.0;
         life.deploy_asap = false;
     }

@@ -10,6 +10,7 @@ use evoclash_game::shop::PlayerCommand;
 use crate::buttons::{Act, BlocksPointer, button};
 use crate::hud::{GOLD, LOCKED, PANEL_BG, path_color};
 use crate::input::LocalPlayer;
+use crate::perf::{EvoSelectSent, SlowWarn, take_select_rtt};
 use crate::render::UiFont;
 
 pub struct EvoPanelPlugin;
@@ -17,6 +18,7 @@ pub struct EvoPanelPlugin;
 impl Plugin for EvoPanelPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<EvoPanelOpen>();
+        app.init_resource::<EvoSelectSent>();
         app.add_systems(Startup, spawn_panel);
         app.add_systems(Update, (toggle_panel, update_tree));
     }
@@ -204,6 +206,7 @@ fn gate(key: &str, name: &str, need: u8, rank: u8) -> String {
 }
 
 fn update_tree(
+    mut select_sent: ResMut<EvoSelectSent>,
     me: Query<&Evolution, (With<LocalPlayer>, Changed<Evolution>)>,
     mut ui: Query<(
         &TreeUi,
@@ -212,19 +215,20 @@ fn update_tree(
         Option<&mut BorderColor>,
     )>,
 ) {
+    let _probe = SlowWarn::new("update_tree");
     // The trees are spawned at startup, before the player (whose arrival counts as a change).
     let Ok(evo) = me.single() else {
         return;
     };
+    // Click-to-replication wait, not the cost of this system. Cleared even when it was fast.
+    take_select_rtt(&mut select_sent);
     for (kind, text, color, border) in &mut ui {
         let set = |value: String, c: Color| {
-            if let Some(mut text) = text
-                && text.0 != value
-            {
-                text.0 = value;
+            if let Some(mut text) = text {
+                text.set_if_neq(Text::new(value));
             }
             if let Some(mut color) = color {
-                color.0 = c;
+                color.set_if_neq(TextColor(c));
             }
         };
         match *kind {
@@ -254,11 +258,12 @@ fn update_tree(
             }
             TreeUi::Card(perk) => {
                 if let Some(mut border) = border {
-                    *border = BorderColor::all(if evo.rank(perk) > 0 {
+                    let c = if evo.rank(perk) > 0 {
                         path_color(perk.evo_path())
                     } else {
                         LOCKED
-                    });
+                    };
+                    border.set_if_neq(BorderColor::all(c));
                 }
             }
             TreeUi::PerkName(perk) => {

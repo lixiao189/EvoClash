@@ -181,6 +181,17 @@ pub fn roll_loot(zone_tier: u8, rng: &mut impl rand::Rng) -> Item {
     pick(table, rng)
 }
 
+/// Ammo families stocked in a zone. Crates and monsters that drop ammo leave one full box of
+/// each. Tier 4 (the vault) stocks none; safes still roll a single box via `roll_ammo`.
+pub fn zone_ammo(zone_tier: u8) -> &'static [AmmoKind] {
+    match zone_tier {
+        0 | 1 => &[AmmoKind::Arrow, AmmoKind::Shell],
+        2 => &[AmmoKind::Bullet, AmmoKind::Shell],
+        3 => &[AmmoKind::Cell, AmmoKind::Bullet],
+        _ => &[],
+    }
+}
+
 /// A loose box of ammo of a family found in a zone of this tier.
 pub fn roll_ammo(zone_tier: u8, rng: &mut impl rand::Rng) -> Item {
     let table: &[(Item, u32)] = match zone_tier {
@@ -292,6 +303,32 @@ mod tests {
                 panic!("not ammo");
             };
             assert!(matches!(kind, AmmoKind::Arrow | AmmoKind::Shell));
+        }
+    }
+
+    #[test]
+    fn zone_ammo_is_two_different_families_until_the_vault() {
+        let pairs = [
+            (0, [AmmoKind::Arrow, AmmoKind::Shell]),
+            (1, [AmmoKind::Arrow, AmmoKind::Shell]),
+            (2, [AmmoKind::Bullet, AmmoKind::Shell]),
+            (3, [AmmoKind::Cell, AmmoKind::Bullet]),
+        ];
+        for (tier, kinds) in pairs {
+            assert_eq!(zone_ammo(tier), kinds.as_slice());
+            assert_ne!(kinds[0], kinds[1]);
+            for kind in kinds {
+                let Item::Ammo { kind: got, rounds } = Item::ammo(kind) else {
+                    panic!("not a box");
+                };
+                assert_eq!((got, rounds), (kind, kind.box_rounds()));
+            }
+        }
+        assert!(zone_ammo(4).is_empty());
+        // Safes still roll one box, including the vault tier where zone tables are empty.
+        let mut rng = rand::rng();
+        for _ in 0..20 {
+            assert!(matches!(roll_ammo(4, &mut rng), Item::Ammo { .. }));
         }
     }
 }

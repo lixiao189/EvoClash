@@ -16,7 +16,8 @@ const SEC: u16 = 64;
 
 /// You stay dead at least this long; after it you may leave early.
 pub const RESPAWN_MIN_TICKS: u16 = 4 * SEC;
-/// Respawn happens on its own after this long. `Vitals::respawn_in` starts here.
+/// Playing deaths count `Vitals::respawn_in` down from here. It is not an automatic revive:
+/// a human stays on the death screen (the count sticks at 1) until they deploy.
 pub const RESPAWN_MAX_TICKS: u16 = 8 * SEC;
 /// The death card is shown this long before the respec and shop panels.
 pub const DEATH_CARD_TICKS: u16 = 2 * SEC;

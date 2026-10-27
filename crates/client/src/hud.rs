@@ -18,6 +18,7 @@ use crate::buttons::BlocksPointer;
 use crate::effects::{Banner, BossBar, KillFeed};
 use crate::evo_panel::EvoPanelOpen;
 use crate::input::{LocalPlayer, Selection};
+use crate::perf::SlowWarn;
 use crate::render::UiFont;
 use crate::session::{Depart, JoinNotice};
 use crate::textures::Textures;
@@ -637,6 +638,12 @@ fn spawn_bottom_center(commands: &mut Commands, font: &UiFont) {
         });
 }
 
+/// 0.05 steps. A raw sine is a new `TextColor` every frame, which remeasures UI text.
+fn pulse_alpha(now: f32) -> f32 {
+    let blink = 0.65 + 0.35 * (now * 5.0).sin();
+    (blink * 20.0).round() / 20.0
+}
+
 #[allow(clippy::type_complexity)]
 fn update_evolution_hud(
     time: Res<Time>,
@@ -656,6 +663,7 @@ fn update_evolution_hud(
         Without<HideInLobby>,
     >,
 ) {
+    let _probe = SlowWarn::new("update_evolution_hud");
     let now = time.elapsed_secs();
     let lobby = state.iter().any(|s| s.phase == Phase::Lobby);
     let bar = if lobby { Display::None } else { Display::Flex };
@@ -673,17 +681,15 @@ fn update_evolution_hud(
     let (lead_rank, lead) = evo
         .lead_path()
         .map_or((0, None), |p| (evo.path_rank(p), Some(p)));
-    let blink = 0.65 + 0.35 * (now * 5.0).sin();
+    let pulse = pulse_alpha(now);
 
     for (kind, text, color, mut node, border, background) in &mut ui {
         let set_text = |value: String, c: Option<Color>| {
-            if let Some(mut text) = text
-                && text.0 != value
-            {
-                text.0 = value;
+            if let Some(mut text) = text {
+                text.set_if_neq(Text::new(value));
             }
             if let (Some(mut color), Some(c)) = (color, c) {
-                color.0 = c;
+                color.set_if_neq(TextColor(c));
             }
         };
         match *kind {
@@ -695,10 +701,15 @@ fn update_evolution_hud(
                 } else {
                     (evo.xp - floor) as f32 / (evo.xp_next - floor).max(1) as f32
                 };
-                node.width = Val::Percent(100.0 * frac.clamp(0.0, 1.0));
+                let width = Val::Percent(100.0 * frac.clamp(0.0, 1.0));
+                if node.width != width {
+                    node.width = width;
+                }
             }
             EvoUi::XpText => {
-                node.display = if lobby { Display::None } else { Display::Flex };
+                if node.display != bar {
+                    node.display = bar;
+                }
                 let value = if evo.level >= MAX_LEVEL {
                     format!("{} XP  满级", evo.xp)
                 } else {
@@ -707,16 +718,17 @@ fn update_evolution_hud(
                 set_text(value, None);
             }
             EvoUi::Pending => {
-                node.display = if lobby { Display::None } else { Display::Flex };
-                let value = if lobby {
-                    String::new()
+                if node.display != bar {
+                    node.display = bar;
+                }
+                let value = if !lobby && alive && !panel_open.0 && evo.points > 0 {
+                    format!("进化点 ×{} · Tab 加点", evo.points)
                 } else {
-                    match evo.points {
-                        n if n > 0 && !panel_open.0 && alive => format!("进化点 ×{n} · Tab 加点"),
-                        _ => String::new(),
-                    }
+                    String::new()
                 };
-                set_text(value, Some(GOLD.with_alpha(blink)));
+                // No alpha write on an empty hint: the tree is open, and a blink would still dirty text.
+                let color = (!value.is_empty()).then(|| GOLD.with_alpha(pulse));
+                set_text(value, color);
             }
             EvoUi::Slot(slot) => {
                 let unlocked = [skills.skill_a, skills.skill_b][slot];
@@ -725,7 +737,7 @@ fn update_evolution_hud(
                     _ => LOCKED,
                 };
                 if let Some(mut border) = border {
-                    *border = BorderColor::all(color);
+                    border.set_if_neq(BorderColor::all(color));
                 }
             }
             EvoUi::SlotText(slot) => {
@@ -787,7 +799,10 @@ fn update_evolution_hud(
                     Some(skill) if active == 0 => cd as f32 / skill.cooldown().max(1) as f32,
                     _ => 0.0,
                 };
-                node.height = Val::Percent(100.0 * frac.clamp(0.0, 1.0));
+                let height = Val::Percent(100.0 * frac.clamp(0.0, 1.0));
+                if node.height != height {
+                    node.height = height;
+                }
             }
             EvoUi::SlotActive(slot) => {
                 let (skill, active) = if slot == 0 {
@@ -799,9 +814,12 @@ fn update_evolution_hud(
                     Some(skill) if skill.duration() > 0 => active as f32 / skill.duration() as f32,
                     _ => 0.0,
                 };
-                node.width = Val::Percent(100.0 * frac.clamp(0.0, 1.0));
+                let width = Val::Percent(100.0 * frac.clamp(0.0, 1.0));
+                if node.width != width {
+                    node.width = width;
+                }
                 if let (Some(mut bg), Some(path)) = (background, lead) {
-                    bg.0 = path_color(path);
+                    bg.set_if_neq(BackgroundColor(path_color(path)));
                 }
             }
         }

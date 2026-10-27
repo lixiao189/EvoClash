@@ -16,6 +16,7 @@ use crate::buttons::{Act, BlocksPointer, button, send};
 use crate::evo_panel::spawn_tree;
 use crate::hud::{GOLD, PANEL_BG, path_color};
 use crate::input::LocalPlayer;
+use crate::perf::SlowWarn;
 use crate::render::UiFont;
 
 pub struct DeathScreenPlugin;
@@ -259,6 +260,7 @@ fn update_death_screen(
         &mut Visibility,
     )>,
 ) {
+    let _probe = SlowWarn::new("update_death_screen");
     // Lobby deaths stand back up on their own. The shop, scrap and deploy stay hidden.
     let lobby = state.iter().any(|s| s.phase == Phase::Lobby);
     let me = me.single().ok().filter(|(v, ..)| !v.alive && !lobby);
@@ -273,15 +275,11 @@ fn update_death_screen(
         let recap = wallet.recap.as_ref();
         let on_card = dead_ticks(vitals.respawn_in) < DEATH_CARD_TICKS;
         let set = |value: String, c: Option<Color>| {
-            if let Some(mut text) = text
-                && text.0 != value
-            {
-                text.0 = value;
+            if let Some(mut text) = text {
+                text.set_if_neq(Text::new(value));
             }
-            if let (Some(mut color), Some(c)) = (color, c)
-                && color.0 != c
-            {
-                color.0 = c;
+            if let (Some(mut color), Some(c)) = (color, c) {
+                color.set_if_neq(TextColor(c));
             }
         };
         match *kind {
@@ -352,19 +350,7 @@ fn update_death_screen(
                     );
                 }
             }
-            DeathUi::Countdown => {
-                let secs = vitals.respawn_in.div_ceil(64);
-                let early = vitals
-                    .respawn_in
-                    .saturating_sub(RESPAWN_MAX_TICKS - RESPAWN_MIN_TICKS)
-                    .div_ceil(64);
-                let value = if early > 0 {
-                    format!("{secs} 秒后自动出发 · {early} 秒后可提前出发")
-                } else {
-                    format!("{secs} 秒后自动出发")
-                };
-                set(value, None);
-            }
+            DeathUi::Countdown => set(countdown_line(vitals.respawn_in), None),
             DeathUi::DeployText => {
                 let c = if can_deploy(vitals.respawn_in) {
                     Color::WHITE
@@ -405,5 +391,39 @@ fn death_keys(
     }
     if keys.just_pressed(KeyCode::KeyR) {
         send(&mut senders, PlayerCommand::DeployLast);
+    }
+}
+
+/// Early-deploy wait, then a ready label. `respawn_in` sticks until Deploy; nothing leaves on its own.
+fn countdown_line(respawn_in: u16) -> String {
+    if can_deploy(respawn_in) {
+        "可出发".to_string()
+    } else {
+        let early = respawn_in
+            .saturating_sub(RESPAWN_MAX_TICKS - RESPAWN_MIN_TICKS)
+            .div_ceil(64);
+        format!("{early} 秒后可提前出发")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn countdown_waits_then_stays_ready() {
+        assert_eq!(countdown_line(RESPAWN_MAX_TICKS), "4 秒后可提前出发");
+        assert_eq!(
+            countdown_line(RESPAWN_MAX_TICKS - RESPAWN_MIN_TICKS + 1),
+            "1 秒后可提前出发"
+        );
+        assert_eq!(
+            countdown_line(RESPAWN_MAX_TICKS - RESPAWN_MIN_TICKS),
+            "可出发"
+        );
+        // Stuck at 1 until Deploy / DeployLast. Do not promise an automatic leave.
+        assert_eq!(countdown_line(1), "可出发");
+        assert!(!countdown_line(RESPAWN_MAX_TICKS).contains("自动"));
+        assert!(!countdown_line(1).contains("自动"));
     }
 }

@@ -72,7 +72,7 @@ pub struct LifeLog {
     pub kills: u32,
     pub last_ranks: [u8; 12],
     pub last_first_pick: [u8; 3],
-    /// 沿用上次配置 was pressed before deploying was allowed: go as soon as it is.
+    /// Deploy or 沿用上次配置 confirmed. Playing respawn leaves as soon as `can_deploy`.
     pub deploy_asap: bool,
 }
 
@@ -143,19 +143,20 @@ pub fn handle_command(
             false
         }
         PlayerCommand::Deploy => {
+            // Too early is a no-op. Unspent perk points do not block this.
             if can_deploy(vitals.respawn_in) {
                 vitals.respawn_in = 1;
+                life.deploy_asap = true;
             }
             false
         }
         PlayerCommand::DeployLast => {
             let changed = evo.restore(life.last_ranks, life.last_first_pick);
             wallet.rebuy_last(evo);
-            // Too early: `respawn` sends them off the moment it's allowed.
+            // Confirmed even when early: `respawn` leaves once deploying is allowed.
+            life.deploy_asap = true;
             if can_deploy(vitals.respawn_in) {
                 vitals.respawn_in = 1;
-            } else {
-                life.deploy_asap = true;
             }
             changed
         }
