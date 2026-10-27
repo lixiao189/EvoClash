@@ -107,6 +107,12 @@ fn enable_buttons(
 ) {
     let _probe = SlowWarn::new("enable_buttons");
     let Ok((evo, wallet, vitals)) = me.single() else {
+        // No combatant (a spectator, or the body has not spawned): the shop stays shut.
+        for mut button in &mut buttons {
+            if button.enabled {
+                button.enabled = false;
+            }
+        }
         return;
     };
     // Shop, perks and deploy are refused outside Playing, including the lobby.

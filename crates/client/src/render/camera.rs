@@ -16,28 +16,55 @@ pub(super) fn follow_camera(
     mut shake: ResMut<CameraShake>,
     mut held_lean: Local<Vec2>,
     me: Query<(&Pos, Option<&TickSamples>), With<LocalPlayer>>,
+    specs: Query<&Spectator>,
+    bodies: Query<(&Player, &Pos, Option<&TickSamples>)>,
     mut camera: Query<&mut Transform, With<Camera2d>>,
 ) {
     let Ok(mut cam) = camera.single_mut() else {
         return;
     };
-    let Ok((pos, samples)) = me.single() else {
+    // Spectators sit on the followed combatant with no cursor lean.
+    let subject = match me.single().ok() {
+        Some((pos, samples)) => Some((
+            visual_pos(pos, samples, &fixed) + Vec2::Y * GUN_HEIGHT,
+            true,
+        )),
+        None => specs
+            .iter()
+            .next()
+            .map(|s| s.following)
+            .filter(|id| *id != 0)
+            .and_then(|id| {
+                bodies.iter().find_map(|(player, pos, samples)| {
+                    (player.client_id == id).then(|| {
+                        (
+                            visual_pos(pos, samples, &fixed) + Vec2::Y * GUN_HEIGHT,
+                            false,
+                        )
+                    })
+                })
+            }),
+    };
+    let Some((anchor, lean_ok)) = subject else {
         return;
     };
-    let me = visual_pos(pos, samples, &fixed) + Vec2::Y * GUN_HEIGHT;
     // Lean toward the cursor. While a panel is open keep the last offset: don't recenter and
     // don't chase the pointer. Closing the panel feeds a new target into the lerp below.
-    let lean = if panel_open(backpack.0, menu.0, evo.0) {
+    // A spectator never leans: the view stays on the followed body.
+    let lean = if !lean_ok {
+        *held_lean = Vec2::ZERO;
+        Vec2::ZERO
+    } else if panel_open(backpack.0, menu.0, evo.0) {
         *held_lean
     } else {
         let live = cursor
             .0
-            .map(|c| ((c - me) * 0.22).clamp_length_max(160.0))
+            .map(|c| ((c - anchor) * 0.22).clamp_length_max(160.0))
             .unwrap_or_default();
         *held_lean = live;
         live
     };
-    let target = me + lean;
+    let target = anchor + lean;
     let current = cam.translation.truncate();
     let k = 1.0 - (-12.0 * time.delta_secs()).exp();
     let mut next = current.lerp(target, k);

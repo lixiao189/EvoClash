@@ -130,6 +130,7 @@ pub(super) fn draw_overlays(
     time: Res<Time>,
     fixed: Res<Time<Fixed>>,
     players: Query<(
+        &Player,
         &Pos,
         Option<&TickSamples>,
         &Vitals,
@@ -302,7 +303,9 @@ pub(super) fn draw_overlays(
         );
     }
 
-    for (pos, samples, vitals, stats, (aim, evo, skills, action), local) in &players {
+    for (player, pos, samples, vitals, stats, (aim, evo, skills, action), local) in &players {
+        // The followed combatant is drawn the way we draw ourselves (bars, stealth).
+        let local = local || indoors.watch == Some(player.client_id);
         if !vitals.alive {
             continue;
         }

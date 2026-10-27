@@ -171,9 +171,29 @@ fn classify_join_error(
     }
 }
 
+struct Joined {
+    response: JoinResponse,
+    spectate: bool,
+}
+
+/// `JoinResponse::spectate` is `#[serde(default)]`, so a reply without the field is not spectating.
+fn parse_join(bytes: &[u8]) -> Result<Joined, String> {
+    serde_json::from_slice::<JoinResponse>(bytes)
+        .map(|response| {
+            let spectate = response.spectate;
+            Joined { response, spectate }
+        })
+        .map_err(|e| format!("bad reply: {e}"))
+}
+
+/// True once the matchmaker seated us as a spectator. Drives the loading copy until
+/// the replicated [`evoclash_game::protocol::Spectator`] arrives.
+#[derive(Resource, Default)]
+pub struct SpectateJoin(pub bool);
+
 /// A matchmaker request in flight. Browsers can't block on HTTP, so the reply lands here and
 /// `watch_connection` picks it up on a later frame.
-type PendingCall = Arc<Mutex<Option<Result<JoinResponse, CallError>>>>;
+type PendingCall = Arc<Mutex<Option<Result<Joined, CallError>>>>;
 
 fn post<T: Serialize>(matchmaker: &str, path: &str, request: &T) -> PendingCall {
     let pending = PendingCall::default();
@@ -186,8 +206,9 @@ fn post<T: Serialize>(matchmaker: &str, path: &str, request: &T) -> PendingCall 
     let slot = pending.clone();
     ehttp::fetch(http, move |result| {
         let reply = match result {
-            Ok(response) if response.ok => serde_json::from_slice(&response.bytes)
-                .map_err(|e| CallError::Failed(format!("{url}: bad reply: {e}"))),
+            Ok(response) if response.ok => {
+                parse_join(&response.bytes).map_err(|e| CallError::Failed(format!("{url}: {e}")))
+            }
             Ok(response) => match serde_json::from_slice::<ErrorBody>(&response.bytes) {
                 // Rejoin's 410 `gone` (and a bare 403/410) finds another match. A closed
                 // room is 410 too, but the player has to choose, not be redirected.
@@ -363,7 +384,7 @@ impl Session {
     }
 
     /// The reply to the call in flight, once it has arrived.
-    fn poll(&mut self) -> Option<Result<JoinResponse, CallError>> {
+    fn poll(&mut self) -> Option<Result<Joined, CallError>> {
         let reply = self.pending.as_ref()?.lock().ok()?.take()?;
         self.pending = None;
         self.pending_since = None;
@@ -391,6 +412,7 @@ impl Plugin for SessionPlugin {
         app.init_resource::<JoinNotice>();
         app.init_resource::<JoinOffers>();
         app.init_resource::<Depart>();
+        app.init_resource::<SpectateJoin>();
         app.insert_resource(LinkState {
             entity: None,
             since_change: 0.0,
@@ -567,6 +589,7 @@ fn watch_connection(
     mut session: ResMut<Session>,
     mut notice: ResMut<JoinNotice>,
     mut depart: ResMut<Depart>,
+    mut spectating: ResMut<SpectateJoin>,
     args: Res<ClientArgs>,
     mut offers: ResMut<JoinOffers>,
     mut status: ResMut<ConnectionStatus>,
@@ -609,7 +632,7 @@ fn watch_connection(
     }
     if let Some(reply) = session.poll() {
         let seat = match reply {
-            Ok(response) => {
+            Ok(joined) => {
                 if session.creating(&args) {
                     session.create_used = true;
                 }
@@ -618,11 +641,13 @@ fn watch_connection(
                 offers.buttons.clear();
                 session.wait = NoticeWait::Idle;
                 session.started_retried = false;
-                Seat::from_response(response)
+                spectating.0 = joined.spectate;
+                Seat::from_response(joined.response)
             }
             Err(CallError::Gone) => {
                 warn!("match is gone, joining another one");
                 session.seat = None;
+                spectating.0 = false;
                 session.wait = NoticeWait::Idle;
                 offers.buttons.clear();
                 session.dispatch(&args, now);
@@ -977,5 +1002,24 @@ mod tests {
         assert!(!call_timed_out(None, 100.0));
         assert!(!call_timed_out(Some(10.0), 21.9));
         assert!(call_timed_out(Some(10.0), 22.0));
+    }
+
+    #[test]
+    fn missing_spectate_field_defaults_to_false() {
+        let bare = br#"{"match_id":"m","server_addr":"127.0.0.1:9","cert_digest":"ab","client_id":3,"connect_token":"aa","reconnect_key":"k"}"#;
+        let joined = parse_join(bare).unwrap();
+        assert!(!joined.spectate);
+        assert_eq!(joined.response.match_id, "m");
+        assert_eq!(joined.response.client_id, 3);
+        assert!(joined.response.room_code.is_none());
+
+        let flagged = br#"{"match_id":"m","server_addr":"127.0.0.1:9","cert_digest":"ab","client_id":7,"connect_token":"aa","reconnect_key":"k","room_code":"AB12","spectate":true}"#;
+        let joined = parse_join(flagged).unwrap();
+        assert!(joined.spectate);
+        assert_eq!(joined.response.client_id, 7);
+        assert_eq!(joined.response.room_code.as_deref(), Some("AB12"));
+
+        let explicit = br#"{"match_id":"m","server_addr":"127.0.0.1:9","cert_digest":"ab","client_id":1,"connect_token":"aa","reconnect_key":"k","spectate":false}"#;
+        assert!(!parse_join(explicit).unwrap().spectate);
     }
 }

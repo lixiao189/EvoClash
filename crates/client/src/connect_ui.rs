@@ -13,7 +13,8 @@ use bevy::ui::RelativeCursorPosition;
 use crate::buttons::BlocksPointer;
 use crate::hud::{GOLD, PANEL_BG};
 use crate::render::UiFont;
-use crate::session::Depart;
+use crate::session::{Depart, SpectateJoin};
+use crate::spectate_ui::SPECTATE_JOIN;
 
 /// What the session's connection loop is doing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -78,6 +79,8 @@ enum OverlayNode {
 enum OverlayText {
     Title,
     Attempt,
+    /// Failed-card subtitle. Swapped for the spectate join line when that seat is one.
+    Detail,
 }
 
 #[derive(Component)]
@@ -146,7 +149,10 @@ fn spawn_overlay(mut commands: Commands, font: Res<UiFont>) {
             root.spawn((OverlayNode::Failed, Visibility::Hidden, card()))
                 .with_children(|card| {
                     card.spawn(label(font, 26.0, "连接失败", GOLD));
-                    card.spawn(label(font, 18.0, "对局仍在服务器上进行", Color::WHITE));
+                    card.spawn((
+                        OverlayText::Detail,
+                        label(font, 18.0, "对局仍在服务器上进行", Color::WHITE),
+                    ));
                     card.spawn((
                         BackHomeButton,
                         Node {
@@ -172,6 +178,7 @@ fn spawn_overlay(mut commands: Commands, font: Res<UiFont>) {
 fn sync_overlay(
     time: Res<Time>,
     status: Res<ConnectionStatus>,
+    spectate: Res<SpectateJoin>,
     mut state: ResMut<OverlayState>,
     mut nodes: Query<(&OverlayNode, &mut Visibility)>,
     mut texts: Query<(&OverlayText, &mut Text)>,
@@ -200,20 +207,30 @@ fn sync_overlay(
             Visibility::Hidden
         });
     }
-    if !reconnect {
+    if !show {
         return;
     }
     // One dot per beat, then back to one: 正在重连… / …… / ……….
     let dots = 1 + (time.elapsed_secs() * 2.5) as usize % 3;
     let title = format!("连接中断，正在重连{}", "…".repeat(dots));
-    let attempt = format!("第 {}/{} 次", status.attempts, status.max);
+    let attempt = if spectate.0 {
+        format!("第 {}/{} 次\n{SPECTATE_JOIN}", status.attempts, status.max)
+    } else {
+        format!("第 {}/{} 次", status.attempts, status.max)
+    };
+    let detail = if spectate.0 {
+        SPECTATE_JOIN
+    } else {
+        "对局仍在服务器上进行"
+    };
     for (kind, mut text) in &mut texts {
         let value = match kind {
-            OverlayText::Title => &title,
-            OverlayText::Attempt => &attempt,
+            OverlayText::Title => title.as_str(),
+            OverlayText::Attempt => attempt.as_str(),
+            OverlayText::Detail => detail,
         };
-        if text.0 != *value {
-            text.0 = value.clone();
+        if text.0 != value {
+            text.0 = value.to_string();
         }
     }
 }

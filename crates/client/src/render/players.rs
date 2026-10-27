@@ -498,6 +498,7 @@ pub(super) fn pose_players(
 #[allow(clippy::type_complexity)]
 pub(super) fn tint_players(
     time: Res<Time>,
+    indoors: Res<Indoors>,
     players: Query<(
         &Player,
         &Vitals,
@@ -513,8 +514,10 @@ pub(super) fn tint_players(
     let t = time.elapsed_secs();
     for (player, vitals, skills, parts, children, local) in &players {
         let skills = skills.copied().unwrap_or_default();
+        // A spectator sees the followed body the way that combatant sees themselves.
+        let self_view = local || indoors.watch == Some(player.client_id);
         let alpha = if vitals.stealth > 0 && vitals.revealed == 0 {
-            if local {
+            if self_view {
                 STEALTH_SELF_ALPHA
             } else {
                 STEALTH_ALPHA

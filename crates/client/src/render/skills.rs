@@ -68,10 +68,11 @@ pub(super) fn dress_trap(trigger: On<Add<Trap>>, mut commands: Commands, texture
         .insert((sprite, transform, Visibility::Hidden));
 }
 
-/// Traps only ever reach their owner, but never draw someone else's anyway.
+/// Traps reach their owner and a spectator following that owner. Never draw anyone else's.
 pub(super) fn sync_traps(
     time: Res<Time>,
     me: Query<&Player, With<LocalPlayer>>,
+    specs: Query<&Spectator>,
     mut traps: Query<(
         &Trap,
         Option<&Pos>,
@@ -80,7 +81,13 @@ pub(super) fn sync_traps(
         &mut Visibility,
     )>,
 ) {
-    let me = me.single().ok().map(|p| p.client_id);
+    let me = me.single().ok().map(|p| p.client_id).or_else(|| {
+        specs
+            .iter()
+            .next()
+            .map(|s| s.following)
+            .filter(|id| *id != 0)
+    });
     let pulse = 0.6 + 0.2 * (time.elapsed_secs() * 3.0).sin();
     for (trap, pos, mut sprite, mut transform, mut visibility) in &mut traps {
         let Some(pos) = pos.filter(|_| Some(trap.owner) == me) else {

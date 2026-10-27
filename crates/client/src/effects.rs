@@ -3,6 +3,8 @@
 //!
 //! Your own shots are drawn the moment you click (the server's copy is never sent back to you),
 //! so firing feels zero-latency even though hits are decided by the server.
+//! A spectator has no body, so they spawn no local tracers. Replicated projectiles already
+//! include the combatant they follow (the server skips only the shooter's own peer).
 
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
@@ -717,6 +719,8 @@ fn update_reticle(
     textures: Res<Textures>,
     marker: Res<HitMarker>,
     cursor: Res<crate::input::CursorWorld>,
+    specs: Query<(), With<Spectator>>,
+    me: Query<(), With<LocalPlayer>>,
     mut reticle: Query<(&mut Sprite, &mut Transform, &mut Visibility), With<Reticle>>,
 ) {
     let Ok((mut sprite, mut transform, mut visibility)) = reticle.single_mut() else {
@@ -728,6 +732,11 @@ fn update_reticle(
         ));
         return;
     };
+    // No aim point while watching: the crosshair would read as a shot you cannot fire.
+    if me.is_empty() && !specs.is_empty() {
+        visibility.set_if_neq(Visibility::Hidden);
+        return;
+    }
     let Some(c) = cursor.0 else {
         visibility.set_if_neq(Visibility::Hidden);
         return;

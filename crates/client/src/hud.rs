@@ -25,7 +25,15 @@ pub struct HudPlugin;
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_hud);
-        app.add_systems(Update, (update_hud, update_evolution_hud, update_hotbar));
+        app.add_systems(
+            Update,
+            (
+                update_hud,
+                update_evolution_hud,
+                update_hotbar,
+                sync_combat_chrome,
+            ),
+        );
     }
 }
 
@@ -70,6 +78,11 @@ pub fn path_color(path: EvoPath) -> Color {
 pub const PANEL_BG: Color = Color::srgba(0.0, 0.0, 0.0, 0.6);
 pub const LOCKED: Color = Color::srgba(0.5, 0.5, 0.5, 0.6);
 pub const GOLD: Color = Color::srgb(1.0, 0.85, 0.35);
+
+/// Hotbar and the evolution column. Hidden until this client has a combatant, so a
+/// spectator never sees weapon slots, skill slots or the safe hint.
+#[derive(Component)]
+struct CombatChrome;
 
 /// Parts of hotbar slot `i`: the box, its picture and its count line.
 #[derive(Component)]
@@ -253,14 +266,18 @@ fn spawn_hud(mut commands: Commands, font: Res<UiFont>) {
 /// Four weapon slots along the bottom edge, under the evolution column.
 fn spawn_hotbar(commands: &mut Commands, font: &UiFont) {
     commands
-        .spawn(Node {
-            position_type: PositionType::Absolute,
-            bottom: Val::Px(14.0),
-            width: Val::Percent(100.0),
-            justify_content: JustifyContent::Center,
-            column_gap: Val::Px(6.0),
-            ..default()
-        })
+        .spawn((
+            CombatChrome,
+            Visibility::Inherited,
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: Val::Px(14.0),
+                width: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                column_gap: Val::Px(6.0),
+                ..default()
+            },
+        ))
         .with_children(|row| {
             for i in 0..HOTBAR_SLOTS {
                 row.spawn((
@@ -406,15 +423,19 @@ fn ui_text(font: &UiFont, size: f32, kind: EvoUi, color: Color) -> impl Bundle {
 /// Bottom-center column, top to bottom: the safe hint, skill slots, level and XP.
 fn spawn_bottom_center(commands: &mut Commands, font: &UiFont) {
     commands
-        .spawn(Node {
-            position_type: PositionType::Absolute,
-            bottom: Val::Px(78.0),
-            width: Val::Percent(100.0),
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::Center,
-            row_gap: Val::Px(6.0),
-            ..default()
-        })
+        .spawn((
+            CombatChrome,
+            Visibility::Inherited,
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: Val::Px(78.0),
+                width: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                row_gap: Val::Px(6.0),
+                ..default()
+            },
+        ))
         .with_children(|col| {
             col.spawn(text_node(
                 font,
@@ -718,8 +739,9 @@ fn update_hud(
     time: Res<Time>,
     arena: Res<Arena>,
     me: Query<(&Player, &Vitals, &Loadout, &Stats, &Dash, &Pos), With<LocalPlayer>>,
+    specs: Query<&Spectator>,
     props: Query<(&Pos, &Prop)>,
-    players: Query<(&Player, &Stats)>,
+    players: Query<(&Player, &Stats, &Vitals, &Pos)>,
     state: Query<&MatchState>,
     feed: Res<KillFeed>,
     banner: Res<Banner>,
@@ -734,6 +756,22 @@ fn update_hud(
     let now = time.elapsed_secs();
     let me = me.single().ok();
     let state = state.iter().next();
+    let spec = specs.iter().next().copied();
+    let follow = spec.map(|s| s.following).filter(|id| *id != 0);
+    let spectating = me.is_none() && spec.is_some();
+    let you_id = me.as_ref().map(|(player, ..)| player.client_id).or(follow);
+    // Place name and the radiation warning follow whoever the camera is on.
+    let eye = if spectating {
+        follow.and_then(|id| {
+            players.iter().find_map(|(player, _, vitals, pos)| {
+                (player.client_id == id && vitals.alive).then_some((*vitals, pos.0))
+            })
+        })
+    } else {
+        me.as_ref()
+            .filter(|(_, vitals, ..)| vitals.alive)
+            .map(|(_, vitals, .., pos)| (**vitals, pos.0))
+    };
 
     // The boss bar tracks the live monster, with the max and phase from the server's report.
     let boss = bosses
@@ -788,39 +826,47 @@ fn update_hud(
                 }
                 None => String::new(),
             },
-            HudText::Status => match me {
-                Some((_, vitals, _, stats, dash, _)) => {
-                    color.0 = Color::WHITE;
-                    let dash = if dash.cooldown == 0 {
-                        "就绪".to_string()
-                    } else {
-                        format!(
-                            "{:.0}%",
-                            100.0 * (1.0 - dash.cooldown as f32 / DASH_COOLDOWN as f32)
-                        )
-                    };
-                    format!(
-                        "生命 {:.0}/{:.0}   {} {:.0}\n冲刺 {dash}   连杀 {}\n\nWASD 移动  鼠标 瞄准/射击  空格 冲刺\nE 拾取（按住撬保险柜）  Q/右键 电磁脉冲\n1-4/滚轮 切换  B 背包  R/T 技能  Tab 进化",
-                        vitals.hp,
-                        vitals.max_hp,
-                        vitals.armor.name(),
-                        vitals.armor_points,
-                        stats.streak,
-                    )
-                }
-                None => {
-                    let connecting = match &assets.state {
-                        Loading::Waiting => "加载资源中…".to_string(),
-                        Loading::Failed(path) => format!("资源加载失败：{path}\n请刷新页面重试"),
-                        Loading::Ready => "连接中…".to_string(),
-                    };
-                    if notice.0.is_empty() {
-                        connecting
-                    } else {
-                        notice.0.clone()
+            HudText::Status => {
+                if spectating {
+                    String::new()
+                } else {
+                    match me {
+                        Some((_, vitals, _, stats, dash, _)) => {
+                            color.0 = Color::WHITE;
+                            let dash = if dash.cooldown == 0 {
+                                "就绪".to_string()
+                            } else {
+                                format!(
+                                    "{:.0}%",
+                                    100.0 * (1.0 - dash.cooldown as f32 / DASH_COOLDOWN as f32)
+                                )
+                            };
+                            format!(
+                                "生命 {:.0}/{:.0}   {} {:.0}\n冲刺 {dash}   连杀 {}\n\nWASD 移动  鼠标 瞄准/射击  空格 冲刺\nE 拾取（按住撬保险柜）  Q/右键 电磁脉冲\n1-4/滚轮 切换  B 背包  R/T 技能  Tab 进化",
+                                vitals.hp,
+                                vitals.max_hp,
+                                vitals.armor.name(),
+                                vitals.armor_points,
+                                stats.streak,
+                            )
+                        }
+                        None => {
+                            let connecting = match &assets.state {
+                                Loading::Waiting => "加载资源中…".to_string(),
+                                Loading::Failed(path) => {
+                                    format!("资源加载失败：{path}\n请刷新页面重试")
+                                }
+                                Loading::Ready => "连接中…".to_string(),
+                            };
+                            if notice.0.is_empty() {
+                                connecting
+                            } else {
+                                notice.0.clone()
+                            }
+                        }
                     }
                 }
-            },
+            }
             HudText::Clock => match state {
                 Some(s) => match s.phase {
                     Phase::Lobby | Phase::Starting | Phase::Recovering | Phase::Results => {
@@ -845,7 +891,10 @@ fn update_hud(
                 if state.is_some_and(|s| s.phase == Phase::Lobby) {
                     String::new()
                 } else {
-                    let mut rows: Vec<(&Player, &Stats)> = players.iter().collect();
+                    let mut rows: Vec<(&Player, &Stats)> = players
+                        .iter()
+                        .map(|(player, stats, ..)| (player, stats))
+                        .collect();
                     rows.sort_by(|a, b| {
                         b.1.score
                             .cmp(&a.1.score)
@@ -854,7 +903,7 @@ fn update_hud(
                     });
                     let mut out = String::from("等级  分数  击杀/阵亡\n");
                     for (player, stats) in rows {
-                        let you = me.is_some_and(|(p, ..)| p.client_id == player.client_id);
+                        let you = you_id == Some(player.client_id);
                         let bounty = if stats.has_bounty() { "★" } else { "" };
                         let bot = if player.bot { "·" } else { "" };
                         let arrow = if you { "▶ " } else { "" };
@@ -880,10 +929,10 @@ fn update_hud(
                 }
                 _ => String::new(),
             },
-            HudText::Location => match me.filter(|(_, v, ..)| v.alive) {
-                Some((_, vitals, .., pos)) => {
-                    let place = arena.block_at(pos.0).map_or("街道", |b| b.name);
-                    if arena.in_hazard(pos.0) {
+            HudText::Location => match eye {
+                Some((vitals, pos)) => {
+                    let place = arena.block_at(pos).map_or("街道", |b| b.name);
+                    if arena.in_hazard(pos) {
                         let sealed =
                             vitals.armor == ArmorKind::PowerArmor && vitals.armor_points > 0.0;
                         if sealed {
@@ -939,5 +988,19 @@ fn update_hud(
         if text.0 != value {
             text.0 = value;
         }
+    }
+}
+
+fn sync_combat_chrome(
+    me: Query<(), With<LocalPlayer>>,
+    mut chrome: Query<&mut Visibility, With<CombatChrome>>,
+) {
+    let vis = if me.is_empty() {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
+    };
+    for mut visibility in &mut chrome {
+        visibility.set_if_neq(vis);
     }
 }
