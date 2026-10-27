@@ -143,7 +143,8 @@ fn hotbar_keys(
             open.0 = false;
         } else if evo.0 {
             evo.0 = false;
-        } else {
+        } else if me.single().is_ok() {
+            // No menu over the loading cover / join-failure screen.
             menu.0 = !menu.0;
         }
     }

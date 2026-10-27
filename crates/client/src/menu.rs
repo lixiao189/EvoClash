@@ -13,6 +13,7 @@ use evoclash_game::protocol::{CommandChannel, MatchState, Phase, RoomCommand};
 use lightyear::prelude::{Client, MessageSender};
 
 use crate::buttons::BlocksPointer;
+use crate::connect_ui::{ConnectionStatus, LinkStatus};
 use crate::hud::{GOLD, PANEL_BG};
 use crate::render::UiFont;
 use crate::session::Depart;
@@ -253,11 +254,17 @@ fn spawn_confirm(panel: &mut ChildSpawnerCommands, font: &UiFont) {
 }
 
 /// The server never pauses, so the overlay is only valid outside the between-round shades.
-fn close_in_transition(state: Query<&MatchState>, mut open: ResMut<MenuOpen>) {
+/// A reconnect overlay takes over the screen too; close the menu under it.
+fn close_in_transition(
+    state: Query<&MatchState>,
+    link: Res<ConnectionStatus>,
+    mut open: ResMut<MenuOpen>,
+) {
     let transitioning = state
         .iter()
         .any(|s| matches!(s.phase, Phase::Starting | Phase::Recovering));
-    if transitioning && open.0 {
+    let reconnecting = matches!(link.status, LinkStatus::Reconnecting | LinkStatus::Failed);
+    if (transitioning || reconnecting) && open.0 {
         open.0 = false;
     }
 }

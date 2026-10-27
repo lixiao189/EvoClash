@@ -10,9 +10,11 @@ use bevy::ui::RelativeCursorPosition;
 
 use crate::assets::{Loading, PendingAssets};
 use crate::buttons::BlocksPointer;
+use crate::connect_ui::{ConnectionStatus, LinkStatus};
 use crate::hud::{GOLD, PANEL_BG};
 use crate::input::LocalPlayer;
 use crate::render::UiFont;
+use crate::session::{JoinNotice, JoinOffers};
 
 pub struct LoadingUiPlugin;
 
@@ -159,6 +161,9 @@ fn hide_dom_boot_once(mut done: Local<bool>) {
 fn update_cover(
     pending: Res<PendingAssets>,
     me: Query<Entity, With<LocalPlayer>>,
+    notice: Res<JoinNotice>,
+    offers: Res<JoinOffers>,
+    link: Res<ConnectionStatus>,
     mut dismissed: ResMut<CoverDismissed>,
     mut cover: Query<&mut Visibility, With<Cover>>,
     mut texts: Query<(&CoverText, &mut Text, &mut TextColor)>,
@@ -168,9 +173,18 @@ fn update_cover(
         return;
     }
     let failed = matches!(&pending.state, Loading::Failed(_));
+    // The join/connection UI also lives outside `LocalPlayer` (a failed join, a dropped link
+    // before the first spawn). Never sit on top of those buttons.
+    let join_ui = !notice.0.is_empty() || !offers.buttons.is_empty();
+    let reconnecting = matches!(link.status, LinkStatus::Reconnecting | LinkStatus::Failed);
     // Never hide while a file is missing: the error state has to stay readable.
-    if !failed && !me.is_empty() {
-        dismissed.0 = true;
+    let has_player = !me.is_empty();
+    if !failed && (has_player || join_ui || reconnecting) {
+        // Only a spawned player makes the cover permanent. Join/reconnect UI can clear on a
+        // retry, and the cover should come back for that attempt.
+        if has_player {
+            dismissed.0 = true;
+        }
         if let Ok(mut visibility) = cover.single_mut() {
             visibility.set_if_neq(Visibility::Hidden);
         }

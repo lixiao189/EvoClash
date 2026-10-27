@@ -10,6 +10,7 @@ use evoclash_game::shop::PlayerCommand;
 use crate::buttons::{Act, BlocksPointer, button};
 use crate::hud::{GOLD, LOCKED, PANEL_BG, path_color};
 use crate::input::LocalPlayer;
+use crate::menu::MenuOpen;
 use crate::perf::{EvoSelectSent, SlowWarn, take_select_rtt};
 use crate::render::UiFont;
 
@@ -175,13 +176,14 @@ fn spawn_panel(mut commands: Commands, font: Res<UiFont>) {
 }
 
 fn toggle_panel(
+    menu: Res<MenuOpen>,
     keys: Option<Res<ButtonInput<KeyCode>>>,
     me: Query<&Vitals, With<LocalPlayer>>,
     mut open: ResMut<EvoPanelOpen>,
     mut panel: Query<&mut Visibility, With<EvoPanel>>,
 ) {
     let alive = me.single().is_ok_and(|v| v.alive);
-    if keys.is_some_and(|k| k.just_pressed(KeyCode::Tab)) && alive {
+    if keys.is_some_and(|k| k.just_pressed(KeyCode::Tab)) && alive && !menu.0 {
         open.0 = !open.0;
     }
     if !alive && open.0 {

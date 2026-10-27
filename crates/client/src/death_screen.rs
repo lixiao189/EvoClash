@@ -16,6 +16,7 @@ use crate::buttons::{Act, BlocksPointer, button, send};
 use crate::evo_panel::spawn_tree;
 use crate::hud::{GOLD, PANEL_BG, path_color};
 use crate::input::LocalPlayer;
+use crate::menu::MenuOpen;
 use crate::perf::SlowWarn;
 use crate::render::UiFont;
 
@@ -262,8 +263,13 @@ fn update_death_screen(
 ) {
     let _probe = SlowWarn::new("update_death_screen");
     // Lobby deaths stand back up on their own. The shop, scrap and deploy stay hidden.
+    // Results is not a death state: the results bar (leave / next round) must stay clickable.
     let lobby = state.iter().any(|s| s.phase == Phase::Lobby);
-    let me = me.single().ok().filter(|(v, ..)| !v.alive && !lobby);
+    let results = state.iter().any(|s| s.phase == Phase::Results);
+    let me = me
+        .single()
+        .ok()
+        .filter(|(v, ..)| !v.alive && !lobby && !results);
     for (kind, text, color, mut vis) in &mut ui {
         if *kind == DeathUi::Root {
             vis.set_if_neq(shown(me.is_some()));
@@ -372,11 +378,15 @@ fn update_death_screen(
 }
 
 fn death_keys(
+    menu: Res<MenuOpen>,
     state: Query<&MatchState>,
     keys: Option<Res<ButtonInput<KeyCode>>>,
     me: Query<&Vitals, With<LocalPlayer>>,
     mut senders: Query<&mut MessageSender<PlayerCommand>, With<Client>>,
 ) {
+    if menu.0 {
+        return;
+    }
     if !state.iter().any(|s| s.phase == Phase::Playing) {
         return;
     }
@@ -389,7 +399,7 @@ fn death_keys(
     if keys.just_pressed(KeyCode::Space) && can_deploy(vitals.respawn_in) {
         send(&mut senders, PlayerCommand::Deploy);
     }
-    if keys.just_pressed(KeyCode::KeyR) {
+    if keys.just_pressed(KeyCode::KeyR) && can_deploy(vitals.respawn_in) {
         send(&mut senders, PlayerCommand::DeployLast);
     }
 }

@@ -13,6 +13,7 @@ use lightyear::prelude::{Client, MessageSender};
 use crate::buttons::BlocksPointer;
 use crate::hud::GOLD;
 use crate::input::LocalPlayer;
+use crate::menu::MenuOpen;
 use crate::render::UiFont;
 use crate::session::{Depart, JoinNotice, JoinOffer, JoinOfferButton, JoinOffers};
 use crate::textures::{PIXEL, Textures};
@@ -160,11 +161,9 @@ impl RoomView {
     }
 
     fn show_settings(&self) -> bool {
-        self.private
-            && matches!(
-                self.phase,
-                Some(Phase::Lobby | Phase::Starting | Phase::Playing | Phase::Results)
-            )
+        // The host can only change these before the countdown; keeping the row on screen
+        // during play just blocks clicks and looks like it should still work.
+        self.private && self.lobby()
     }
 
     fn can_start(&self) -> bool {
@@ -385,7 +384,7 @@ fn spawn_lobby_ui(mut commands: Commands, font: Res<UiFont>) {
                     "房间设置",
                     Color::srgba(1.0, 0.9, 0.7, 0.9),
                 ));
-                panel.spawn(label(&font, 14.0, "机器人", Color::WHITE));
+                panel.spawn(label(&font, 14.0, "补位至", Color::WHITE));
                 panel.spawn(chrome_button(&font, Chrome::Bots(0), "关"));
                 for n in 2..=8 {
                     panel.spawn(chrome_button(&font, Chrome::Bots(n), &n.to_string()));
@@ -693,6 +692,7 @@ fn sync_roster(
 }
 
 fn drive_room_controls(
+    menu: Res<MenuOpen>,
     mouse: Option<Res<ButtonInput<MouseButton>>>,
     settings: Query<&RoomSettings>,
     state: Query<&MatchState>,
@@ -710,6 +710,9 @@ fn drive_room_controls(
     mut senders: Query<&mut MessageSender<RoomCommand>, With<Client>>,
     mut depart: ResMut<Depart>,
 ) {
+    if menu.0 {
+        return;
+    }
     let view = RoomView::read(&settings, &state, &me, &players);
     let pressed = mouse.is_some_and(|m| m.just_pressed(MouseButton::Left));
     let mut hit: Option<Chrome> = None;
