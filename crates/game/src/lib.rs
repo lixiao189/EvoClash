@@ -60,6 +60,9 @@ pub mod api {
         /// Set when this seat is a private room. Quick start leaves it empty.
         #[serde(default)]
         pub room_code: Option<String>,
+        /// Joined while a round runs: watch it as a spectator, take a seat next round.
+        #[serde(default)]
+        pub spectate: bool,
     }
 
     #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -90,6 +93,9 @@ pub mod api {
         /// Connected and grace-period humans. `players` is the same count.
         pub humans: u32,
         pub bots: u32,
+        /// Connected spectators. Not part of `humans` or `players` (those are combat seats).
+        #[serde(default)]
+        pub spectators: u32,
         /// True for a private room. Quick start never reserves these.
         pub is_private: bool,
         /// Private room code, uppercase. `None` for a public room.

@@ -6,7 +6,9 @@ use std::time::Instant;
 use bevy::prelude::*;
 use evoclash_game::evolution::Evolution;
 use evoclash_game::net::{self, CONNECTION_TIMEOUT_SECS, PROTOCOL_ID};
-use evoclash_game::protocol::{Departed, Departure, MatchState, Phase, Player, Stats};
+use evoclash_game::protocol::{
+    Departed, Departure, MAX_SPECTATORS, MatchState, Phase, Player, Stats,
+};
 use lightyear::connection::client::Connected;
 use lightyear::netcode::{NetcodeServer, TokenUserData};
 use lightyear::prelude::server::*;
@@ -18,6 +20,7 @@ use crate::config::ServerConfig;
 use crate::gameplay::{Outbox, SimSet, SimTick, spawn_combatant};
 use crate::journal::Trace;
 use crate::ops::OpsState;
+use crate::spectate::{self, Admit, NewSpectator, SpectateSeq, SpectatorSession, first_id};
 
 /// A disconnected player's body stays in the arena this long so a flaky
 /// connection can resume with its gear intact.
@@ -99,7 +102,7 @@ fn start_server(mut commands: Commands, config: Res<ServerConfig>, tls: Res<TlsI
         additional_expected_addresses: vec![config.public_addr],
         ..default()
     }
-    .with_max_clients(config.max_players);
+    .with_max_clients(config.max_players.saturating_add(MAX_SPECTATORS as usize));
     let server = commands
         .spawn((
             Name::new("Server"),
@@ -112,8 +115,8 @@ fn start_server(mut commands: Commands, config: Res<ServerConfig>, tls: Res<TlsI
         .id();
     commands.trigger(Start { entity: server });
     info!(
-        "match {} listening on WebTransport https://{bind} (public {}), max {} players, cert {}",
-        config.match_id, config.public_addr, config.max_players, tls.digest
+        "match {} listening on WebTransport https://{bind} (public {}), max {} combatants + {} spectators, cert {}",
+        config.match_id, config.public_addr, config.max_players, MAX_SPECTATORS, tls.digest
     );
 }
 
@@ -138,10 +141,17 @@ fn on_connected(
     trigger: On<Add<Connected>>,
     links: Query<(&RemoteId, Option<&TokenUserData>), With<ClientOf>>,
     mut humans: Query<(Entity, &mut Human, &Player)>,
+    mut specs: Query<(
+        Entity,
+        &mut SpectatorSession,
+        &mut evoclash_game::protocol::Spectator,
+    )>,
+    players: Query<(&Player, &Stats)>,
     state: Query<&MatchState>,
     config: Res<ServerConfig>,
     ops: Res<OpsState>,
     tick: Option<Res<SimTick>>,
+    mut seq: ResMut<SpectateSeq>,
     mut outbox: ResMut<Outbox>,
     mut commands: Commands,
     mut trace: Option<ResMut<Trace>>,
@@ -171,38 +181,85 @@ fn on_connected(
         return;
     }
 
-    // Quick start closes in the last 8s (`join_mode`), but a seat reserved before that
-    // still connects until Starting. The matchmaker is what stops issuing new tokens.
-    let in_lobby = state.iter().next().is_some_and(|s| s.phase == Phase::Lobby);
-    let accepting = in_lobby && !ops.is_draining() && humans.iter().count() < config.max_players;
-    if !accepting {
-        info!("rejecting {client_id}: not accepting new players");
-        commands.trigger(Disconnect { entity: link });
+    if let Some((entity, mut session, _)) = specs
+        .iter_mut()
+        .find(|(_, session, _)| session.client_id == client_id)
+    {
+        session.disconnected_ticks = 0;
+        session.link = link;
+        session.peer = peer;
+        session.watched = true;
+        commands
+            .entity(entity)
+            .insert(Replicate::to_clients(NetworkTarget::Single(peer)));
+        info!("{} ({peer:?}) back to spectating", session.name);
         return;
     }
 
-    let name = name_from_token(user_data, client_id);
-    info!("{name} ({peer:?}) joined");
-    outbox.announce(format!("{name} 进入了废土"));
-    let player = Player {
-        client_id,
-        name,
-        color: color_for(client_id),
-        bot: false,
+    // Playing and Results never take a combat seat. A full lobby queues instead of
+    // refusing, until the watcher cap. Starting stays closed: the roster is already set.
+    let Some(phase) = state.iter().next().map(|state| state.phase) else {
+        commands.trigger(Disconnect { entity: link });
+        return;
     };
-    let entity = spawn_combatant(&mut commands, player, Some(peer));
-    commands.entity(entity).insert((
-        control,
-        Human {
-            peer,
-            disconnected_ticks: 0,
-            joined_at: tick.as_ref().map(|tick| tick.0).unwrap_or(0),
-            left: false,
-        },
-        crate::gameplay::Idle::default(),
-    ));
-    if let Some(trace) = trace.as_mut() {
-        trace.push(format!("connect {client_id}"));
+    let held = humans.iter().filter(|(_, human, _)| !human.left).count();
+    let watching = specs.iter().count();
+    let name = name_from_token(user_data, client_id);
+    match spectate::admit(phase, ops.is_draining(), held, watching, config.max_players) {
+        Admit::Reject => {
+            info!("rejecting {client_id}: not accepting new players");
+            commands.trigger(Disconnect { entity: link });
+        }
+        Admit::Combatant => {
+            info!("{name} ({peer:?}) joined");
+            outbox.announce(format!("{name} 进入了废土"));
+            let player = Player {
+                client_id,
+                name,
+                color: color_for(client_id),
+                bot: false,
+            };
+            let entity = spawn_combatant(&mut commands, player, Some(peer));
+            commands.entity(entity).insert((
+                control,
+                Human {
+                    peer,
+                    disconnected_ticks: 0,
+                    joined_at: tick.as_ref().map(|tick| tick.0).unwrap_or(0),
+                    left: false,
+                },
+                crate::gameplay::Idle::default(),
+            ));
+            if let Some(trace) = trace.as_mut() {
+                trace.push(format!("connect {client_id}"));
+            }
+        }
+        Admit::Spectator => {
+            let following = first_id(
+                players
+                    .iter()
+                    .map(|(player, stats)| (player.client_id, stats)),
+            );
+            let queue_pos = (watching as u8).saturating_add(1);
+            info!("{name} ({peer:?}) is spectating");
+            spectate::spawn_spectator(
+                &mut commands,
+                &mut seq,
+                trace.as_deref_mut(),
+                NewSpectator {
+                    client_id,
+                    name,
+                    peer,
+                    link,
+                    order: 0,
+                    following,
+                    queue_pos,
+                    watched: true,
+                    replicate: true,
+                    log: true,
+                },
+            );
+        }
     }
 }
 

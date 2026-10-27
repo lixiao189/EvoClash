@@ -205,8 +205,8 @@ fn repaint(
 
 fn place_markers(
     state: Query<&MatchState>,
-    me: Query<(&Pos, &Vitals), With<LocalPlayer>>,
-    players: Query<(&Pos, &Vitals, &Stats), (With<Player>, Without<LocalPlayer>)>,
+    specs: Query<&Spectator>,
+    players: Query<(&Player, &Pos, &Vitals, &Stats, Has<LocalPlayer>)>,
     bosses: Query<(&Pos, &Monster, &Vitals)>,
     mut markers: Query<(&Marker, &mut Node, &mut Visibility)>,
 ) {
@@ -217,10 +217,29 @@ fn place_markers(
             (ARENA_HALF.y - p.y) * SCALE - 3.5,
         )
     };
+    // The white dot is us, or the combatant a spectator is following.
+    let follow = specs
+        .iter()
+        .next()
+        .map(|s| s.following)
+        .filter(|id| *id != 0);
+    let me_id = players
+        .iter()
+        .find_map(|(player, _, _, _, local)| local.then_some(player.client_id))
+        .or(follow);
+    let me_pos = me_id.and_then(|id| {
+        players.iter().find_map(|(player, pos, vitals, _, _)| {
+            (player.client_id == id && vitals.alive).then_some(pos.0)
+        })
+    });
     let bounties: Vec<Vec2> = players
         .iter()
-        .filter(|(_, v, s)| v.alive && ((!practice && s.has_bounty()) || v.revealed > 0))
-        .map(|(p, ..)| p.0)
+        .filter(|(player, _, vitals, stats, _)| {
+            Some(player.client_id) != me_id
+                && vitals.alive
+                && ((!practice && stats.has_bounty()) || vitals.revealed > 0)
+        })
+        .map(|(_, pos, ..)| pos.0)
         .take(BOUNTY_MARKERS)
         .collect();
     let boss = bosses
@@ -230,7 +249,7 @@ fn place_markers(
     for (marker, mut node, mut visibility) in &mut markers {
         let pos = match marker {
             Marker::Boss => boss,
-            Marker::Me => me.single().ok().filter(|(_, v)| v.alive).map(|(p, _)| p.0),
+            Marker::Me => me_pos,
             Marker::Bounty(i) => bounties.get(*i).copied(),
         };
         let Some(pos) = pos else {

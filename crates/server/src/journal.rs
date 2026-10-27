@@ -51,6 +51,9 @@ pub struct Injected {
     pub connects: Vec<u64>,
     pub disconnects: Vec<u64>,
     pub leaves: Vec<u64>,
+    /// `(client_id, arrival order, following, name)`.
+    pub spectates: Vec<(u64, u64, u64, String)>,
+    pub unspectates: Vec<u64>,
 }
 
 /// Lines stamped with the current sim tick when the match log flushes them.
@@ -234,7 +237,13 @@ impl Journal {
         self.room_snap = Some(snap);
     }
 
-    fn open_match(&mut self, index: u32, settings: &RoomSettings, roster: &[RosterEntry]) {
+    fn open_match(
+        &mut self,
+        index: u32,
+        settings: &RoomSettings,
+        roster: &[RosterEntry],
+        spectators: &[SpectatorEntry],
+    ) {
         if !self.logging || self.match_log.is_some() {
             return;
         }
@@ -254,6 +263,15 @@ impl Journal {
         roster.sort_by_key(|e| e.client_id);
         for entry in &roster {
             log.line(&entry.line());
+        }
+        let mut spectators = spectators.to_vec();
+        spectators.sort_by_key(|entry| (entry.order, entry.client_id));
+        for entry in &spectators {
+            let name = entry.name.replace(['\n', '\r'], " ");
+            log.line(&format!(
+                "spectator {} {} {} {name}",
+                entry.client_id, entry.order, entry.following
+            ));
         }
         log.line("");
         self.match_log = Some(log);
@@ -409,6 +427,8 @@ pub fn fmt_room(cmd: &RoomCommand) -> String {
         RoomCommand::Leave => "leave".into(),
         RoomCommand::PauseAutoStart => "pause_auto".into(),
         RoomCommand::ResumeAutoStart => "resume_auto".into(),
+        RoomCommand::SpectateNext => "spectate_next".into(),
+        RoomCommand::SpectatePrev => "spectate_prev".into(),
     }
 }
 
@@ -437,6 +457,14 @@ struct RosterEntry {
     name: String,
     bot: bool,
     color: [f32; 3],
+}
+
+#[derive(Clone, Debug)]
+struct SpectatorEntry {
+    client_id: u64,
+    order: u64,
+    following: u64,
+    name: String,
 }
 
 impl RosterEntry {
@@ -658,6 +686,7 @@ fn journal_flow(
     state: Query<&MatchState>,
     settings: Query<&RoomSettings>,
     players: Query<(&Player, &Pos, &Vitals, &Stats, &Evolution)>,
+    watchers: Query<(&crate::spectate::SpectatorSession, &Spectator)>,
     outbox: Res<crate::gameplay::Outbox>,
     clock: Option<Res<LogClock>>,
 ) {
@@ -692,7 +721,17 @@ fn journal_flow(
             journal.flush();
             journal.match_log = None;
             journal.sealed = false;
-            journal.open_match(state.match_index, settings, &roster);
+            let mut spectators: Vec<SpectatorEntry> = watchers
+                .iter()
+                .map(|(session, spec)| SpectatorEntry {
+                    client_id: session.client_id,
+                    order: session.order,
+                    following: spec.following,
+                    name: session.name.clone(),
+                })
+                .collect();
+            spectators.sort_by_key(|entry| (entry.order, entry.client_id));
+            journal.open_match(state.match_index, settings, &roster, &spectators);
         }
     }
     let lines = std::mem::take(&mut trace.lines);
@@ -782,6 +821,7 @@ struct Header {
     match_index: u32,
     settings: RoomSettings,
     roster: Vec<RosterEntry>,
+    spectators: Vec<SpectatorEntry>,
 }
 
 enum Event {
@@ -792,6 +832,8 @@ enum Event {
     Connect(u64),
     Disconnect(u64),
     Leave(u64),
+    Spectate(u64, u64, u64, String),
+    Unspectate(u64),
 }
 
 struct Parsed {
@@ -815,6 +857,8 @@ pub struct ReplayReport {
     pub scores: Vec<ScoreLine>,
     pub kills: Vec<KillLine>,
     pub digests_checked: usize,
+    /// `(client_id, following, queue_pos)` still watching at the last replayed tick.
+    pub spectators: Vec<(u64, u64, u8)>,
     pub error: String,
 }
 
@@ -829,6 +873,7 @@ pub fn replay_log(path: &Path, opts: ReplayOptions) -> ReplayReport {
                 scores: Vec::new(),
                 kills: Vec::new(),
                 digests_checked: 0,
+                spectators: Vec::new(),
                 error: format!("cannot read {}: {err}", path.display()),
             };
         }
@@ -842,6 +887,7 @@ pub fn replay_log(path: &Path, opts: ReplayOptions) -> ReplayReport {
                 scores: Vec::new(),
                 kills: Vec::new(),
                 digests_checked: 0,
+                spectators: Vec::new(),
                 error: err,
             };
         }
@@ -853,6 +899,7 @@ pub fn replay_log(path: &Path, opts: ReplayOptions) -> ReplayReport {
             scores: Vec::new(),
             kills: Vec::new(),
             digests_checked: 0,
+            spectators: Vec::new(),
             error: format!(
                 "replay rejected: protocol {} build {} (this binary is protocol {PROTOCOL_ID} build {})",
                 parsed.header.protocol,
@@ -877,6 +924,12 @@ pub fn replay_log(path: &Path, opts: ReplayOptions) -> ReplayReport {
                     Event::Connect(id) => injected.connects.push(*id),
                     Event::Disconnect(id) => injected.disconnects.push(*id),
                     Event::Leave(id) => injected.leaves.push(*id),
+                    Event::Spectate(id, order, following, name) => {
+                        injected
+                            .spectates
+                            .push((*id, *order, *following, name.clone()))
+                    }
+                    Event::Unspectate(id) => injected.unspectates.push(*id),
                 }
             }
         }
@@ -892,6 +945,7 @@ pub fn replay_log(path: &Path, opts: ReplayOptions) -> ReplayReport {
                     scores: scoreboard(app.world_mut()),
                     kills: app.world().resource::<Journal>().kills.clone(),
                     digests_checked: checked,
+                    spectators: crate::spectate::spectator_rows(app.world_mut()),
                     error: String::new(),
                 };
             }
@@ -911,6 +965,7 @@ pub fn replay_log(path: &Path, opts: ReplayOptions) -> ReplayReport {
             scores,
             kills,
             digests_checked: checked,
+            spectators: Vec::new(),
             error: "scores differ from the log".into(),
         };
     }
@@ -923,6 +978,7 @@ pub fn replay_log(path: &Path, opts: ReplayOptions) -> ReplayReport {
             scores,
             kills,
             digests_checked: checked,
+            spectators: Vec::new(),
             error: "kill sequence differs from the log".into(),
         };
     }
@@ -932,6 +988,7 @@ pub fn replay_log(path: &Path, opts: ReplayOptions) -> ReplayReport {
         scores,
         kills,
         digests_checked: checked,
+        spectators: crate::spectate::spectator_rows(app.world_mut()),
         error: String::new(),
     }
 }
@@ -953,6 +1010,9 @@ pub fn replay_cli(path: &Path) -> i32 {
             "kill {} {} {} {}",
             kill.tick, kill.killer, kill.victim, kill.how
         );
+    }
+    for (id, following, queue_pos) in &report.spectators {
+        println!("spectator {id} following {following} queue {queue_pos}");
     }
     println!("digests checked {}", report.digests_checked);
     if let Some(tick) = report.mismatch_tick {
@@ -1014,8 +1074,43 @@ fn boot_playing(header: &Header) -> App {
         }
     }
     spawn_roster(&mut app, &header.roster);
+    spawn_header_watchers(&mut app, &header.spectators);
     stand_and_shield(app.world_mut());
     app
+}
+
+fn spawn_header_watchers(app: &mut App, watchers: &[SpectatorEntry]) {
+    if watchers.is_empty() {
+        return;
+    }
+    let mut seq =
+        crate::spectate::SpectateSeq(app.world().resource::<crate::spectate::SpectateSeq>().0);
+    {
+        let mut commands = app.world_mut().commands();
+        for entry in watchers {
+            crate::spectate::spawn_spectator(
+                &mut commands,
+                &mut seq,
+                None,
+                crate::spectate::NewSpectator {
+                    client_id: entry.client_id,
+                    name: entry.name.clone(),
+                    peer: PeerId::Netcode(entry.client_id),
+                    link: Entity::PLACEHOLDER,
+                    order: entry.order,
+                    following: entry.following,
+                    queue_pos: 0,
+                    watched: false,
+                    replicate: false,
+                    log: false,
+                },
+            );
+        }
+    }
+    app.world_mut().flush();
+    app.world_mut()
+        .resource_mut::<crate::spectate::SpectateSeq>()
+        .0 = seq.0;
 }
 
 fn spawn_roster(app: &mut App, roster: &[RosterEntry]) {
@@ -1116,6 +1211,7 @@ fn sim_app(config: ServerConfig) -> App {
     add_sim_plugins(&mut app);
     app.add_plugins((
         crate::gameplay::GameplayPlugin,
+        crate::spectate::SpectatePlugin,
         crate::combat::CombatPlugin,
         crate::inventory::InventoryPlugin,
         crate::environment::EnvironmentPlugin,
@@ -1143,6 +1239,7 @@ fn parse_log(text: &str) -> Result<Parsed, String> {
     let mut match_index = None;
     let mut settings = None;
     let mut roster = Vec::new();
+    let mut spectators = Vec::new();
     let mut events: BTreeMap<u32, Vec<Event>> = BTreeMap::new();
     let mut digests = BTreeMap::new();
     let mut scores = None;
@@ -1165,6 +1262,10 @@ fn parse_log(text: &str) -> Result<Parsed, String> {
         } else if let Some(rest) = line.strip_prefix("player ") {
             if let Some(entry) = parse_player(rest) {
                 roster.push(entry);
+            }
+        } else if let Some(rest) = line.strip_prefix("spectator ") {
+            if let Some(entry) = parse_spectator(rest) {
+                spectators.push(entry);
             }
         } else if let Some(rest) = line.strip_prefix("t ") {
             let mut parts = rest.splitn(3, ' ');
@@ -1194,6 +1295,7 @@ fn parse_log(text: &str) -> Result<Parsed, String> {
     let match_index = match_index.ok_or("missing match_index")?;
     let settings = settings.ok_or("missing settings")?;
     roster.sort_by_key(|e| e.client_id);
+    spectators.sort_by_key(|e| (e.order, e.client_id));
     Ok(Parsed {
         header: Header {
             protocol,
@@ -1202,6 +1304,7 @@ fn parse_log(text: &str) -> Result<Parsed, String> {
             match_index,
             settings,
             roster,
+            spectators,
         },
         events,
         digests,
@@ -1236,6 +1339,16 @@ fn parse_settings(rest: &str) -> Option<RoomSettings> {
     })
 }
 
+fn parse_spectator(rest: &str) -> Option<SpectatorEntry> {
+    let mut parts = rest.splitn(4, ' ');
+    Some(SpectatorEntry {
+        client_id: parts.next()?.parse().ok()?,
+        order: parts.next()?.parse().ok()?,
+        following: parts.next()?.parse().ok()?,
+        name: parts.next().unwrap_or("").to_string(),
+    })
+}
+
 fn parse_player(rest: &str) -> Option<RosterEntry> {
     let mut parts = rest.splitn(6, ' ');
     let client_id = parts.next()?.parse().ok()?;
@@ -1267,6 +1380,15 @@ fn parse_event(kind: &str, body: &str) -> Option<Event> {
         "connect" => Some(Event::Connect(body.trim().parse().ok()?)),
         "disconnect" => Some(Event::Disconnect(body.trim().parse().ok()?)),
         "leave" => Some(Event::Leave(body.trim().parse().ok()?)),
+        "spectate" => {
+            let mut parts = body.splitn(4, ' ');
+            let id = parts.next()?.parse().ok()?;
+            let order = parts.next()?.parse().ok()?;
+            let following = parts.next()?.parse().ok()?;
+            let name = parts.next().unwrap_or("").to_string();
+            Some(Event::Spectate(id, order, following, name))
+        }
+        "unspectate" => Some(Event::Unspectate(body.trim().parse().ok()?)),
         _ => None,
     }
 }
@@ -1339,6 +1461,8 @@ fn parse_room(body: &str) -> Option<(u64, RoomCommand)> {
         "leave" => RoomCommand::Leave,
         "pause_auto" => RoomCommand::PauseAutoStart,
         "resume_auto" => RoomCommand::ResumeAutoStart,
+        "spectate_next" => RoomCommand::SpectateNext,
+        "spectate_prev" => RoomCommand::SpectatePrev,
         "settings" => {
             let bots = match parts.next()? {
                 "off" => None,
@@ -1471,6 +1595,7 @@ mod tests {
         app.insert_resource(Arm { need });
         app.add_plugins((
             crate::gameplay::GameplayPlugin,
+            crate::spectate::SpectatePlugin,
             crate::combat::CombatPlugin,
             crate::inventory::InventoryPlugin,
             crate::environment::EnvironmentPlugin,
@@ -1732,5 +1857,105 @@ mod tests {
         );
         assert!(elapsed < Duration::from_secs(15), "replay took {elapsed:?}");
         eprintln!("replay elapsed {elapsed:?}");
+    }
+
+    #[test]
+    fn replay_keeps_a_watcher_and_ignores_their_input() {
+        let dir = temp("watch");
+        let mut app = recording_app(test_config(&dir, 0x5A7, false), 2);
+        spawn_humans(&mut app, &[11, 22]);
+        let mut playing_ticks = 0;
+        let mut joined = false;
+        let mut switched = false;
+        for _ in 0..8_000 {
+            let tick = tick_of(&app);
+            let playing = phase_of(&mut app) == Phase::Playing;
+            if playing && tick == 10 && !joined {
+                let mut seq = crate::spectate::SpectateSeq(
+                    app.world().resource::<crate::spectate::SpectateSeq>().0,
+                );
+                {
+                    let mut commands = app.world_mut().commands();
+                    crate::spectate::spawn_spectator(
+                        &mut commands,
+                        &mut seq,
+                        None,
+                        crate::spectate::NewSpectator {
+                            client_id: 90,
+                            name: "eye".into(),
+                            peer: PeerId::Netcode(90),
+                            link: Entity::PLACEHOLDER,
+                            order: 1,
+                            following: 0,
+                            queue_pos: 1,
+                            watched: false,
+                            replicate: false,
+                            log: false,
+                        },
+                    );
+                }
+                app.world_mut().flush();
+                app.world_mut()
+                    .resource_mut::<crate::spectate::SpectateSeq>()
+                    .0 = seq.0;
+                app.world_mut()
+                    .resource_mut::<Trace>()
+                    .push("spectate 90 1 0 eye".to_string());
+                joined = true;
+            }
+            {
+                let mut injected = app.world_mut().resource_mut::<Injected>();
+                injected.inputs.push((
+                    90,
+                    PlayerInput {
+                        move_x: 1,
+                        fire: true,
+                        ..default()
+                    },
+                ));
+                injected.inputs.push((11, scripted(1, tick)));
+                injected.inputs.push((22, scripted(-1, tick)));
+                if playing && tick == 39 && !switched {
+                    injected.rooms.push((90, RoomCommand::SpectateNext));
+                    switched = true;
+                }
+            }
+            app.world_mut().run_schedule(FixedUpdate);
+            if phase_of(&mut app) == Phase::Playing {
+                playing_ticks = playing_ticks.max(tick_of(&app));
+            }
+            if playing_ticks >= 700 {
+                break;
+            }
+        }
+        assert!(joined && switched, "never reached the follow switch");
+        app.world_mut().resource_mut::<Journal>().flush();
+        let rows = crate::spectate::spectator_rows(app.world_mut());
+        assert_eq!(rows.len(), 1);
+        assert_ne!(rows[0].1, 0, "a watcher is following someone");
+        let path = app
+            .world()
+            .resource::<Journal>()
+            .match_path
+            .clone()
+            .unwrap();
+        drop(app);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("spectate 90 1 0 eye"),
+            "join was not logged: {text}"
+        );
+        assert!(
+            text.contains(" spectate_next"),
+            "switch was not logged: {text}"
+        );
+        let report = replay_log(&path, ReplayOptions::default());
+        assert!(
+            report.ok,
+            "replay failed at {:?} {}",
+            report.mismatch_tick, report.error
+        );
+        assert!(report.digests_checked >= 1);
+        assert_eq!(report.spectators, rows);
     }
 }

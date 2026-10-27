@@ -229,14 +229,20 @@ struct PropBody(Entity);
 #[derive(Component)]
 struct TurretHead(Entity);
 
-/// The building the local player is standing in, if any. Anyone inside a different building
-/// is hidden under its roof.
+/// Whose eyes the roofs use. `building` is the one that combatant is inside, if any.
+/// Anyone inside a different building is hidden under its roof.
+/// `watch` is the followed combatant's `client_id` while spectating, otherwise `None`.
 #[derive(Resource, Default)]
-pub struct Indoors(pub Option<usize>);
+pub struct Indoors {
+    pub building: Option<usize>,
+    pub watch: Option<u64>,
+}
 
 impl Indoors {
     pub fn conceals(&self, arena: &ArenaMap, p: Vec2) -> bool {
-        arena.building_at(p).is_some_and(|b| Some(b) != self.0)
+        arena
+            .building_at(p)
+            .is_some_and(|b| Some(b) != self.building)
     }
 }
 

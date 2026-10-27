@@ -3,10 +3,12 @@
 //! The DOM `#boot` block in `index.html` covers the gap before wasm starts; this Bevy overlay
 //! takes over once the app is running and hides the DOM block. It stays up while the files in
 //! [`PendingAssets`] load, shows the failure path (with a reload button) if one is missing, and
-//! disappears for good once the session has spawned the [`LocalPlayer`].
+//! disappears for good once the session has spawned the [`LocalPlayer`] or a [`Spectator`].
 
 use bevy::prelude::*;
 use bevy::ui::RelativeCursorPosition;
+
+use evoclash_game::protocol::Spectator;
 
 use crate::assets::{Loading, PendingAssets};
 use crate::buttons::BlocksPointer;
@@ -14,7 +16,8 @@ use crate::connect_ui::{ConnectionStatus, LinkStatus};
 use crate::hud::{GOLD, PANEL_BG};
 use crate::input::LocalPlayer;
 use crate::render::UiFont;
-use crate::session::{JoinNotice, JoinOffers};
+use crate::session::{JoinNotice, JoinOffers, SpectateJoin};
+use crate::spectate_ui::SPECTATE_JOIN;
 
 pub struct LoadingUiPlugin;
 
@@ -161,9 +164,11 @@ fn hide_dom_boot_once(mut done: Local<bool>) {
 fn update_cover(
     pending: Res<PendingAssets>,
     me: Query<Entity, With<LocalPlayer>>,
+    specs: Query<(), With<Spectator>>,
     notice: Res<JoinNotice>,
     offers: Res<JoinOffers>,
     link: Res<ConnectionStatus>,
+    spectate: Res<SpectateJoin>,
     mut dismissed: ResMut<CoverDismissed>,
     mut cover: Query<&mut Visibility, With<Cover>>,
     mut texts: Query<(&CoverText, &mut Text, &mut TextColor)>,
@@ -178,7 +183,7 @@ fn update_cover(
     let join_ui = !notice.0.is_empty() || !offers.buttons.is_empty();
     let reconnecting = matches!(link.status, LinkStatus::Reconnecting | LinkStatus::Failed);
     // Never hide while a file is missing: the error state has to stay readable.
-    let has_player = !me.is_empty();
+    let has_player = !me.is_empty() || !specs.is_empty();
     if !failed && (has_player || join_ui || reconnecting) {
         // Only a spawned player makes the cover permanent. Join/reconnect UI can clear on a
         // retry, and the cover should come back for that attempt.
@@ -201,7 +206,11 @@ fn update_cover(
     match &pending.state {
         Loading::Waiting => count = format!("资源 {} 项", pending.total()),
         Loading::Ready => {
-            status = "正在连接对局…";
+            status = if spectate.0 {
+                SPECTATE_JOIN
+            } else {
+                "正在连接对局…"
+            };
             status_color = GOLD;
         }
         Loading::Failed(failed_path) => {

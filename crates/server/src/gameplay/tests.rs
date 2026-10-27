@@ -1666,3 +1666,100 @@ fn monster_and_wasteland_kills_do_not_pay_the_finale_bonus() {
     assert_eq!(app.world().get::<Stats>(killer).unwrap().score, 1);
     assert!(!announces(&app).iter().any(|text| text.contains("第一名")));
 }
+
+fn room_closes_after(phase: Phase, watcher: bool) -> bool {
+    use crate::ops::OpsState;
+    use crate::spectate::SpectatorSession;
+
+    let mut app = App::new();
+    app.insert_resource(server_config());
+    app.insert_resource(OpsState::for_test());
+    app.world_mut().spawn(MatchState { phase, ..default() });
+    if watcher {
+        app.world_mut().spawn((
+            Spectator {
+                following: 1,
+                queue_pos: 1,
+            },
+            SpectatorSession {
+                client_id: 9,
+                name: "eye".into(),
+                peer: PeerId::Netcode(9),
+                link: Entity::PLACEHOLDER,
+                order: 1,
+                watched: false,
+                disconnected_ticks: 0,
+            },
+        ));
+    }
+    app.add_systems(Update, empty_close);
+    for _ in 0..EMPTY_MATCH_TICKS {
+        app.update();
+    }
+    let mut messages = app.world_mut().resource_mut::<Messages<AppExit>>();
+    messages.drain().next().is_some()
+}
+
+#[test]
+fn only_watchers_keep_a_playing_room_open() {
+    assert!(
+        room_closes_after(Phase::Playing, false),
+        "no humans and no watchers still closes"
+    );
+    assert!(
+        !room_closes_after(Phase::Playing, true),
+        "a watcher counts as someone in the room"
+    );
+    assert!(
+        !room_closes_after(Phase::Results, true),
+        "results with only a watcher does not close"
+    );
+}
+
+#[test]
+fn join_mode_is_spectate_in_playing_and_results_until_four_watchers() {
+    use evoclash_game::protocol::MAX_SPECTATORS;
+
+    let playing = MatchState {
+        phase: Phase::Playing,
+        ..default()
+    };
+    assert_eq!(
+        current_join_mode(&playing, false, false, false, 0),
+        "spectate"
+    );
+    assert_eq!(
+        current_join_mode(&playing, true, false, false, 3),
+        "spectate"
+    );
+    assert_eq!(
+        current_join_mode(&playing, false, false, true, MAX_SPECTATORS as u32),
+        "none",
+        "four watchers closes the seat"
+    );
+    assert_eq!(
+        current_join_mode(&playing, false, true, true, 0),
+        "none",
+        "draining does not take watchers"
+    );
+    let results = MatchState {
+        phase: Phase::Results,
+        ..default()
+    };
+    assert_eq!(
+        current_join_mode(&results, true, false, false, 0),
+        "spectate"
+    );
+    let lobby = MatchState {
+        phase: Phase::Lobby,
+        countdown_active: false,
+        ..default()
+    };
+    assert_eq!(current_join_mode(&lobby, false, false, true, 0), "lobby");
+    assert_eq!(current_join_mode(&lobby, false, true, true, 0), "none");
+    let starting = MatchState {
+        phase: Phase::Starting,
+        ..default()
+    };
+    assert_eq!(current_join_mode(&starting, false, false, true, 0), "none");
+}

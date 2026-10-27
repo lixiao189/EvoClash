@@ -69,10 +69,27 @@ pub(super) fn loot_spawner(
     });
 }
 
-fn connected_humans(humans: &Query<&Human>) -> usize {
-    humans
+type Presence<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Option<&'static Human>,
+        Option<&'static crate::spectate::SpectatorSession>,
+    ),
+    Or<(With<Human>, With<crate::spectate::SpectatorSession>)>,
+>;
+
+fn connected_humans(presence: &Presence) -> usize {
+    presence
         .iter()
-        .filter(|human| human.connected() && !human.left)
+        .filter(|(human, _)| human.is_some_and(|human| human.connected() && !human.left))
+        .count()
+}
+
+fn connected_watchers(presence: &Presence) -> usize {
+    presence
+        .iter()
+        .filter(|(_, session)| session.is_some_and(|session| session.disconnected_ticks == 0))
         .count()
 }
 
@@ -82,7 +99,7 @@ pub fn match_flow(
     settings: Single<&RoomSettings>,
     mut arena: ResMut<Arena>,
     players: Query<(&Player, &Stats)>,
-    humans: Query<&Human>,
+    presence: Presence,
     mut vitals: Query<&mut Vitals, With<Player>>,
     mut outbox: ResMut<Outbox>,
     mut reset: ResMut<ResetRequested>,
@@ -95,10 +112,13 @@ pub fn match_flow(
     mut exit: MessageWriter<AppExit>,
 ) {
     let private_room = settings.private_room;
+    let auto_paused = settings.auto_paused;
     match state.phase {
         Phase::Lobby => {
-            let humans_n = connected_humans(&humans);
-            if humans_n == 0 {
+            let humans_n = connected_humans(&presence);
+            let watching = connected_watchers(&presence);
+            // A room of only watchers is still occupied. They take seats on this lobby tick.
+            if humans_n == 0 && watching == 0 {
                 if state.countdown_active {
                     state.countdown_active = false;
                     state.ticks_left = 0;
@@ -106,6 +126,17 @@ pub fn match_flow(
             } else if !private_room && !state.countdown_active && players.iter().count() >= 2 {
                 // Public rooms start on the first human. Later joins do not reset it.
                 // A private room waits for the host's Start.
+                state.countdown_active = true;
+                state.ticks_left = public_lobby_countdown_ticks(state.match_index);
+            } else if private_room
+                && state.match_index > 0
+                && !auto_paused
+                && !state.countdown_active
+                && humans_n > 0
+                && players.iter().count() >= 2
+            {
+                // Watchers promoted this tick (Input) should not sit in a private lobby forever.
+                // The first private round still waits for the host.
                 state.countdown_active = true;
                 state.ticks_left = public_lobby_countdown_ticks(state.match_index);
             } else if state.countdown_active {
@@ -207,7 +238,7 @@ pub fn match_flow(
                     &config,
                     &rng,
                     &mut reset,
-                    &humans,
+                    connected_humans(&presence),
                     &players,
                     private_room,
                     settings.auto_paused,
@@ -268,7 +299,7 @@ fn begin_lobby(
     config: &ServerConfig,
     rng: &SimRng,
     reset: &mut ResetRequested,
-    humans: &Query<&Human>,
+    humans_n: usize,
     players: &Query<(&Player, &Stats)>,
     private_room: bool,
     auto_paused: bool,
@@ -285,10 +316,7 @@ fn begin_lobby(
     // countdown (12s lobby + 3s Starting) for whoever is still here.
     // The first private round waits for the host. A paused private room does too.
     let private_auto = private_room && state.match_index > 0 && !auto_paused;
-    if (private_auto || !private_room)
-        && connected_humans(humans) > 0
-        && players.iter().count() >= 2
-    {
+    if (private_auto || !private_room) && humans_n > 0 && players.iter().count() >= 2 {
         state.countdown_active = true;
         state.ticks_left = public_lobby_countdown_ticks(state.match_index);
     } else {
@@ -408,7 +436,7 @@ pub(super) fn place_starters(
 pub(super) fn empty_close(
     state: Query<&MatchState>,
     settings: Query<&RoomSettings>,
-    humans: Query<&Human>,
+    presence: Presence,
     ops: Option<Res<OpsState>>,
     mut empty_for: Local<u32>,
     mut exit: MessageWriter<AppExit>,
@@ -420,7 +448,8 @@ pub(super) fn empty_close(
     let Some(state) = state.iter().next() else {
         return;
     };
-    if connected_humans(&humans) > 0 {
+    // Watchers count as people in the room. A match with no human combatant still finishes.
+    if connected_humans(&presence) > 0 || connected_watchers(&presence) > 0 {
         *empty_for = 0;
         return;
     }

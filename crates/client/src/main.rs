@@ -26,6 +26,7 @@ mod predict;
 mod render;
 mod results_ui;
 mod session;
+mod spectate_ui;
 mod textures;
 
 use bevy::asset::AssetMetaCheck;
@@ -122,6 +123,7 @@ fn main() {
         buttons::ButtonsPlugin,
         evo_panel::EvoPanelPlugin,
         death_screen::DeathScreenPlugin,
+        spectate_ui::SpectateUiPlugin,
     ));
     app.run();
 }

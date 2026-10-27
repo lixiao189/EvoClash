@@ -40,7 +40,8 @@ pub use flow::*;
 pub(crate) use idle::Idle;
 use idle::watch_idle;
 pub use movement::*;
-use room::{maintain_host, private_idle_cap, read_room_commands};
+pub(crate) use room::read_room_commands;
+use room::{maintain_host, private_idle_cap};
 pub use spawning::*;
 
 pub const TICKS_PER_SEC: u32 = 64;
@@ -215,10 +216,23 @@ pub fn lobby_open(state: &MatchState) -> bool {
             || state.ticks_left.saturating_add(STARTING_TICKS) >= JOIN_CUTOFF_TICKS)
 }
 
-/// What the heartbeat should advertise. Private rooms close the moment the host starts;
-/// public rooms stay open until the last 8s, which `lobby_open` already encodes.
-pub fn current_join_mode(state: &MatchState, private_room: bool, accepting: bool) -> &'static str {
-    if !accepting {
+/// What the heartbeat should advertise. The matchmaker trusts the string and does not
+/// re-derive it. `spectate` is Playing or Results with a free watcher slot and no drain.
+/// A full combat roster still spectates: `combat_open` only gates `lobby`.
+pub fn current_join_mode(
+    state: &MatchState,
+    private_room: bool,
+    draining: bool,
+    combat_open: bool,
+    spectators: u32,
+) -> &'static str {
+    if !draining
+        && matches!(state.phase, Phase::Playing | Phase::Results)
+        && spectators < MAX_SPECTATORS as u32
+    {
+        return "spectate";
+    }
+    if draining || !combat_open {
         return "none";
     }
     if private_room {

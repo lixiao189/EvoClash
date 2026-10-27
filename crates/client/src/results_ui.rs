@@ -7,7 +7,8 @@ use bevy::prelude::*;
 use bevy::ui::RelativeCursorPosition;
 use evoclash_game::evolution::{EvoPath, Evolution};
 use evoclash_game::protocol::{
-    CommandChannel, Departed, MatchState, Phase, Player, RoomCommand, RoomSettings, Stats,
+    CommandChannel, Departed, MatchState, Phase, Player, RoomCommand, RoomSettings, Spectator,
+    Stats,
 };
 use lightyear::prelude::{Client, MessageSender};
 
@@ -364,6 +365,7 @@ fn sync_results_table(
     font: Res<UiFont>,
     state: Query<&MatchState>,
     players: Query<(&Player, &Stats, Option<&Evolution>, Has<LocalPlayer>)>,
+    specs: Query<&Spectator>,
     departed: Query<&Departed>,
     roots: Query<Entity, With<ResultsTable>>,
     existing: Query<Entity, With<ResultsRow>>,
@@ -382,6 +384,11 @@ fn sync_results_table(
     let Ok(root) = roots.single() else {
         return;
     };
+    let follow = specs
+        .iter()
+        .next()
+        .map(|s| s.following)
+        .filter(|id| *id != 0);
     let mut rows: Vec<Standing> = players
         .iter()
         .map(|(player, stats, evo, local)| Standing {
@@ -396,7 +403,8 @@ fn sync_results_table(
             bot: player.bot,
             level: evo.map(|evo| evo.level).unwrap_or(stats.level),
             path: evo.and_then(|evo| evo.lead_path()),
-            local,
+            // Highlight whoever we are watching the same way our own row is highlighted.
+            local: local || follow == Some(player.client_id),
         })
         .collect();
     sort_by_rank(&mut rows, |row| row.key);

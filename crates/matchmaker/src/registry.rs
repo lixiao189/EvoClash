@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use evoclash_game::api::Heartbeat;
+use evoclash_game::protocol::MAX_SPECTATORS;
 use serde::Serialize;
 
 use crate::rooms::{self, RoomFailure, RoomSeat};
@@ -38,13 +39,17 @@ pub struct MatchInfo {
     pub phase_left_secs: Option<u32>,
     pub humans: u32,
     pub bots: u32,
+    /// Connected watchers, from the heartbeat. Not part of `players`.
+    pub spectators: u32,
     pub is_private: bool,
     pub room_code: Option<String>,
     pub room_seed: u64,
     pub match_index: u32,
-    /// `none` | `lobby`. Trusted from the server; not re-derived here.
+    /// `none` | `lobby` | `spectate`. Trusted from the server; not re-derived here.
     pub join_mode: String,
     pub exiting: bool,
+    /// Watcher tokens issued recently, so concurrent joins don't overfill the 4 seats.
+    spec_reservations: Vec<Instant>,
 }
 
 /// What `POST /v1/join` should do with an optional `match_id`.
@@ -69,6 +74,7 @@ pub struct MatchView {
     pub draining: bool,
     pub overloaded: bool,
     pub tick_us: u32,
+    pub spectators: u32,
 }
 
 impl MatchInfo {
@@ -90,12 +96,14 @@ impl MatchInfo {
             phase_left_secs: None,
             humans: 0,
             bots: 0,
+            spectators: 0,
             is_private: false,
             room_code: None,
             room_seed: 0,
             match_index: 0,
             join_mode: "lobby".into(),
             exiting: false,
+            spec_reservations: Vec::new(),
         }
     }
 
@@ -113,6 +121,13 @@ impl MatchInfo {
             .saturating_sub(self.players + self.reservations.len() as u32)
     }
 
+    fn free_spec_seats(&mut self, now: Instant) -> u32 {
+        self.spec_reservations
+            .retain(|at| now.duration_since(*at) < RESERVATION_TTL);
+        (MAX_SPECTATORS as u32)
+            .saturating_sub(self.spectators + self.spec_reservations.len() as u32)
+    }
+
     pub fn overloaded(&self) -> bool {
         self.tick_us > OVERLOADED_TICK_US
     }
@@ -127,9 +142,29 @@ impl MatchInfo {
             && self.free_seats(now) > 0
     }
 
+    /// Public Playing or Results the server marked `spectate`, with a watcher seat left.
+    fn spectatable(&mut self, now: Instant) -> bool {
+        self.healthy(now)
+            && !self.draining
+            && !self.overloaded()
+            && !self.is_private
+            && self.join_mode == "spectate"
+            && self.free_spec_seats(now) > 0
+    }
+
     /// Joinable and nobody in it or on the way: a warm spare for the next burst of joins.
     fn idle(&mut self, now: Instant) -> bool {
         self.joinable(now) && self.players == 0 && self.reservations.is_empty()
+    }
+}
+
+/// Seconds until this room is a lobby again. Playing adds the results screen.
+fn spectate_wait(m: &MatchInfo) -> u32 {
+    let left = m.phase_left_secs.unwrap_or(u32::MAX / 4);
+    if m.phase == "playing" {
+        left.saturating_add(rooms::RESULTS_SECS)
+    } else {
+        left
     }
 }
 
@@ -152,10 +187,24 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// Quick start: open lobbies only. More humans first; equal humans, more time left;
-    /// a countdown that has not started sorts last among that human count.
-    pub fn reserve_seat(&mut self) -> Option<(String, SocketAddr)> {
+    /// Quick start. Open lobbies first (more humans, then more time left). If none are
+    /// taking combatants, a public `spectate` room with the shortest wait until the next
+    /// lobby (time left in the round, plus the results screen when the round is still on).
+    /// `bool` is true when the seat is a watcher. `None` means launch a new room.
+    pub fn reserve_seat(&mut self) -> Option<(String, SocketAddr, bool)> {
         let now = Instant::now();
+        if let Some(id) = self.pick_lobby(now) {
+            let m = self.matches.get_mut(&id)?;
+            m.reservations.push(now);
+            return Some((m.id.clone(), m.addr, false));
+        }
+        let id = self.pick_spectate(now)?;
+        let m = self.matches.get_mut(&id)?;
+        m.spec_reservations.push(now);
+        Some((m.id.clone(), m.addr, true))
+    }
+
+    fn pick_lobby(&mut self, now: Instant) -> Option<String> {
         let mut ids: Vec<String> = self.matches.keys().cloned().collect();
         ids.sort_by(|a, b| {
             let (left_a, humans_a) = {
@@ -171,12 +220,18 @@ impl Registry {
                 .then_with(|| cmp_time_left(left_a, left_b))
                 .then_with(|| a.cmp(b))
         });
-        let id = ids
-            .into_iter()
-            .find(|id| self.matches.get_mut(id).is_some_and(|m| m.joinable(now)))?;
-        let m = self.matches.get_mut(&id)?;
-        m.reservations.push(now);
-        Some((m.id.clone(), m.addr))
+        ids.into_iter()
+            .find(|id| self.matches.get_mut(id).is_some_and(|m| m.joinable(now)))
+    }
+
+    fn pick_spectate(&mut self, now: Instant) -> Option<String> {
+        let mut ids: Vec<String> = self.matches.keys().cloned().collect();
+        ids.sort_by(|a, b| {
+            let wait = |id: &String| spectate_wait(&self.matches[id]);
+            wait(a).cmp(&wait(b)).then_with(|| a.cmp(b))
+        });
+        ids.into_iter()
+            .find(|id| self.matches.get_mut(id).is_some_and(|m| m.spectatable(now)))
     }
 
     /// A named public match. `started` / `starting` only when that match exists and is not a quick start.
@@ -227,8 +282,12 @@ impl Registry {
         let arrived = beat.players.saturating_sub(entry.players) as usize;
         let drop = arrived.min(entry.reservations.len());
         entry.reservations.drain(..drop);
+        let spec_arrived = beat.spectators.saturating_sub(entry.spectators) as usize;
+        let spec_drop = spec_arrived.min(entry.spec_reservations.len());
+        entry.spec_reservations.drain(..spec_drop);
         entry.cert_digest = Some(beat.cert_digest.clone());
         entry.players = beat.players;
+        entry.spectators = beat.spectators;
         entry.max_players = beat.max_players;
         entry.accepting = beat.accepting;
         entry.tick_us = beat.tick_us;
@@ -364,17 +423,44 @@ impl Registry {
                 RoomFailure::new(404, "not_found", rooms::not_found_message(&code), None)
             });
         };
-        if phase == "playing" {
-            let retry_after = left.unwrap_or(0).saturating_add(rooms::RESULTS_SECS);
-            return Err(RoomFailure::new(
-                409,
-                "in_match",
-                rooms::in_match_message(retry_after),
-                Some(retry_after),
-            ));
-        }
-        if phase == "results" {
-            let retry_after = left.unwrap_or(0);
+        if phase == "playing" || phase == "results" {
+            let retry_after = if phase == "playing" {
+                left.unwrap_or(0).saturating_add(rooms::RESULTS_SECS)
+            } else {
+                left.unwrap_or(0)
+            };
+            let open = join_mode == "spectate" && healthy && !draining && !overloaded;
+            if open {
+                let m = self.matches.get_mut(&id).expect("match");
+                if m.free_spec_seats(now) > 0 {
+                    m.spec_reservations.push(now);
+                    return Ok(RoomSeat {
+                        id,
+                        addr,
+                        code,
+                        spectate: true,
+                    });
+                }
+                let error = if phase == "playing" {
+                    "in_match"
+                } else {
+                    "results"
+                };
+                return Err(RoomFailure::new(
+                    409,
+                    error,
+                    rooms::spectate_full_message(retry_after),
+                    Some(retry_after),
+                ));
+            }
+            if phase == "playing" {
+                return Err(RoomFailure::new(
+                    409,
+                    "in_match",
+                    rooms::in_match_message(retry_after),
+                    Some(retry_after),
+                ));
+            }
             return Err(RoomFailure::new(
                 409,
                 "results",
@@ -408,7 +494,12 @@ impl Registry {
                 return Err(RoomFailure::new(409, "full", rooms::FULL, None));
             }
             m.reservations.push(now);
-            return Ok(RoomSeat { id, addr, code });
+            return Ok(RoomSeat {
+                id,
+                addr,
+                code,
+                spectate: false,
+            });
         }
         if !healthy {
             return Err(RoomFailure::new(410, "closed", rooms::CLOSED, None));
@@ -438,6 +529,7 @@ impl Registry {
                     draining: m.draining,
                     overloaded: m.overloaded(),
                     tick_us: m.tick_us,
+                    spectators: m.spectators,
                 }
             })
             .collect();
@@ -476,6 +568,7 @@ mod tests {
             phase_left_secs: None,
             humans: players,
             bots: 0,
+            spectators: 0,
             is_private: false,
             room_code: None,
             room_seed: 1,
@@ -745,5 +838,102 @@ mod tests {
             404,
             "another IP still has its own budget"
         );
+    }
+
+    fn spectate_room(id: &str, phase: &str, left: u32, watchers: u32) -> Heartbeat {
+        let mut beat = beat(id, 8);
+        beat.max_players = 8;
+        beat.humans = 8;
+        beat.phase = phase.into();
+        beat.phase_left_secs = Some(left);
+        beat.join_mode = "spectate".into();
+        beat.spectators = watchers;
+        beat.accepting = false;
+        beat
+    }
+
+    #[test]
+    fn quick_start_takes_a_lobby_then_the_soonest_spectate_then_nothing() {
+        let mut reg = Registry::default();
+        reg.heartbeat(&beat("lobby", 1));
+        reg.heartbeat(&spectate_room("late", "playing", 100, 0));
+        reg.heartbeat(&spectate_room("soon", "results", 5, 0));
+        let (id, _, spectate) = reg.reserve_seat().unwrap();
+        assert_eq!(id, "lobby");
+        assert!(!spectate, "an open lobby beats a watcher seat");
+        for _ in 0..MAX_SPECTATORS {
+            let (id, _, spectate) = reg.reserve_seat().unwrap();
+            assert_eq!(
+                id, "soon",
+                "results left is shorter than playing plus results"
+            );
+            assert!(spectate);
+        }
+        for _ in 0..MAX_SPECTATORS {
+            assert_eq!(reg.reserve_seat().unwrap().0, "late");
+        }
+        assert_eq!(
+            reg.reserve_seat().map(|seat| seat.0),
+            None,
+            "no lobby and no watcher seat: open a room"
+        );
+    }
+
+    #[test]
+    fn spectate_reservations_stop_at_four_and_clear_when_a_watcher_arrives() {
+        let mut reg = Registry::default();
+        reg.heartbeat(&spectate_room("a", "playing", 40, 0));
+        assert!(reg.reserve_seat().unwrap().2);
+        assert!(reg.reserve_seat().is_some());
+        let arrived = spectate_room("a", "playing", 40, 2);
+        reg.heartbeat(&arrived);
+        assert!(
+            reg.matches["a"].spec_reservations.is_empty(),
+            "connected watchers clear their reservations"
+        );
+        assert!(reg.reserve_seat().is_some());
+        assert!(reg.reserve_seat().is_some());
+        assert!(
+            reg.reserve_seat().is_none(),
+            "2 connected + 2 reserved is the cap"
+        );
+    }
+
+    #[test]
+    fn playing_private_room_seats_a_watcher_until_the_cap() {
+        let mut reg = Registry::default();
+        let mut room = private_room("priv", "ABCD", 8);
+        room.phase = "playing".into();
+        room.phase_left_secs = Some(100);
+        room.join_mode = "spectate".into();
+        room.spectators = 3;
+        room.accepting = false;
+        reg.heartbeat(&room);
+        let seat = reg.lookup_room("abcd", "1.1.1.1", Instant::now()).unwrap();
+        assert!(seat.spectate);
+        assert_eq!(seat.code, "ABCD");
+        let err = reg
+            .lookup_room("ABCD", "1.1.1.2", Instant::now())
+            .unwrap_err();
+        assert_eq!(err.status, 409);
+        assert_eq!(err.error, "in_match");
+        assert_eq!(err.retry_after, Some(100 + rooms::RESULTS_SECS));
+        assert!(err.message.contains("4/4"));
+    }
+
+    #[test]
+    fn results_private_room_without_spectate_still_retries() {
+        let mut reg = Registry::default();
+        let mut room = private_room("priv", "ABCD", 2);
+        room.phase = "results".into();
+        room.phase_left_secs = Some(8);
+        room.join_mode = "none".into();
+        reg.heartbeat(&room);
+        let err = reg
+            .lookup_room("ABCD", "1.1.1.1", Instant::now())
+            .unwrap_err();
+        assert_eq!(err.error, "results");
+        assert_eq!(err.retry_after, Some(8));
+        assert_eq!(err.message, rooms::RESULTS);
     }
 }

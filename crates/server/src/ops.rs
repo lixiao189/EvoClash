@@ -41,6 +41,33 @@ impl OpsState {
             beat.exiting = true;
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self {
+            draining: Arc::default(),
+            snapshot: Arc::new(Mutex::new(Heartbeat {
+                match_id: "t".into(),
+                public_addr: "127.0.0.1:1".into(),
+                cert_digest: "ab".into(),
+                players: 0,
+                max_players: 8,
+                accepting: true,
+                tick_us: 0,
+                phase: "playing".into(),
+                phase_left_secs: None,
+                humans: 0,
+                bots: 0,
+                spectators: 0,
+                is_private: false,
+                room_code: None,
+                room_seed: 1,
+                match_index: 0,
+                join_mode: "none".into(),
+                exiting: false,
+            })),
+        }
+    }
 }
 
 #[derive(Resource, Default)]
@@ -69,6 +96,7 @@ impl Plugin for OpsPlugin {
                 phase_left_secs: None,
                 humans: 0,
                 bots: 0,
+                spectators: 0,
                 is_private: config.private,
                 room_code: (config.private && !config.room_code.is_empty())
                     .then(|| config.room_code.clone()),
@@ -126,12 +154,17 @@ fn update_snapshot(
     timer: Res<TickTimer>,
     humans: Query<&Human>,
     players: Query<&Player>,
+    specs: Query<&crate::spectate::SpectatorSession>,
     state: Query<&MatchState>,
     settings: Query<&RoomSettings>,
     config: Res<ServerConfig>,
 ) {
     let human_count = humans.iter().filter(|human| !human.left).count() as u32;
     let bots = players.iter().filter(|player| player.bot).count() as u32;
+    let spectators = specs
+        .iter()
+        .filter(|session| session.disconnected_ticks == 0)
+        .count() as u32;
     let Ok(mut snapshot) = ops.snapshot.lock() else {
         return;
     };
@@ -139,7 +172,10 @@ fn update_snapshot(
     snapshot.players = human_count;
     snapshot.humans = human_count;
     snapshot.bots = bots;
-    snapshot.accepting = !ops.is_draining() && (human_count as usize) < config.max_players;
+    snapshot.spectators = spectators;
+    let draining = ops.is_draining();
+    let combat_open = (human_count as usize) < config.max_players;
+    snapshot.accepting = !draining && combat_open;
     snapshot.tick_us = timer.ema_us as u32;
     snapshot.room_seed = config.room_seed;
     snapshot.exiting = exiting;
@@ -153,7 +189,8 @@ fn update_snapshot(
         snapshot.phase = phase_name(state.phase).to_string();
         snapshot.phase_left_secs = phase_left_secs(state);
         snapshot.match_index = state.match_index;
-        snapshot.join_mode = current_join_mode(state, private_room, snapshot.accepting).to_string();
+        snapshot.join_mode =
+            current_join_mode(state, private_room, draining, combat_open, spectators).to_string();
     }
 }
 

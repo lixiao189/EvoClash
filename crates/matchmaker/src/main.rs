@@ -110,6 +110,7 @@ async fn issue(
     client_id: u64,
     name: &str,
     room_code: Option<String>,
+    spectate: bool,
 ) -> Response {
     let Some(cert_digest) = cert_digest(state, &match_id).await else {
         return error(StatusCode::SERVICE_UNAVAILABLE, "busy", BUSY);
@@ -123,6 +124,7 @@ async fn issue(
             client_id,
             connect_token,
             room_code,
+            spectate,
         })
         .into_response(),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal", e),
@@ -188,14 +190,14 @@ async fn join(
     let client_id = new_client_id();
 
     enum Seat {
-        Ready(String, SocketAddr),
+        Ready(String, SocketAddr, bool),
         Deny(Response),
         Busy,
     }
     let seat = {
         let mut registry = state.registry.lock().expect("registry lock");
         match registry.plan_join(request.match_id.as_deref()) {
-            JoinPlan::Seat(id, addr) => Seat::Ready(id, addr),
+            JoinPlan::Seat(id, addr) => Seat::Ready(id, addr, false),
             JoinPlan::Started => Seat::Deny(error(StatusCode::CONFLICT, "started", STARTED)),
             JoinPlan::Starting { retry_after } => Seat::Deny(error_retry(
                 StatusCode::CONFLICT,
@@ -204,12 +206,12 @@ async fn join(
                 retry_after,
             )),
             JoinPlan::Quick => match registry.reserve_seat() {
-                Some((id, addr)) => Seat::Ready(id, addr),
+                Some((id, addr, spectate)) => Seat::Ready(id, addr, spectate),
                 None => match &state.fleet {
                     Some(fleet) => match launch(&mut registry, fleet) {
                         Ok((id, addr)) => {
                             registry.reserve_in(&id);
-                            Seat::Ready(id, addr)
+                            Seat::Ready(id, addr, false)
                         }
                         Err(_) => Seat::Busy,
                     },
@@ -219,10 +221,10 @@ async fn join(
         }
     };
     match seat {
-        Seat::Ready(match_id, addr) => {
+        Seat::Ready(match_id, addr, spectate) => {
             println!("{name} ({client_id}) → {match_id}");
             state.joins.fetch_add(1, Ordering::Relaxed);
-            issue(&state, match_id, addr, client_id, &name, None).await
+            issue(&state, match_id, addr, client_id, &name, None, spectate).await
         }
         Seat::Deny(response) => {
             state.join_failures.fetch_add(1, Ordering::Relaxed);
@@ -254,6 +256,7 @@ async fn join_private(state: Shared, ip: String, request: JoinRequest) -> Respon
                 client_id,
                 &name,
                 Some(seat.code),
+                seat.spectate,
             )
             .await
         }
@@ -301,7 +304,7 @@ async fn create_room(
         Some((id, addr, code)) => {
             println!("{name} ({client_id}) creates {id} room {code}");
             state.joins.fetch_add(1, Ordering::Relaxed);
-            issue(&state, id, addr, client_id, &name, Some(code)).await
+            issue(&state, id, addr, client_id, &name, Some(code), false).await
         }
         None => {
             state.join_failures.fetch_add(1, Ordering::Relaxed);
@@ -347,6 +350,7 @@ async fn rejoin(State(state): State<Shared>, Json(request): Json<RejoinRequest>)
                 request.client_id,
                 "",
                 room_code,
+                false,
             )
             .await
         }

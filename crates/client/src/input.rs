@@ -7,7 +7,7 @@
 use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
 use evoclash_game::items::{HOTBAR_SLOTS, MELEE_SLOT};
-use evoclash_game::protocol::{Loadout, Player, PlayerInput, Pos};
+use evoclash_game::protocol::{Loadout, Player, PlayerInput, Pos, Spectator};
 use lightyear::prelude::client::input::InputSystems;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
 use lightyear::prelude::*;
@@ -132,12 +132,22 @@ fn hotbar_keys(
     mut menu: ResMut<MenuOpen>,
     mut scrolled: Local<f32>,
     me: Query<&Loadout, With<LocalPlayer>>,
+    specs: Query<(), With<Spectator>>,
 ) {
     let now = time.elapsed_secs();
     if let (Some(asked), Ok(loadout)) = (selection.asked, me.single())
         && (loadout.selected == selection.slot || now - asked > SELECT_HOLD)
     {
         selection.asked = None;
+    }
+    // Spectators keep Esc. Weapon keys, the backpack and the evolution hint do not apply.
+    if !specs.is_empty() {
+        open.0 = false;
+        evo.0 = false;
+        if keys.is_some_and(|keys| keys.just_pressed(KeyCode::Escape)) {
+            menu.0 = !menu.0;
+        }
+        return;
     }
     let Some(keys) = keys else {
         return;
@@ -240,8 +250,16 @@ fn buffer_input(
     evo: Res<EvoPanelOpen>,
     over_ui: Res<PointerOverUi>,
     mut last_aim: Local<Vec2>,
+    specs: Query<(), With<Spectator>>,
     mut query: Query<(&mut ActionState<PlayerInput>, &Pos), With<InputMarker<PlayerInput>>>,
 ) {
+    // A spectator must not emit `PlayerInput`. The server drops it; don't send it.
+    if !specs.is_empty() {
+        if let Ok((mut action, _)) = query.single_mut() {
+            action.0 = PlayerInput::default();
+        }
+        return;
+    }
     let Ok((mut action, pos)) = query.single_mut() else {
         return;
     };

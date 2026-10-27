@@ -414,16 +414,34 @@ pub(super) fn update_roofs(
     fixed: Res<Time<Fixed>>,
     arena: Res<Arena>,
     me: Query<(&Pos, Option<&TickSamples>, &Vitals), With<LocalPlayer>>,
+    specs: Query<&Spectator>,
+    players: Query<(&Player, &Pos, Option<&TickSamples>, &Vitals)>,
     mut indoors: ResMut<Indoors>,
     mut roofs: Query<(&RoofOf, &mut Sprite)>,
 ) {
-    let inside = me
-        .single()
-        .ok()
-        .filter(|(.., v)| v.alive)
-        .and_then(|(pos, samples, _)| arena.building_at(visual_pos(pos, samples, &fixed)));
-    if indoors.0 != inside {
-        indoors.0 = inside;
+    // Roofs and indoor concealment use the body we are looking through.
+    let (eye, watch) = match me.single().ok() {
+        Some((pos, samples, vitals)) => (vitals.alive.then_some((pos, samples)), None),
+        None => {
+            let id = specs
+                .iter()
+                .next()
+                .map(|s| s.following)
+                .filter(|id| *id != 0);
+            let eye = id.and_then(|id| {
+                players.iter().find_map(|(player, pos, samples, vitals)| {
+                    (player.client_id == id && vitals.alive).then_some((pos, samples))
+                })
+            });
+            (eye, id)
+        }
+    };
+    let inside = eye.and_then(|(pos, samples)| arena.building_at(visual_pos(pos, samples, &fixed)));
+    if indoors.building != inside {
+        indoors.building = inside;
+    }
+    if indoors.watch != watch {
+        indoors.watch = watch;
     }
     let k = 1.0 - (-10.0 * time.delta_secs()).exp();
     for (roof, mut sprite) in &mut roofs {

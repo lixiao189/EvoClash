@@ -20,6 +20,7 @@ mod monsters;
 mod ops;
 mod rng;
 mod skills;
+mod spectate;
 
 use std::time::Duration;
 
@@ -74,6 +75,7 @@ fn main() {
     app.add_plugins((
         connections::ConnectionsPlugin,
         gameplay::GameplayPlugin,
+        spectate::SpectatePlugin,
         combat::CombatPlugin,
         inventory::InventoryPlugin,
         environment::EnvironmentPlugin,
