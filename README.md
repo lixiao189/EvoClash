@@ -30,7 +30,7 @@ make run
 
 ## 架构
 
-浏览器向匹配服务要令牌，再用 WebTransport 连到单独的对局进程。一局一个进程，64 Hz 权威模拟，客户端预测自己的移动。高并发、高可用、延迟、日志、重放和崩溃恢复的说明在 [doc/architecture.md](doc/architecture.md)。还没拍板的工作在 [doc/plan.md](doc/plan.md)。
+浏览器向匹配服务要令牌，再用 WebTransport 连到单独的对局进程。一局一个进程，64 Hz 权威模拟，客户端预测自己的移动。高并发、高可用、延迟、日志、重放和崩溃恢复的说明在 [doc/architecture.md](doc/architecture.md)。
 
 ## Kubernetes 部署
 
@@ -68,7 +68,7 @@ helm template evoclash deploy/helm/evoclash -n evoclash --set fleet.autoscaler.b
 
 ## 走向生产还缺什么
 
-Kubernetes 上的崩溃恢复还没做，见 [doc/plan.md](doc/plan.md)。下面这些接口仍然是空的：
+崩溃恢复只在本地 `fleet` 和单机部署上生效，Kubernetes 上没有。下面这些接口仍然是空的：
 
 - **共享席位预留**：多副本匹配服务的席位预留各自在内存里，靠服务器人数上限兜底。需要严格不超卖时可以把 `Registry` 放进 Redis。
 - **全局入口**：多区域目前靠不同域名或 GeoDNS，可以再加一层返回区域列表、由网页测速选区的服务（`JoinRequest.region` 已预留）。
