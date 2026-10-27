@@ -44,7 +44,6 @@ The design write-up is `doc/architecture.md` (Chinese). Do not restate it here. 
 - The client draws its own shots. The server does not echo them.
 - Chinese UI is the bundled GB2312 Noto Sans SC subset. Do not regenerate the font unless a glyph is missing (`crates/client/assets/README.md`).
 - Art files under `crates/client/assets/lpc/` and `lpc-src/` need a row in `assets/CREDITS.md`.
-- `journal.rs` is past the ~600-line split threshold. Split it in its own PR before the crash-recovery work in `doc/plan.md`.
 
 Workspace lints allow clippy `type_complexity` and `too_many_arguments` (normal for Bevy systems).
 
