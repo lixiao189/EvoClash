@@ -59,11 +59,11 @@ matchmaker:
   affinity: {}
 
 server:
-  # Every room is fixed at 6 combatants (humans first, bots fill the rest); the server
+  # Every room is fixed at 8 combatants (humans first, bots fill the rest); the server
   # ignores other values.
-  maxPlayers: 6
-  # Legacy fill target, kept for the server's compatibility flag: also fixed at 6.
-  bots: 6
+  maxPlayers: 8
+  # Legacy fill target, kept for the server's compatibility flag: also fixed at 8.
+  bots: 8
   monsters: true
   # ECS worker threads per match process; a match ticks in well under 1 ms of one core.
   threads: 1

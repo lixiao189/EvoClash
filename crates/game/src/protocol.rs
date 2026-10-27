@@ -158,6 +158,9 @@ pub struct Stats {
     pub streak: u32,
     /// Evolution level, mirrored here for the scoreboard.
     pub level: u8,
+    /// Sim tick of the last score gain. 0 if this combatant has not scored.
+    /// When score, kills and deaths tie, the earlier tick ranks higher.
+    pub last_score_tick: u32,
 }
 
 impl Default for Stats {
@@ -168,6 +171,7 @@ impl Default for Stats {
             deaths: 0,
             streak: 0,
             level: 1,
+            last_score_tick: 0,
         }
     }
 }
@@ -176,6 +180,16 @@ impl Stats {
     /// A kill streak puts a price on your head: you are revealed and worth more.
     pub fn has_bounty(&self) -> bool {
         self.streak >= crate::sim::BOUNTY_STREAK
+    }
+
+    /// Add `points` and stamp `tick` as the moment this score was reached.
+    /// A zero award does not move the tiebreak clock.
+    pub fn add_score(&mut self, points: u32, tick: u32) {
+        if points == 0 {
+            return;
+        }
+        self.score = self.score.saturating_add(points);
+        self.last_score_tick = tick;
     }
 }
 
@@ -442,7 +456,8 @@ pub struct MatchState {
     pub phase: Phase,
     /// Ticks left in the current phase. In a lobby this is the countdown (0 if it has not started).
     pub ticks_left: u32,
-    /// Lobby only: the public 20s countdown is running (the last 3s of it are `Starting`).
+    /// Lobby only: the public countdown is running (the last 3s of it are `Starting`).
+    /// The first round is 20s; every later round is 15s.
     pub countdown_active: bool,
     /// Round inside this room process. The first lobby is 0; each return from results adds 1.
     pub match_index: u32,
@@ -456,7 +471,7 @@ pub struct MatchState {
 }
 
 /// Every room fields this many combatants: humans first, bots fill the rest.
-pub const ROOM_COMBATANTS: u8 = 6;
+pub const ROOM_COMBATANTS: u8 = 8;
 
 /// Lobby settings for this room. One replicated entity, visible to everyone.
 /// `bots` is always `Some(ROOM_COMBATANTS)` in production; tests may override it.

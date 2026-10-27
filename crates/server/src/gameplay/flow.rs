@@ -7,14 +7,21 @@ use evoclash_game::rng::mix;
 use super::*;
 use crate::rng::{SimRng, Stream};
 
-/// Final-standings key: score desc, kills desc, deaths asc, client_id asc. Higher wins.
+/// Final-standings key: score desc, kills desc, deaths asc, last score tick asc, client_id asc.
 pub(crate) fn final_rank(
     score: u32,
     kills: u32,
     deaths: u32,
+    last_score_tick: u32,
     client_id: u64,
-) -> (u32, u32, Reverse<u32>, Reverse<u64>) {
-    (score, kills, Reverse(deaths), Reverse(client_id))
+) -> (u32, u32, Reverse<u32>, Reverse<u32>, Reverse<u64>) {
+    (
+        score,
+        kills,
+        Reverse(deaths),
+        Reverse(last_score_tick),
+        Reverse(client_id),
+    )
 }
 
 pub(super) fn loot_spawner(
@@ -100,7 +107,7 @@ pub fn match_flow(
                 // Public rooms start on the first human. Later joins do not reset it.
                 // A private room waits for the host's Start.
                 state.countdown_active = true;
-                state.ticks_left = LOBBY_COUNTDOWN_TICKS;
+                state.ticks_left = public_lobby_countdown_ticks(state.match_index);
             } else if state.countdown_active {
                 state.ticks_left = state.ticks_left.saturating_sub(1);
                 if state.ticks_left == 0 {
@@ -157,12 +164,18 @@ pub fn match_flow(
                 });
             }
             // No point target: the match always runs the full 8 minutes, then the final
-            // scoreboard decides (score, then kills, then fewer deaths, then lower client_id).
+            // scoreboard decides (score, kills, fewer deaths, earlier final score, client_id).
             if state.ticks_left == 0 {
                 let winner = players
                     .iter()
                     .max_by_key(|(player, stats)| {
-                        final_rank(stats.score, stats.kills, stats.deaths, player.client_id)
+                        final_rank(
+                            stats.score,
+                            stats.kills,
+                            stats.deaths,
+                            stats.last_score_tick,
+                            player.client_id,
+                        )
                     })
                     .map(|(player, _)| player.name.clone());
                 outbox.announce(match &winner {
@@ -269,7 +282,7 @@ fn begin_lobby(
     // A private room waits for the host again.
     if !private_room && connected_humans(humans) > 0 && players.iter().count() >= 2 {
         state.countdown_active = true;
-        state.ticks_left = LOBBY_COUNTDOWN_TICKS;
+        state.ticks_left = public_lobby_countdown_ticks(state.match_index);
     } else {
         state.countdown_active = false;
         state.ticks_left = 0;

@@ -84,6 +84,8 @@ pub struct ScoreLine {
     pub kills: u32,
     pub deaths: u32,
     pub xp: u32,
+    /// Tick of the last score gain. 0 if they never scored. Earlier ranks higher.
+    pub last_score_tick: u32,
 }
 
 struct LogBuf {
@@ -282,8 +284,13 @@ impl Journal {
             let mut parts = Vec::new();
             for score in scores {
                 parts.push(format!(
-                    "{}:{}:{}:{}:{}",
-                    score.client_id, score.score, score.kills, score.deaths, score.xp
+                    "{}:{}:{}:{}:{}:{}",
+                    score.client_id,
+                    score.score,
+                    score.kills,
+                    score.deaths,
+                    score.xp,
+                    score.last_score_tick
                 ));
             }
             log.line(&format!("scores {}", parts.join(" ")));
@@ -495,6 +502,7 @@ pub fn scoreboard(world: &mut World) -> Vec<ScoreLine> {
             kills: stats.kills,
             deaths: stats.deaths,
             xp: evo.xp,
+            last_score_tick: stats.last_score_tick,
         })
         .collect();
     rows.sort_by_key(|row| row.client_id);
@@ -734,6 +742,7 @@ fn journal_flow(
                 kills: stats.kills,
                 deaths: stats.deaths,
                 xp: evo.xp,
+                last_score_tick: stats.last_score_tick,
             })
             .collect();
         // scores sorted inside seal via the passed vec — sort here.
@@ -917,8 +926,8 @@ pub fn replay_cli(path: &Path) -> i32 {
     }
     for line in &report.scores {
         println!(
-            "score {} {} kills {} deaths {} xp {}",
-            line.client_id, line.score, line.kills, line.deaths, line.xp
+            "score {} {} kills {} deaths {} xp {} tick {}",
+            line.client_id, line.score, line.kills, line.deaths, line.xp, line.last_score_tick
         );
     }
     for kill in &report.kills {
@@ -1328,6 +1337,7 @@ fn parse_scores(rest: &str) -> Vec<ScoreLine> {
                 kills: n.next()?.parse().ok()?,
                 deaths: n.next()?.parse().ok()?,
                 xp: n.next()?.parse().ok()?,
+                last_score_tick: n.next()?.parse().ok()?,
             })
         })
         .collect()
@@ -1585,7 +1595,7 @@ mod tests {
     #[test]
     fn replay_bot_match_matches_scores_kills_and_digests() {
         let dir = temp("bots");
-        let app = recording_app(test_config(&dir, 0xB07, true), 6);
+        let app = recording_app(test_config(&dir, 0xB07, true), ROOM_COMBATANTS as usize);
         let played = play(app, 1280, None);
         assert_replay(&played);
     }
@@ -1607,7 +1617,7 @@ mod tests {
     #[test]
     fn replay_names_the_first_mismatched_digest_tick() {
         let dir = temp("poison");
-        let app = recording_app(test_config(&dir, 0xB07, true), 6);
+        let app = recording_app(test_config(&dir, 0xB07, true), ROOM_COMBATANTS as usize);
         let played = play(app, 1280, None);
         let report = replay_log(
             &played.path,
@@ -1662,10 +1672,27 @@ mod tests {
     }
 
     #[test]
+    fn score_line_keeps_the_last_score_tick() {
+        let line = ScoreLine {
+            client_id: 7,
+            score: 4,
+            kills: 3,
+            deaths: 1,
+            xp: 9,
+            last_score_tick: 128,
+        };
+        let text = format!(
+            "{}:{}:{}:{}:{}:{}",
+            line.client_id, line.score, line.kills, line.deaths, line.xp, line.last_score_tick
+        );
+        assert_eq!(parse_scores(&text), vec![line]);
+    }
+
+    #[test]
     #[ignore]
     fn replay_eight_minutes() {
         let dir = temp("eight");
-        let app = recording_app(test_config(&dir, 0xB07, true), 6);
+        let app = recording_app(test_config(&dir, 0xB07, true), ROOM_COMBATANTS as usize);
         let played = play(app, 8 * 60 * 64, None);
         let started = std::time::Instant::now();
         let report = replay_log(&played.path, ReplayOptions::default());

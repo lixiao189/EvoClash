@@ -120,7 +120,7 @@ impl ServerConfig {
                 "-h" | "--help" => {
                     println!(
                         "evoclash-server [--port 7000] [--public-addr 127.0.0.1:7000] [--match-id ID]\n\
-                         \x20               [--max-players 8] [--bots 6] [--matchmaker URL[,URL...]] [--single-match]\n\
+                         \x20               [--max-players 8] [--bots 8] [--matchmaker URL[,URL...]] [--single-match]\n\
                          \x20               [--no-monsters] [--threads 1] [--agones] [--room-seed U64]\n\
                          \x20               [--private] [--room-code CODE] [--log-dir logs] [--replay FILE]\n\n\
                          --bots N          keep at least N combatants in the arena by adding bots (0 disables)\n\

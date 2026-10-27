@@ -26,8 +26,8 @@ use crate::combat::Flight;
 use crate::connections::Human;
 use crate::evolution::{XpAward, XpQueue, grant_xp};
 use crate::gameplay::{
-    Damage, DamageQueue, MATCH_TICKS, Outbox, ResetRequested, SimSet, TICKS_PER_SEC, match_flow,
-    reset_match, resolve_damage,
+    Damage, DamageQueue, MATCH_TICKS, Outbox, ResetRequested, SimSet, SimTick, TICKS_PER_SEC,
+    match_flow, reset_match, resolve_damage,
 };
 use crate::inventory::spawn_loot;
 use crate::monsters::{
@@ -437,6 +437,7 @@ fn reward(
     mut players: Query<(Entity, &Player, &mut Stats)>,
     mut outbox: ResMut<Outbox>,
     mut xp: ResMut<XpQueue>,
+    tick: Res<SimTick>,
 ) {
     let Some(at) = boss.slain_at.take() else {
         return;
@@ -477,7 +478,7 @@ fn reward(
         if award.score == 0 {
             continue;
         }
-        stats.score += award.score;
+        stats.add_score(award.score, tick.0);
         if award.score == TOP_SCORE {
             killer = Some(player.name.clone());
             outbox.announce(format!("{} 击倒了辐射巨兽，+{TOP_SCORE} 分！", player.name));

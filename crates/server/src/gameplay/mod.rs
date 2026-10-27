@@ -38,11 +38,13 @@ use room::{maintain_host, private_idle_cap, read_room_commands};
 pub use spawning::*;
 
 pub const TICKS_PER_SEC: u32 = 64;
-/// Lobby portion of the public 20s countdown. The last 3s are `Phase::Starting`.
+/// Lobby portion of the first public round's 20s countdown. The last 3s are `Phase::Starting`.
 pub const LOBBY_COUNTDOWN_TICKS: u32 = 17 * TICKS_PER_SEC;
+/// Lobby portion of a later public round. 12s here plus 3s Starting is the 15s intermission.
+pub const NEXT_LOBBY_COUNTDOWN_TICKS: u32 = 12 * TICKS_PER_SEC;
 pub const STARTING_TICKS: u32 = 3 * TICKS_PER_SEC;
 pub const MATCH_TICKS: u32 = 8 * 60 * TICKS_PER_SEC;
-pub const RESULTS_TICKS: u32 = 12 * TICKS_PER_SEC;
+pub const RESULTS_TICKS: u32 = 15 * TICKS_PER_SEC;
 /// Quick start stops once fewer than this many ticks remain until Playing
 /// (lobby time left plus the 3s Starting). Exactly 8s still accepts.
 pub const JOIN_CUTOFF_TICKS: u32 = 8 * TICKS_PER_SEC;
@@ -186,7 +188,16 @@ pub struct PendingStart(pub bool);
 #[derive(Component, Default)]
 pub struct Aggressors(pub Vec<Entity>);
 
-/// Public lobby still offered by quick start. The 20s clock is lobby time plus Starting;
+/// Lobby ticks before Starting. Match 0 is 17s (20s with Starting); later rounds are 12s (15s).
+pub fn public_lobby_countdown_ticks(match_index: u32) -> u32 {
+    if match_index > 0 {
+        NEXT_LOBBY_COUNTDOWN_TICKS
+    } else {
+        LOBBY_COUNTDOWN_TICKS
+    }
+}
+
+/// Public lobby still offered by quick start. The clock is lobby time plus Starting;
 /// a seat is offered while that clock has not started, or still has at least 8s left.
 pub fn lobby_open(state: &MatchState) -> bool {
     state.phase == Phase::Lobby

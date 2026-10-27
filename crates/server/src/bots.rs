@@ -15,7 +15,7 @@ use rand::Rng;
 use crate::config::ServerConfig;
 use crate::connections::Human;
 use crate::evolution::{LifeLog, apply_evolution, handle_command};
-use crate::gameplay::{Aggressors, CurrentInput, SimSet, spawn_combatant};
+use crate::gameplay::{Aggressors, CurrentInput, SimSet, spawn_combatant, spawn_plain_combatant};
 use crate::inventory::{BagContents, auto_wants};
 use crate::rng::{SimRng, Stream};
 use evoclash_game::evolution::seen_from;
@@ -176,6 +176,10 @@ fn rebuild_nav(mut commands: Commands, arena: Res<Arena>, nav: Option<Res<Nav>>)
     }
 }
 
+/// Unit tests insert this so bots are not replicated. A match process never does.
+#[derive(Resource)]
+struct PlainBots;
+
 fn balance_bots(
     mut commands: Commands,
     config: Res<ServerConfig>,
@@ -183,6 +187,7 @@ fn balance_bots(
     settings: Query<&RoomSettings>,
     humans: Query<&Human>,
     bots: Query<(Entity, &Player), With<Bot>>,
+    plain: Option<Res<PlainBots>>,
     mut counter: Local<u64>,
     mut cooldown: Local<u32>,
     rng: Res<SimRng>,
@@ -230,7 +235,11 @@ fn balance_bots(
                 rng.random_range(0..EvoPath::ALL.len()),
             )
         });
-        let entity = spawn_combatant(&mut commands, player, None);
+        let entity = if plain.is_some() {
+            spawn_plain_combatant(&mut commands, player)
+        } else {
+            spawn_combatant(&mut commands, player, None)
+        };
         commands.entity(entity).insert((
             Bot {
                 goal: Vec2::ZERO,
@@ -736,6 +745,8 @@ mod tests {
 
     fn balance_app() -> App {
         let mut app = App::new();
+        // Skip replication so a bot despawn does not need the netcode visibility registry.
+        app.insert_resource(PlainBots);
         app.insert_resource(ServerConfig {
             port: 0,
             public_addr: "127.0.0.1:0".parse().unwrap(),
@@ -804,35 +815,36 @@ mod tests {
     }
 
     #[test]
-    fn a_lobby_fills_to_six_and_six_humans_leave_no_bots() {
-        // Fewer humans: bots fill the remaining seats, total stays 6.
+    fn a_lobby_fills_to_eight_and_eight_humans_leave_no_bots() {
+        assert_eq!(ROOM_COMBATANTS, 8);
+        // Fewer humans: bots fill the remaining seats, total stays 8.
         let mut app = balance_app();
         spawn_humans(&mut app, 2);
         app.update();
-        assert_eq!(roster(&mut app), (6, 4));
+        assert_eq!(roster(&mut app), (8, 6));
 
-        // Six humans: zero bots.
+        // Eight humans: zero bots.
         let mut app = balance_app();
-        spawn_humans(&mut app, 6);
+        spawn_humans(&mut app, 8);
         app.update();
-        assert_eq!(roster(&mut app), (6, 0));
+        assert_eq!(roster(&mut app), (8, 0));
     }
 
     #[test]
-    fn bots_leave_and_refill_so_the_room_stays_six() {
+    fn bots_leave_and_refill_so_the_room_stays_eight() {
         let mut app = balance_app();
         app.update();
-        assert_eq!(roster(&mut app), (6, 6), "an empty lobby fields six bots");
+        assert_eq!(roster(&mut app), (8, 8), "an empty lobby fields eight bots");
 
-        // Two humans join: the newest bots leave so the total stays 6.
+        // Two humans join: the newest bots leave so the total stays 8.
         let humans = spawn_humans(&mut app, 2);
         app.update();
-        assert_eq!(roster(&mut app), (6, 4));
+        assert_eq!(roster(&mut app), (8, 6));
 
         // A human leaves: a bot takes the free seat back.
         assert!(app.world_mut().despawn(humans[0]));
         app.update();
-        assert_eq!(roster(&mut app), (6, 5));
+        assert_eq!(roster(&mut app), (8, 7));
     }
 
     #[test]

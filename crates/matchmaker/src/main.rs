@@ -587,7 +587,7 @@ fn parse_args() -> Args {
             "-h" | "--help" => {
                 println!(
                     "evoclash-matchmaker [--listen 127.0.0.1:8080] [--public-host 127.0.0.1] [--ports 7000-7099]\n\
-                     \x20                   [--max-matches 16] [--max-players 8] [--bots 6]\n\
+                     \x20                   [--max-matches 16] [--max-players 8] [--bots 8]\n\
                      \x20                   [--server-bin PATH] [--log-dir logs] [--no-launch]\n\
                      \x20                   [--warm-matches 1] [--peer URL[,URL...]] [--web-dir DIR]\n\n\
                      --no-launch     only adopt servers that heartbeat in (external orchestrator)\n\

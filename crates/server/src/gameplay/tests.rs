@@ -1,7 +1,9 @@
 use evoclash_game::evolution::{Perk, xp_to_reach};
 use evoclash_game::shop::{PlayerCommand, RESPAWN_MIN_TICKS, ShopItem, can_deploy};
+use lightyear::prelude::PeerId;
 
 use super::*;
+use crate::connections::Human;
 use crate::evolution::handle_command;
 
 #[test]
@@ -364,6 +366,7 @@ fn lobby_kill_does_not_score_or_drop_a_bag() {
     app.update();
     let world = app.world();
     assert_eq!(world.get::<Stats>(killer).unwrap().score, 4);
+    assert_eq!(world.get::<Stats>(killer).unwrap().last_score_tick, 0);
     assert_eq!(world.get::<Stats>(killer).unwrap().streak, 2);
     assert_eq!(world.get::<Wallet>(killer).unwrap().scrap, 10);
     assert_eq!(world.get::<Evolution>(killer).unwrap().level, 1);
@@ -411,8 +414,9 @@ fn server_config() -> ServerConfig {
     }
 }
 
-/// A `Playing` app at `ticks_left`, with players `(client_id, name, score, kills, deaths)`.
-fn flow_app(players: &[(u64, &str, u32, u32, u32)], ticks_left: u32) -> App {
+/// A `Playing` app at `ticks_left`, with
+/// `(client_id, name, score, kills, deaths, last_score_tick)`.
+fn flow_app(players: &[(u64, &str, u32, u32, u32, u32)], ticks_left: u32) -> App {
     let mut app = App::new();
     app.init_resource::<Arena>()
         .init_resource::<Outbox>()
@@ -432,7 +436,7 @@ fn flow_app(players: &[(u64, &str, u32, u32, u32)], ticks_left: u32) -> App {
             ..default()
         },
     ));
-    for (client_id, name, score, kills, deaths) in players {
+    for (client_id, name, score, kills, deaths, last_score_tick) in players {
         app.world_mut().spawn((
             Player {
                 client_id: *client_id,
@@ -444,6 +448,7 @@ fn flow_app(players: &[(u64, &str, u32, u32, u32)], ticks_left: u32) -> App {
                 score: *score,
                 kills: *kills,
                 deaths: *deaths,
+                last_score_tick: *last_score_tick,
                 ..default()
             },
         ));
@@ -453,7 +458,7 @@ fn flow_app(players: &[(u64, &str, u32, u32, u32)], ticks_left: u32) -> App {
 }
 
 /// Run one whistle tick and return the resulting phase, winner and ticks left.
-fn whistle(players: &[(u64, &str, u32, u32, u32)]) -> (Phase, Option<String>, u32) {
+fn whistle(players: &[(u64, &str, u32, u32, u32, u32)]) -> (Phase, Option<String>, u32) {
     let mut app = flow_app(players, 1);
     app.update();
     let world = app.world_mut();
@@ -507,7 +512,8 @@ fn host_cannot_disable_bots_and_only_changes_monsters() {
 }
 
 #[test]
-fn production_settings_always_field_six_combatants() {
+fn production_settings_always_field_eight_combatants() {
+    assert_eq!(ROOM_COMBATANTS, 8);
     for bots in [0, 1, 2, 6, 8] {
         let mut config = server_config();
         config.min_combatants = bots;
@@ -522,7 +528,7 @@ fn production_settings_always_field_six_combatants() {
 
 #[test]
 fn match_does_not_end_at_twenty_five_before_the_whistle() {
-    let mut app = flow_app(&[(1, "a", 25, 5, 0), (2, "b", 3, 0, 1)], MATCH_TICKS);
+    let mut app = flow_app(&[(1, "a", 25, 5, 0, 0), (2, "b", 3, 0, 1, 0)], MATCH_TICKS);
     app.update();
     let world = app.world_mut();
     let mut query = world.query::<&MatchState>();
@@ -537,31 +543,38 @@ fn match_does_not_end_at_twenty_five_before_the_whistle() {
 }
 
 #[test]
-fn whistle_ranks_by_score_then_kills_then_fewer_deaths_then_client_id() {
+fn whistle_ranks_by_score_kills_deaths_earlier_score_then_client_id() {
     // Highest score wins.
     assert_eq!(
-        whistle(&[(1, "a", 10, 9, 0), (2, "b", 11, 0, 5)])
+        whistle(&[(1, "a", 10, 9, 0, 1), (2, "b", 11, 0, 5, 9)])
             .1
             .as_deref(),
         Some("b")
     );
     // Equal score: more kills wins.
     assert_eq!(
-        whistle(&[(1, "a", 20, 3, 0), (2, "b", 20, 5, 4)])
+        whistle(&[(1, "a", 20, 3, 0, 1), (2, "b", 20, 5, 4, 9)])
             .1
             .as_deref(),
         Some("b")
     );
     // Equal score and kills: fewer deaths wins.
     assert_eq!(
-        whistle(&[(1, "a", 20, 5, 3), (2, "b", 20, 5, 1)])
+        whistle(&[(1, "a", 20, 5, 3, 1), (2, "b", 20, 5, 1, 9)])
             .1
             .as_deref(),
         Some("b")
     );
-    // Fully tied: lower client_id wins, whatever the spawn order.
+    // Equal score, kills and deaths: whoever reached that score earlier wins.
     assert_eq!(
-        whistle(&[(2, "b", 20, 5, 1), (1, "a", 20, 5, 1)])
+        whistle(&[(1, "a", 20, 5, 1, 400), (2, "b", 20, 5, 1, 100)])
+            .1
+            .as_deref(),
+        Some("b")
+    );
+    // Still tied on the tick: lower client_id wins, whatever the spawn order.
+    assert_eq!(
+        whistle(&[(2, "b", 20, 5, 1, 100), (1, "a", 20, 5, 1, 100)])
             .1
             .as_deref(),
         Some("a")
@@ -643,4 +656,139 @@ fn host_leave_transfers_to_the_longest_present_human() {
     let (id, name) = room::next_host(&humans, Some(1)).expect("successor");
     assert_eq!(id, 2);
     assert_eq!(name, "early");
+}
+
+#[test]
+fn add_score_stamps_the_latest_gain_and_ignores_zero() {
+    let mut stats = Stats::default();
+    stats.add_score(0, 10);
+    assert_eq!((stats.score, stats.last_score_tick), (0, 0));
+    stats.add_score(2, 40);
+    stats.add_score(1, 90);
+    assert_eq!((stats.score, stats.last_score_tick), (3, 90));
+}
+
+#[test]
+fn playing_kill_stamps_the_score_tick() {
+    let mut app = App::new();
+    app.init_resource::<DamageQueue>()
+        .init_resource::<Outbox>()
+        .init_resource::<XpQueue>()
+        .init_resource::<Dealt>()
+        .insert_resource(SimTick(42));
+    app.world_mut().spawn(MatchState {
+        phase: Phase::Playing,
+        ..default()
+    });
+    app.add_systems(Update, resolve_damage);
+    let killer = combatant(&mut app, 1, "a");
+    let victim = combatant(&mut app, 2, "b");
+    app.world_mut()
+        .resource_mut::<DamageQueue>()
+        .0
+        .push(Damage {
+            target: victim,
+            attacker: Some(killer),
+            amount: 500.0,
+            armor_mult: 1.0,
+            weapon: Some(WeaponKind::Stick),
+            emp: false,
+            cause: None,
+        });
+    app.update();
+    let world = app.world();
+    let stats = world.get::<Stats>(killer).unwrap();
+    assert_eq!(stats.score, 5);
+    assert_eq!(stats.kills, 1);
+    assert_eq!(stats.last_score_tick, 42);
+    assert_eq!(world.get::<Stats>(victim).unwrap().last_score_tick, 0);
+}
+
+fn run_public_tick(phase: Phase, ticks_left: u32, match_index: u32) -> MatchState {
+    let mut app = App::new();
+    app.init_resource::<Arena>()
+        .init_resource::<Outbox>()
+        .init_resource::<ResetRequested>()
+        .init_resource::<PendingStart>()
+        .init_resource::<SimTick>()
+        .insert_resource(server_config())
+        .insert_resource(SimRng::from_match_seed(1));
+    app.world_mut().spawn((
+        MatchState {
+            phase,
+            ticks_left,
+            countdown_active: false,
+            match_index,
+            ..default()
+        },
+        RoomSettings {
+            bots: Some(ROOM_COMBATANTS),
+            ..default()
+        },
+    ));
+    for id in 1..=2 {
+        app.world_mut().spawn((
+            Player {
+                client_id: id,
+                name: format!("p{id}"),
+                color: [1.0; 3],
+                bot: false,
+            },
+            Stats::default(),
+        ));
+        app.world_mut().spawn(Human {
+            peer: PeerId::Netcode(id),
+            disconnected_ticks: 0,
+            joined_at: 0,
+            left: false,
+        });
+    }
+    app.add_systems(Update, match_flow);
+    app.update();
+    let world = app.world_mut();
+    let mut query = world.query::<&MatchState>();
+    query.single(world).expect("match state").clone()
+}
+
+#[test]
+fn results_last_fifteen_seconds_and_later_lobbies_are_fifteen() {
+    assert_eq!(RESULTS_TICKS, 15 * TICKS_PER_SEC);
+
+    let first = run_public_tick(Phase::Lobby, 0, 0);
+    assert!(first.countdown_active);
+    assert_eq!(first.match_index, 0);
+    assert_eq!(first.ticks_left, LOBBY_COUNTDOWN_TICKS);
+    assert_eq!(
+        first.ticks_left + STARTING_TICKS,
+        20 * TICKS_PER_SEC,
+        "the first public countdown is still 20s"
+    );
+
+    let next = run_public_tick(Phase::Results, 1, 0);
+    assert_eq!(next.phase, Phase::Lobby);
+    assert_eq!(next.match_index, 1);
+    assert!(next.countdown_active);
+    assert_eq!(next.ticks_left, NEXT_LOBBY_COUNTDOWN_TICKS);
+    assert_eq!(
+        next.ticks_left + STARTING_TICKS,
+        15 * TICKS_PER_SEC,
+        "a round after results waits 15s"
+    );
+
+    let resumed = run_public_tick(Phase::Lobby, 0, 3);
+    assert_eq!(resumed.ticks_left, NEXT_LOBBY_COUNTDOWN_TICKS);
+}
+
+#[test]
+fn later_lobby_still_closes_inside_eight_seconds() {
+    let mut state = MatchState {
+        phase: Phase::Lobby,
+        countdown_active: true,
+        ticks_left: NEXT_LOBBY_COUNTDOWN_TICKS - 7 * TICKS_PER_SEC,
+        match_index: 1,
+        ..default()
+    };
+    assert!(lobby_open(&state), "8s until Playing still accepts");
+    state.ticks_left = NEXT_LOBBY_COUNTDOWN_TICKS - 8 * TICKS_PER_SEC;
+    assert!(!lobby_open(&state), "7s until Playing is closed");
 }

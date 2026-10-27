@@ -192,7 +192,7 @@ pub fn resolve_damage(
                         killer_stats.kills += 1;
                         killer_life.kills += 1;
                         killer_stats.streak += 1;
-                        killer_stats.score += if had_bounty { 3 } else { 1 };
+                        killer_stats.add_score(if had_bounty { 3 } else { 1 }, tick.0);
                         let killer_tier = killer_loadout.weapon().spec().tier();
                         let giant_slayer = victim_tier >= killer_tier + GIANT_SLAYER_GAP;
                         xp.0.push(XpAward {
@@ -212,7 +212,7 @@ pub fn resolve_damage(
                             killer_loadout.add_ammo(kind, refill, killer_evo);
                         }
                         if giant_slayer {
-                            killer_stats.score += 1;
+                            killer_stats.add_score(1, tick.0);
                             outbox.announce(format!(
                                 "{} 以弱胜强击败了 {victim_name}，额外 +1 分！",
                                 killer_player.name
