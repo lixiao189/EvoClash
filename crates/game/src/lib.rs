@@ -60,6 +60,9 @@ pub mod api {
         /// Set when this seat is a private room. Quick start leaves it empty.
         #[serde(default)]
         pub room_code: Option<String>,
+        /// Joined while a round runs: watch it as a spectator, take a seat next round.
+        #[serde(default)]
+        pub spectate: bool,
     }
 
     #[derive(Serialize, Deserialize, Debug, Clone)]

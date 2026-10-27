@@ -173,7 +173,9 @@ fn update_snapshot(
     snapshot.humans = human_count;
     snapshot.bots = bots;
     snapshot.spectators = spectators;
-    snapshot.accepting = !ops.is_draining() && (human_count as usize) < config.max_players;
+    let draining = ops.is_draining();
+    let combat_open = (human_count as usize) < config.max_players;
+    snapshot.accepting = !draining && combat_open;
     snapshot.tick_us = timer.ema_us as u32;
     snapshot.room_seed = config.room_seed;
     snapshot.exiting = exiting;
@@ -187,7 +189,8 @@ fn update_snapshot(
         snapshot.phase = phase_name(state.phase).to_string();
         snapshot.phase_left_secs = phase_left_secs(state);
         snapshot.match_index = state.match_index;
-        snapshot.join_mode = current_join_mode(state, private_room, snapshot.accepting).to_string();
+        snapshot.join_mode =
+            current_join_mode(state, private_room, draining, combat_open, spectators).to_string();
     }
 }
 

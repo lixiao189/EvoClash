@@ -1715,3 +1715,51 @@ fn only_watchers_keep_a_playing_room_open() {
         "results with only a watcher does not close"
     );
 }
+
+#[test]
+fn join_mode_is_spectate_in_playing_and_results_until_four_watchers() {
+    use evoclash_game::protocol::MAX_SPECTATORS;
+
+    let playing = MatchState {
+        phase: Phase::Playing,
+        ..default()
+    };
+    assert_eq!(
+        current_join_mode(&playing, false, false, false, 0),
+        "spectate"
+    );
+    assert_eq!(
+        current_join_mode(&playing, true, false, false, 3),
+        "spectate"
+    );
+    assert_eq!(
+        current_join_mode(&playing, false, false, true, MAX_SPECTATORS as u32),
+        "none",
+        "four watchers closes the seat"
+    );
+    assert_eq!(
+        current_join_mode(&playing, false, true, true, 0),
+        "none",
+        "draining does not take watchers"
+    );
+    let results = MatchState {
+        phase: Phase::Results,
+        ..default()
+    };
+    assert_eq!(
+        current_join_mode(&results, true, false, false, 0),
+        "spectate"
+    );
+    let lobby = MatchState {
+        phase: Phase::Lobby,
+        countdown_active: false,
+        ..default()
+    };
+    assert_eq!(current_join_mode(&lobby, false, false, true, 0), "lobby");
+    assert_eq!(current_join_mode(&lobby, false, true, true, 0), "none");
+    let starting = MatchState {
+        phase: Phase::Starting,
+        ..default()
+    };
+    assert_eq!(current_join_mode(&starting, false, false, true, 0), "none");
+}

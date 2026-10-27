@@ -25,6 +25,8 @@ pub struct RoomSeat {
     pub id: String,
     pub addr: std::net::SocketAddr,
     pub code: String,
+    /// True when this seat watches the current round instead of fighting in it.
+    pub spectate: bool,
 }
 
 #[derive(Debug)]
@@ -83,6 +85,13 @@ pub fn in_match_message(total_secs: u32) -> String {
     let minutes = total_secs / 60;
     let seconds = total_secs % 60;
     format!("房间正在对局，约 {minutes} 分 {seconds} 秒后结束，结束后自动加入。")
+}
+
+/// Watcher seats are full. `retry_after` is still the time until the next lobby.
+pub fn spectate_full_message(total_secs: u32) -> String {
+    let minutes = total_secs / 60;
+    let seconds = total_secs % 60;
+    format!("旁观席已满（4/4）。约 {minutes} 分 {seconds} 秒后结束，结束后自动加入。")
 }
 
 /// Lookups and creates share one rolling minute per client IP.
