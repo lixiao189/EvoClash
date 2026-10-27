@@ -23,6 +23,7 @@ mod menu;
 mod minimap;
 mod perf;
 mod predict;
+mod recover_ui;
 mod render;
 mod results_ui;
 mod session;
@@ -118,6 +119,7 @@ fn main() {
         finale_ui::FinaleUiPlugin,
         results_ui::ResultsUiPlugin,
         lobby_ui::LobbyUiPlugin,
+        recover_ui::RecoverUiPlugin,
         backpack::BackpackPlugin,
         minimap::MinimapPlugin,
         buttons::ButtonsPlugin,

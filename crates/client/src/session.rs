@@ -93,6 +93,9 @@ enum JoinAction {
         notice: String,
         offers: Vec<JoinOffer>,
     },
+    /// 503 `recovering`: wait `secs`, then rejoin the same seat.
+    /// Not a failed attempt, and not a new match.
+    RecoverRetry { notice: String, secs: f32 },
 }
 
 fn offer_join_intent(offer: JoinOffer) -> Option<JoinIntent> {
@@ -119,6 +122,19 @@ fn classify_join_error(
     retry_after: Option<u32>,
     started_retried: bool,
 ) -> JoinAction {
+    // Fast-forward. `retry_after` is seconds; never hammer, and never quick-start away.
+    if error == "recovering" && status == 503 {
+        return JoinAction::RecoverRetry {
+            notice: RECOVERING.to_string(),
+            secs: retry_after.unwrap_or(1).max(1) as f32,
+        };
+    }
+    if error == "abandoned" {
+        return JoinAction::Choose {
+            notice: ABANDONED.to_string(),
+            offers: vec![JoinOffer::QuickStart],
+        };
+    }
     if error == "started" && !started_retried {
         return JoinAction::QuickStartAgain {
             notice: message.to_string(),
@@ -171,6 +187,21 @@ fn classify_join_error(
     }
 }
 
+/// `counted` means the disconnect loop already bumped `attempts` for this reply.
+/// Only that try is refunded: the rejoin timer does not bump, so a later 503 must not either.
+fn attempts_after_reply(attempts: u32, counted: bool, action: &JoinAction) -> u32 {
+    if counted && matches!(action, JoinAction::RecoverRetry { .. }) {
+        attempts.saturating_sub(1)
+    } else {
+        attempts
+    }
+}
+
+/// 403, and 410 other than `closed` / `abandoned`, means the seat is gone.
+fn error_is_gone(status: u16, error: Option<&str>) -> bool {
+    status == 403 || (status == 410 && !matches!(error, Some("closed" | "abandoned")))
+}
+
 struct Joined {
     response: JoinResponse,
     spectate: bool,
@@ -210,21 +241,21 @@ fn post<T: Serialize>(matchmaker: &str, path: &str, request: &T) -> PendingCall 
                 parse_join(&response.bytes).map_err(|e| CallError::Failed(format!("{url}: {e}")))
             }
             Ok(response) => match serde_json::from_slice::<ErrorBody>(&response.bytes) {
-                // Rejoin's 410 `gone` (and a bare 403/410) finds another match. A closed
-                // room is 410 too, but the player has to choose, not be redirected.
-                Ok(body)
-                    if response.status == 403
-                        || (response.status == 410 && body.error != "closed") =>
-                {
-                    Err(CallError::Gone)
+                // 410 `gone` (and a bare 403/410) joins another match.
+                // `closed` and `abandoned` stay here so the player chooses.
+                Ok(body) => {
+                    if error_is_gone(response.status, Some(body.error.as_str())) {
+                        Err(CallError::Gone)
+                    } else {
+                        Err(CallError::Api(ApiError {
+                            status: response.status,
+                            error: body.error,
+                            message: body.message,
+                            retry_after: body.retry_after,
+                        }))
+                    }
                 }
-                Ok(body) => Err(CallError::Api(ApiError {
-                    status: response.status,
-                    error: body.error,
-                    message: body.message,
-                    retry_after: body.retry_after,
-                })),
-                Err(_) if matches!(response.status, 403 | 410) => Err(CallError::Gone),
+                Err(_) if error_is_gone(response.status, None) => Err(CallError::Gone),
                 Err(_) => Err(CallError::Failed(format!(
                     "{url}: {} {}",
                     response.status,
@@ -315,7 +346,18 @@ enum NoticeWait {
     Click,
     /// The notice stays. Only an offer button moves on.
     Hold,
+    /// Rejoin the seated match when the timer hits zero. Does not spend an attempt.
+    Rejoin(f32),
 }
+
+/// Full-screen line while `/v1/rejoin` says the server is still fast-forwarding.
+pub(crate) const RECOVERING: &str = "服务器恢复中…";
+/// 410 `abandoned`: this match was voided. The player picks 快速开始; we do not requeue.
+pub(crate) const ABANDONED: &str = "服务器出错，本局已作废。";
+
+/// True while a rejoin got 503 `recovering`. Cleared when that wait ends any other way.
+#[derive(Resource, Default)]
+pub struct RecoverHold(pub bool);
 
 #[derive(Resource, Default)]
 pub struct Session {
@@ -397,6 +439,8 @@ struct LinkState {
     entity: Option<Entity>,
     since_change: f32,
     attempts: u32,
+    /// The in-flight reconnect already incremented `attempts`.
+    counted: bool,
     ever_connected: bool,
 }
 
@@ -413,10 +457,12 @@ impl Plugin for SessionPlugin {
         app.init_resource::<JoinOffers>();
         app.init_resource::<Depart>();
         app.init_resource::<SpectateJoin>();
+        app.init_resource::<RecoverHold>();
         app.insert_resource(LinkState {
             entity: None,
             since_change: 0.0,
             attempts: 0,
+            counted: false,
             ever_connected: false,
         });
         app.add_systems(Startup, |world: &mut World| {
@@ -485,10 +531,12 @@ fn apply_join_action(
     session: &mut Session,
     notice: &mut JoinNotice,
     offers: &mut JoinOffers,
+    recover: &mut RecoverHold,
     action: JoinAction,
     args: &ClientArgs,
     now: f32,
 ) {
+    recover.0 = matches!(action, JoinAction::RecoverRetry { .. });
     match action {
         JoinAction::QuickStartAgain { notice: text } => {
             session.started_retried = true;
@@ -522,6 +570,11 @@ fn apply_join_action(
             session.wait = NoticeWait::Click;
             notice.0 = text;
             offers.buttons = next;
+        }
+        JoinAction::RecoverRetry { notice: text, secs } => {
+            session.wait = NoticeWait::Rejoin(secs);
+            notice.0 = text;
+            offers.buttons.clear();
         }
     }
 }
@@ -592,6 +645,7 @@ fn watch_connection(
     mut spectating: ResMut<SpectateJoin>,
     args: Res<ClientArgs>,
     mut offers: ResMut<JoinOffers>,
+    mut recover: ResMut<RecoverHold>,
     mut status: ResMut<ConnectionStatus>,
     keys: Option<Res<ButtonInput<KeyCode>>>,
     mouse: Option<Res<ButtonInput<MouseButton>>>,
@@ -624,10 +678,18 @@ fn watch_connection(
         session.pending = None;
         session.pending_since = None;
         session.started_retried = false;
+        link.counted = false;
+        status.status = LinkStatus::Connecting;
+        if recover.0 {
+            // The fast-forward reply never arrived. Same seat again, not a new match.
+            session.wait = NoticeWait::Rejoin(1.0);
+            notice.0 = RECOVERING.to_string();
+            offers.buttons.clear();
+            return;
+        }
         session.wait = NoticeWait::Click;
         notice.0 = "连接超时，请重试。\n点击或按空格重试".to_string();
         offers.buttons = vec![JoinOffer::QuickStart, JoinOffer::ChangeRoom];
-        status.status = LinkStatus::Connecting;
         return;
     }
     if let Some(reply) = session.poll() {
@@ -637,6 +699,8 @@ fn watch_connection(
                     session.create_used = true;
                 }
                 session.intent = JoinIntent::FromArgs;
+                recover.0 = false;
+                link.counted = false;
                 notice.0.clear();
                 offers.buttons.clear();
                 session.wait = NoticeWait::Idle;
@@ -648,6 +712,8 @@ fn watch_connection(
                 warn!("match is gone, joining another one");
                 session.seat = None;
                 spectating.0 = false;
+                recover.0 = false;
+                link.counted = false;
                 session.wait = NoticeWait::Idle;
                 offers.buttons.clear();
                 session.dispatch(&args, now);
@@ -661,13 +727,33 @@ fn watch_connection(
                     err.retry_after,
                     session.started_retried,
                 );
-                apply_join_action(&mut session, &mut notice, &mut offers, action, &args, now);
-                // The player now has buttons to pick from; don't cover them with the overlay.
+                link.attempts = attempts_after_reply(link.attempts, link.counted, &action);
+                link.counted = false;
+                status.attempts = link.attempts;
+                if err.error == "abandoned" {
+                    // Do not keep rejoining a voided match after 快速开始.
+                    session.seat = None;
+                    spectating.0 = false;
+                }
+                apply_join_action(
+                    &mut session,
+                    &mut notice,
+                    &mut offers,
+                    &mut recover,
+                    action,
+                    &args,
+                    now,
+                );
+                // Buttons (or the recover shade) must not sit under the reconnect card.
                 status.status = LinkStatus::Connecting;
                 link.since_change = 0.0;
                 return;
             }
-            Err(CallError::Failed(e)) => Err(e),
+            Err(CallError::Failed(e)) => {
+                // The try already counted. Don't let a later 503 refund it.
+                link.counted = false;
+                Err(e)
+            }
         };
         let failed = seat.and_then(|seat| {
             let entity = spawn_client(&mut commands, &seat, &args)?;
@@ -682,6 +768,7 @@ fn watch_connection(
                     &mut session,
                     &mut notice,
                     &mut offers,
+                    &mut recover,
                     failed_notice(&e),
                     &args,
                     now,
@@ -701,6 +788,8 @@ fn watch_connection(
     // Offer buttons (快速开始 / 创建房间 / 返回首页) cancel a wait without touching the
     // reconnect budget.
     if let Some(offer) = take_join_offer(&offers, &mouse, &offer_buttons) {
+        recover.0 = false;
+        link.counted = false;
         match offer_join_intent(offer) {
             Some(intent) => {
                 session.intent = intent;
@@ -748,6 +837,18 @@ fn watch_connection(
             return;
         }
         NoticeWait::Hold => return,
+        NoticeWait::Rejoin(left) => {
+            // Same seat again. The disconnect loop must not count this.
+            let left = left - time.delta_secs();
+            if left <= 0.0 {
+                session.wait = NoticeWait::Idle;
+                offers.buttons.clear();
+                session.refresh(&args, false, now);
+            } else {
+                session.wait = NoticeWait::Rejoin(left);
+            }
+            return;
+        }
         NoticeWait::Idle => {}
     }
 
@@ -761,12 +862,14 @@ fn watch_connection(
             info!("connection restored");
         }
         link.attempts = 0;
+        link.counted = false;
         link.since_change = 0.0;
         link.ever_connected = true;
         session.started_retried = false;
         session.wait = NoticeWait::Idle;
         session.intent = JoinIntent::FromArgs;
         offers.buttons.clear();
+        recover.0 = false;
         notice.0.clear();
         status.status = LinkStatus::Connected;
         status.attempts = 0;
@@ -793,7 +896,9 @@ fn watch_connection(
         return;
     }
     link.attempts += 1;
+    link.counted = true;
     link.since_change = 0.0;
+    recover.0 = false;
     status.status = LinkStatus::Reconnecting;
     status.attempts = link.attempts;
     warn!("disconnected, reconnecting (attempt {})", link.attempts);
@@ -968,6 +1073,7 @@ mod tests {
                 JoinAction::RetrySame { offers, .. } => offers,
                 JoinAction::Choose { offers, .. } => offers,
                 JoinAction::WaitForPlayer { offers, .. } => offers,
+                JoinAction::RecoverRetry { .. } => Vec::new(),
             };
             assert!(!offers.is_empty(), "{error} left no way out");
             assert!(
@@ -1021,5 +1127,76 @@ mod tests {
 
         let explicit = br#"{"match_id":"m","server_addr":"127.0.0.1:9","cert_digest":"ab","client_id":1,"connect_token":"aa","reconnect_key":"k","spectate":false}"#;
         assert!(!parse_join(explicit).unwrap().spectate);
+    }
+
+    #[test]
+    fn recovering_retries_after_retry_after_without_spending_an_attempt() {
+        let action = classify_join_error("recovering", 503, "ignored", Some(5), false);
+        assert_eq!(
+            action,
+            JoinAction::RecoverRetry {
+                notice: RECOVERING.to_string(),
+                secs: 5.0,
+            }
+        );
+        // The disconnect loop already counted this try. Fast-forward gives it back.
+        let mut attempts = 4;
+        let mut counted = true;
+        attempts += 1;
+        attempts = attempts_after_reply(attempts, counted, &action);
+        counted = false;
+        assert_eq!(attempts, 4);
+        // The rejoin timer does not count, so the next 503 must not refund a real failure.
+        attempts = attempts_after_reply(attempts, counted, &action);
+        assert_eq!(attempts, 4);
+        assert_eq!(attempts_after_reply(0, true, &action), 0);
+
+        let missing = classify_join_error("recovering", 503, "", None, true);
+        assert_eq!(
+            missing,
+            JoinAction::RecoverRetry {
+                notice: RECOVERING.to_string(),
+                secs: 1.0,
+            }
+        );
+        // A plain 503 is still a busy failure and still spends the try.
+        let busy = classify_join_error("busy", 503, "ignored", Some(5), false);
+        assert_eq!(attempts_after_reply(4, true, &busy), 4);
+    }
+
+    #[test]
+    fn abandoned_stays_put_while_gone_and_closed_keep_their_old_paths() {
+        // `true` is CallError::Gone: watch_connection dispatches a new join.
+        assert!(error_is_gone(410, Some("gone")));
+        assert!(error_is_gone(410, None));
+        assert!(error_is_gone(403, Some("gone")));
+        assert!(!error_is_gone(410, Some("closed")));
+        assert!(!error_is_gone(410, Some("abandoned")));
+
+        let abandoned = classify_join_error("abandoned", 410, "ignored", None, false);
+        assert_eq!(
+            abandoned,
+            JoinAction::Choose {
+                notice: ABANDONED.to_string(),
+                offers: vec![JoinOffer::QuickStart],
+            }
+        );
+        // Not an automatic requeue, and not a refunded attempt.
+        assert_eq!(attempts_after_reply(3, true, &abandoned), 3);
+
+        let closed = classify_join_error(
+            "closed",
+            410,
+            "房间已关闭。你可以创建新的私人房间。",
+            None,
+            false,
+        );
+        assert_eq!(
+            closed,
+            JoinAction::Choose {
+                notice: "房间已关闭。你可以创建新的私人房间。".into(),
+                offers: vec![JoinOffer::CreateRoom, JoinOffer::ChangeRoom],
+            }
+        );
     }
 }
