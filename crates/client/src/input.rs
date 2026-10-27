@@ -157,7 +157,7 @@ fn hotbar_keys(
             menu.0 = !menu.0;
         }
     }
-    // 1–4 and the wheel belong to the panels while one is up (including the frame it opens or
+    // 1-4 and the wheel belong to the panels while one is up (including the frame it opens or
     // closes). Tab toggles the evolution panel in its own system, so treat that press the same.
     if panel_was_open || panel_open(open.0, menu.0, evo.0) || keys.just_pressed(KeyCode::Tab) {
         *scrolled = 0.0;
