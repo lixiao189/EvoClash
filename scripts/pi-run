@@ -43,6 +43,7 @@ log=$runs/$session.jsonl
 err=$runs/$session.err
 report=$runs/$session.md
 prompt=$runs/$session.system.md
+pidfile=$runs/$session.pid
 
 # One frontmatter field of the role file.
 front() {
@@ -67,6 +68,10 @@ if [ -n "$model" ]; then
     [[ $model == *:* || -z $thinking ]] || model=$model:$thinking
     args+=(--model "$model")
 fi
+
+# pi renames its process, so pi-status finds a live run through this file, not pgrep.
+echo $$ >|"$pidfile"
+trap 'rm -f "$pidfile"' EXIT
 
 echo "pi-run: $role in $dir, session $session" >&2
 echo "pi-run: log $log" >&2

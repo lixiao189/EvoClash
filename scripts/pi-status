@@ -16,7 +16,7 @@ mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1"; }
 show() {
     local s=$1 log=$runs/$1.jsonl state age calls last
     [ -f "$log" ] || { echo "pi-status: no run '$s'" >&2; return 1; }
-    if pgrep -f -- "--session-id evoclash-$s( |$)" >/dev/null; then
+    if [ -f "$runs/$s.pid" ] && kill -0 "$(cat "$runs/$s.pid")" 2>/dev/null; then
         state=running
     elif [ -s "$runs/$s.md" ]; then
         state="done"
