@@ -10,6 +10,7 @@ use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
 use crate::gameplay::{Outbox, SimSet, respawn};
+use crate::inbox::Inbox;
 use crate::journal::{Injected, Trace};
 
 /// 再生组织 starts this long after the last hit.
@@ -172,7 +173,7 @@ pub fn handle_command(
 #[allow(clippy::type_complexity)]
 pub(crate) fn read_commands(
     state: Query<&MatchState>,
-    mut links: Query<(Entity, &mut MessageReceiver<PlayerCommand>), With<ClientOf>>,
+    mut links: Query<(Entity, &mut Inbox<PlayerCommand>), With<ClientOf>>,
     mut players: Query<(
         &Player,
         Option<&ControlledBy>,
@@ -215,11 +216,11 @@ pub(crate) fn read_commands(
             }
         }
     }
-    for (link, mut receiver) in &mut links {
-        if !receiver.has_messages() {
+    for (link, mut inbox) in &mut links {
+        if inbox.0.is_empty() {
             continue;
         }
-        let cmds: Vec<PlayerCommand> = receiver.receive().collect();
+        let cmds = inbox.take();
         let Some((player, _, mut evo, mut wallet, mut vitals, mut skills, mut life)) = players
             .iter_mut()
             .find(|(_, control, ..)| control.is_some_and(|c| c.owner == link))

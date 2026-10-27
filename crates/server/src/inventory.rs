@@ -11,6 +11,7 @@ use lightyear::prelude::server::ClientOf;
 use lightyear::prelude::*;
 
 use crate::gameplay::{Cooldowns, CurrentInput, Expires, SimSet, spawn_pickup};
+use crate::inbox::Inbox;
 use crate::journal::{Injected, Trace};
 
 const PICKUP_RADIUS: f32 = 46.0;
@@ -56,7 +57,7 @@ fn select_slots(mut players: Query<(&CurrentInput, &mut Selecting, &mut Loadout)
 
 /// Rearranging in the backpack panel arrives as reliable messages on the client's link.
 pub(crate) fn apply_moves(
-    mut links: Query<(Entity, &mut MessageReceiver<InventoryMove>), With<ClientOf>>,
+    mut links: Query<(Entity, &mut Inbox<InventoryMove>), With<ClientOf>>,
     mut players: Query<(&Player, Option<&ControlledBy>, &mut Loadout)>,
     specs: Query<&crate::spectate::SpectatorSession>,
     mut injected: Option<ResMut<Injected>>,
@@ -81,8 +82,8 @@ pub(crate) fn apply_moves(
             loadout.auto_switch();
         }
     }
-    for (link, mut receiver) in &mut links {
-        let moves: Vec<InventoryMove> = receiver.receive().collect();
+    for (link, mut inbox) in &mut links {
+        let moves = inbox.take();
         if moves.is_empty() {
             continue;
         }

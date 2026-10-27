@@ -14,6 +14,7 @@ mod connections;
 mod environment;
 mod evolution;
 mod gameplay;
+mod inbox;
 mod inventory;
 mod journal;
 mod monsters;
@@ -77,6 +78,7 @@ fn main() {
     app.insert_resource(config);
     app.add_plugins((
         connections::ConnectionsPlugin,
+        inbox::InboxPlugin,
         gameplay::GameplayPlugin,
         spectate::SpectatePlugin,
         combat::CombatPlugin,
