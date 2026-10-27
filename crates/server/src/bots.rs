@@ -163,6 +163,7 @@ fn balance_bots(
     mut commands: Commands,
     config: Res<ServerConfig>,
     state: Query<&MatchState>,
+    settings: Query<&RoomSettings>,
     humans: Query<&Human>,
     bots: Query<(Entity, &Player), With<Bot>>,
     mut counter: Local<u64>,
@@ -179,12 +180,19 @@ fn balance_bots(
         }
         *cooldown = 64;
     }
-    let humans = humans.iter().count();
+    let humans_n = humans.iter().filter(|human| !human.left).count();
     let mut bot_count = bots.iter().count();
-    let wanted = config
-        .min_combatants
-        .saturating_sub(humans)
-        .min(config.max_players.saturating_sub(humans));
+    // Fill target comes from the replicated settings, so a lobby change applies on the next tick.
+    // Total combatants = max(target, humans), capped at the room size. `None` spawns nobody.
+    let target = settings
+        .iter()
+        .next()
+        .map(|settings| settings.bots.map(|n| n as usize).unwrap_or(0))
+        .unwrap_or(config.min_combatants);
+    let wanted = target
+        .max(humans_n)
+        .min(config.max_players)
+        .saturating_sub(humans_n);
     let playing = state.iter().any(|s| s.phase == Phase::Playing);
     while bot_count < wanted {
         *counter += 1;

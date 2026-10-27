@@ -39,7 +39,7 @@ ehttp.workspace = true
 base64.workspace = true
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-web-sys = { version = "0.3", features = ["Location", "UrlSearchParams", "Window"] }
+web-sys = { version = "0.3", features = ["Clipboard", "Location", "Navigator", "UrlSearchParams", "Window"] }
 
 [dev-dependencies]
 # Reads and writes PNGs in the LPC bake step and sprite previews (already used by Bevy).

@@ -14,7 +14,7 @@ use lightyear::webtransport::prelude::Identity;
 use lightyear::webtransport::prelude::endpoint::WebTransportEndpoint;
 
 use crate::config::ServerConfig;
-use crate::gameplay::{Outbox, SimSet, spawn_combatant};
+use crate::gameplay::{Outbox, SimSet, SimTick, spawn_combatant};
 use crate::ops::OpsState;
 
 /// A disconnected player's body stays in the arena this long so a flaky
@@ -26,6 +26,10 @@ pub const RECONNECT_GRACE_TICKS: u32 = 64 * 20;
 pub struct Human {
     pub peer: PeerId,
     pub disconnected_ticks: u32,
+    /// Tick they first connected. A reconnect keeps it, so host handoff can pick the oldest.
+    pub joined_at: u32,
+    /// Leave: drop now, don't wait out the reconnect grace.
+    pub left: bool,
 }
 
 impl Human {
@@ -135,6 +139,7 @@ fn on_connected(
     state: Query<&MatchState>,
     config: Res<ServerConfig>,
     ops: Res<OpsState>,
+    tick: Option<Res<SimTick>>,
     mut outbox: ResMut<Outbox>,
     mut commands: Commands,
 ) {
@@ -185,6 +190,8 @@ fn on_connected(
         Human {
             peer,
             disconnected_ticks: 0,
+            joined_at: tick.as_ref().map(|tick| tick.0).unwrap_or(0),
+            left: false,
         },
     ));
 }
@@ -213,6 +220,9 @@ fn track_presence(
     mut outbox: ResMut<Outbox>,
 ) {
     for (entity, mut human, player, control) in &mut humans {
+        if human.left {
+            continue;
+        }
         let online = control.is_some_and(|c| live_links.contains(c.owner));
         if online {
             human.disconnected_ticks = 0;

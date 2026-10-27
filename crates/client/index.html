@@ -20,6 +20,7 @@
     #join input, #join button { box-sizing: border-box; width: 260px; }
     #join input { background: #2a241c; color: inherit; }
     #join button { background: #e0a45a; color: #1b1712; border-color: #e0a45a; cursor: pointer; }
+    #join button.secondary { background: transparent; color: #e0a45a; }
     #join p { margin: 8px 0 0; opacity: .7; font-size: 14px; }
     #join a { color: inherit; font-size: 13px; opacity: .55; }
   </style>
@@ -29,7 +30,9 @@
   <form id="join">
     <h1>EVOCLASH</h1>
     <input name="name" maxlength="16" placeholder="你的名字" required autofocus>
-    <button>进入废土</button>
+    <input name="room" maxlength="8" placeholder="房间码（可选）" autocomplete="off" autocapitalize="characters" spellcheck="false">
+    <button type="submit">进入废土</button>
+    <button type="button" id="create" class="secondary">创建房间</button>
     <p>WASD 移动 · 鼠标瞄准射击 · 空格冲刺 · E 拾取 · Q / 右键投掷<br>1-4 / 滚轮切换 · B 背包 · Tab 进化 · R / T 技能</p>
     <a href="credits.html" target="_blank">美术素材致谢 / Art credits</a>
   </form>
@@ -44,16 +47,34 @@
     canvas.addEventListener("keydown", (event) => {
       if (event.key === "Tab") event.preventDefault();
     });
+    // Quick start is the name alone. A room code joins that room. 创建房间 ignores the code.
+    function enter(create) {
+      const name = form.name.value.trim();
+      if (!name) {
+        form.name.reportValidity();
+        return;
+      }
+      try { localStorage.setItem("evoclash-name", name); } catch {}
+      params.set("name", name);
+      params.delete("room");
+      params.delete("create");
+      if (create) {
+        params.set("create", "1");
+      } else {
+        const room = form.room.value.trim().toUpperCase();
+        if (room) params.set("room", room);
+      }
+      location.search = params.toString();
+    }
     if (!params.get("name")?.trim()) {
       form.style.display = "grid";
       form.name.value = localStorage.getItem("evoclash-name") ?? "";
+      form.room.value = (params.get("room") ?? "").toUpperCase();
       form.addEventListener("submit", (event) => {
         event.preventDefault();
-        const name = form.name.value.trim();
-        try { localStorage.setItem("evoclash-name", name); } catch {}
-        params.set("name", name);
-        location.search = params.toString();
+        enter(false);
       });
+      document.getElementById("create").addEventListener("click", () => enter(true));
     } else {
       canvas.focus();
     }

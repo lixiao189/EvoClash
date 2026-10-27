@@ -35,6 +35,15 @@ pub mod api {
         /// Set when joining one match on purpose. Missing or unknown is a quick start.
         #[serde(default)]
         pub match_id: Option<String>,
+        /// Private room code. Absent is a quick start. Compared case-insensitively.
+        #[serde(default)]
+        pub room: Option<String>,
+    }
+
+    /// `POST /v1/rooms` body. The creator becomes the host.
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct CreateRoomRequest {
+        pub name: String,
     }
 
     #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -48,6 +57,9 @@ pub mod api {
         pub connect_token: String,
         /// Secret that lets this client get a fresh token for the same match after a drop.
         pub reconnect_key: String,
+        /// Set when this seat is a private room. Quick start leaves it empty.
+        #[serde(default)]
+        pub room_code: Option<String>,
     }
 
     #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -78,9 +90,9 @@ pub mod api {
         /// Connected and grace-period humans. `players` is the same count.
         pub humans: u32,
         pub bots: u32,
-        /// Always false until private rooms exist.
+        /// True for a private room. Quick start never reserves these.
         pub is_private: bool,
-        /// Always `None` until private rooms exist.
+        /// Private room code, uppercase. `None` for a public room.
         pub room_code: Option<String>,
         pub room_seed: u64,
         pub match_index: u32,

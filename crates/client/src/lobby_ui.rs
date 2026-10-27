@@ -1,31 +1,59 @@
-//! Lobby chrome and the full-screen Starting / Recovering overlay.
+//! Lobby chrome, private-room controls, and the full-screen Starting / Recovering overlay.
 //!
-//! The host crown is not drawn: the wire has no host id yet. Bots are `Player.bot`.
+//! The host crown is `Textures.host_crown` (11×8 texels at [`PIXEL`]) next to `RoomSettings.host`.
+//! Bots keep `Textures.bot_tag`.
 
 use bevy::prelude::*;
-use evoclash_game::protocol::{MatchState, Phase, Player};
+use bevy::ui::RelativeCursorPosition;
+use evoclash_game::protocol::{
+    CommandChannel, MatchState, Phase, Player, RoomCommand, RoomSettings,
+};
+use lightyear::prelude::{Client, MessageSender};
 
+use crate::buttons::BlocksPointer;
 use crate::hud::GOLD;
+use crate::input::LocalPlayer;
 use crate::render::UiFont;
-use crate::session::JoinNotice;
+use crate::session::{Depart, JoinNotice, JoinOffer, JoinOfferButton, JoinOffers};
 use crate::textures::{PIXEL, Textures};
 
 const TICKS_PER_SEC: u32 = 64;
 const STARTING_SECS: u32 = 3;
 /// Texels of `Textures.bot_tag`; drawn at [`PIXEL`].
 const BOT_TAG_TEXELS: Vec2 = Vec2::new(14.0, 7.0);
+/// Texels of `Textures.host_crown`; drawn at [`PIXEL`].
+const CROWN_TEXELS: Vec2 = Vec2::new(11.0, 8.0);
 
 const TITLE: &str = "等待大厅";
 const PUBLIC_ROOM: &str = "公开房间";
 const PRACTICE: &str = "练习场：不计分、不掉落，开局会重置";
 const RECOVERING: &str = "服务器恢复中…";
+const WAITING_HOST: &str = "等待房主开始";
+const NEED_TWO: &str = "至少需要 2 名玩家";
+
+const NORMAL_BG: Color = Color::srgba(0.12, 0.12, 0.12, 0.85);
+const HOVER_BG: Color = Color::srgba(0.3, 0.28, 0.2, 0.95);
+const DISABLED_BG: Color = Color::srgba(0.08, 0.08, 0.08, 0.55);
+const SELECTED_BG: Color = Color::srgb(0.55, 0.4, 0.12);
+const DIM_SELECTED_BG: Color = Color::srgba(0.45, 0.36, 0.14, 0.75);
 
 pub struct LobbyUiPlugin;
 
 impl Plugin for LobbyUiPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_lobby_ui);
-        app.add_systems(Update, (update_lobby, sync_roster, update_phase_banner));
+        app.add_systems(
+            Update,
+            (
+                layout_lobby,
+                update_lobby,
+                sync_roster,
+                drive_room_controls,
+                update_phase_banner,
+                sync_join_offers,
+            )
+                .chain(),
+        );
     }
 }
 
@@ -40,7 +68,28 @@ fn starting_count(ticks_left: u32) -> u32 {
 }
 
 #[derive(Component)]
-struct LobbyChrome;
+struct LobbyColumn;
+
+#[derive(Component)]
+struct LobbyBody;
+
+#[derive(Component)]
+struct RoomTitle;
+
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+enum Chrome {
+    Leave,
+    Start,
+    Cancel,
+    Bots(u8),
+    Monsters(bool),
+}
+
+#[derive(Component)]
+struct NeedPlayers;
+
+#[derive(Component)]
+struct SettingsPanel;
 
 #[derive(Component, Clone, Copy)]
 enum LobbyLine {
@@ -65,6 +114,72 @@ enum BannerSlot {
     Notice,
 }
 
+struct RoomView {
+    private: bool,
+    host: bool,
+    phase: Option<Phase>,
+    countdown: bool,
+    bots: Option<u8>,
+    monsters: bool,
+    humans: usize,
+    code: String,
+}
+
+impl RoomView {
+    fn read(
+        settings: &Query<&RoomSettings>,
+        state: &Query<&MatchState>,
+        me: &Query<&Player, With<LocalPlayer>>,
+        players: &Query<&Player>,
+    ) -> Self {
+        let settings = settings.iter().next();
+        let state = state.iter().next();
+        let private = settings.is_some_and(|s| s.private_room);
+        let host_id = settings.map(|s| s.host).unwrap_or(0);
+        let host =
+            private && host_id != 0 && me.iter().next().is_some_and(|p| p.client_id == host_id);
+        Self {
+            private,
+            host,
+            phase: state.map(|s| s.phase),
+            countdown: state.is_some_and(|s| s.countdown_active),
+            bots: settings.and_then(|s| s.bots),
+            monsters: settings.is_some_and(|s| s.monsters),
+            humans: players.iter().filter(|p| !p.bot).count(),
+            code: settings.map(|s| s.code.clone()).unwrap_or_default(),
+        }
+    }
+
+    fn lobby(&self) -> bool {
+        self.phase == Some(Phase::Lobby)
+    }
+
+    /// Host may edit only in a private lobby before the countdown.
+    fn editable(&self) -> bool {
+        self.host && self.lobby() && !self.countdown
+    }
+
+    fn show_settings(&self) -> bool {
+        self.private
+            && matches!(
+                self.phase,
+                Some(Phase::Lobby | Phase::Starting | Phase::Playing | Phase::Results)
+            )
+    }
+
+    fn can_start(&self) -> bool {
+        self.host && self.lobby() && !self.countdown && (self.bots.is_some() || self.humans >= 2)
+    }
+
+    fn can_cancel(&self) -> bool {
+        self.host && self.lobby() && self.countdown
+    }
+
+    fn need_two(&self) -> bool {
+        self.host && self.lobby() && !self.countdown && self.bots.is_none() && self.humans < 2
+    }
+}
+
 fn label(font: &UiFont, size: f32, value: &str, color: Color) -> impl Bundle {
     (
         Text::new(value),
@@ -86,14 +201,73 @@ fn line(font: &UiFont, size: f32, kind: LobbyLine, color: Color) -> impl Bundle 
     )
 }
 
-fn spawn_lobby_ui(mut commands: Commands, font: Res<UiFont>, textures: Res<Textures>) {
-    // No host id on the wire yet, so the crown is not drawn. The read keeps the
-    // artist-owned `Textures` field live for the wasm build.
-    let _ = &textures.host_crown;
+fn chrome_button(font: &UiFont, chrome: Chrome, value: &str) -> impl Bundle {
+    (
+        chrome,
+        BlocksPointer,
+        Node {
+            padding: UiRect::axes(Val::Px(10.0), Val::Px(4.0)),
+            border: UiRect::all(Val::Px(1.0)),
+            border_radius: BorderRadius::all(Val::Px(4.0)),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            ..default()
+        },
+        BackgroundColor(DISABLED_BG),
+        BorderColor::all(Color::srgba(1.0, 1.0, 1.0, 0.2)),
+        children![(
+            Text::new(value),
+            font.sized(15.0),
+            TextColor(Color::WHITE),
+            TextShadow::default(),
+        )],
+    )
+}
+
+fn chip_color(enabled: bool, selected: bool, over: bool) -> Color {
+    if !enabled {
+        if selected {
+            DIM_SELECTED_BG
+        } else {
+            DISABLED_BG
+        }
+    } else if selected {
+        SELECTED_BG
+    } else if over {
+        HOVER_BG
+    } else {
+        NORMAL_BG
+    }
+}
+
+fn send_room(senders: &mut Query<&mut MessageSender<RoomCommand>, With<Client>>, cmd: RoomCommand) {
+    for mut sender in senders.iter_mut() {
+        sender.send::<CommandChannel>(cmd.clone());
+    }
+}
+
+fn copy_room_link(code: &str) {
+    #[cfg(target_family = "wasm")]
+    {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let Ok(origin) = window.location().origin() else {
+            return;
+        };
+        let url = format!("{origin}/play/?room={code}");
+        let _ = window.navigator().clipboard().write_text(&url);
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let _ = code;
+    }
+}
+
+fn spawn_lobby_ui(mut commands: Commands, font: Res<UiFont>) {
     commands
         .spawn((
-            LobbyChrome,
-            Visibility::Hidden,
+            LobbyColumn,
             Node {
                 position_type: PositionType::Absolute,
                 top: Val::Px(12.0),
@@ -105,46 +279,121 @@ fn spawn_lobby_ui(mut commands: Commands, font: Res<UiFont>, textures: Res<Textu
             },
         ))
         .with_children(|col| {
-            col.spawn(Node {
-                align_items: AlignItems::Baseline,
-                column_gap: Val::Px(14.0),
-                ..default()
-            })
-            .with_children(|row| {
-                row.spawn(label(&font, 22.0, TITLE, Color::WHITE));
-                row.spawn(label(
-                    &font,
-                    16.0,
-                    PUBLIC_ROOM,
-                    Color::srgba(1.0, 0.9, 0.7, 0.9),
-                ));
-            });
-            col.spawn(line(&font, 18.0, LobbyLine::Humans, Color::WHITE));
-            col.spawn(line(
-                &font,
-                13.0,
-                LobbyLine::Bots,
-                Color::srgba(1.0, 1.0, 1.0, 0.75),
-            ));
-            col.spawn(line(&font, 20.0, LobbyLine::Countdown, GOLD));
-            col.spawn(label(
-                &font,
-                14.0,
-                PRACTICE,
-                Color::srgba(1.0, 0.86, 0.62, 0.9),
-            ));
             col.spawn((
-                RosterRoot,
+                LobbyBody,
                 Node {
-                    margin: UiRect::top(Val::Px(10.0)),
+                    display: Display::None,
                     flex_direction: FlexDirection::Column,
                     align_items: AlignItems::Center,
-                    row_gap: Val::Px(3.0),
-                    max_height: Val::Px(280.0),
-                    overflow: Overflow::clip(),
+                    row_gap: Val::Px(2.0),
                     ..default()
                 },
-            ));
+            ))
+            .with_children(|body| {
+                body.spawn(Node {
+                    align_items: AlignItems::Baseline,
+                    column_gap: Val::Px(14.0),
+                    ..default()
+                })
+                .with_children(|row| {
+                    row.spawn(label(&font, 22.0, TITLE, Color::WHITE));
+                    row.spawn((
+                        RoomTitle,
+                        BlocksPointer,
+                        Text::new(PUBLIC_ROOM),
+                        font.sized(16.0),
+                        TextColor(Color::srgba(1.0, 0.9, 0.7, 0.9)),
+                        TextLayout::justify(Justify::Center),
+                        TextShadow::default(),
+                        Node {
+                            padding: UiRect::axes(Val::Px(4.0), Val::Px(2.0)),
+                            ..default()
+                        },
+                    ));
+                });
+                body.spawn(line(&font, 18.0, LobbyLine::Humans, Color::WHITE));
+                body.spawn(line(
+                    &font,
+                    13.0,
+                    LobbyLine::Bots,
+                    Color::srgba(1.0, 1.0, 1.0, 0.75),
+                ));
+                body.spawn(line(&font, 20.0, LobbyLine::Countdown, GOLD));
+                body.spawn(label(
+                    &font,
+                    14.0,
+                    PRACTICE,
+                    Color::srgba(1.0, 0.86, 0.62, 0.9),
+                ));
+                body.spawn((
+                    RosterRoot,
+                    Node {
+                        margin: UiRect::top(Val::Px(10.0)),
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Center,
+                        row_gap: Val::Px(3.0),
+                        max_height: Val::Px(280.0),
+                        overflow: Overflow::clip(),
+                        ..default()
+                    },
+                ));
+                body.spawn(Node {
+                    margin: UiRect::top(Val::Px(8.0)),
+                    column_gap: Val::Px(8.0),
+                    ..default()
+                })
+                .with_children(|row| {
+                    row.spawn(chrome_button(&font, Chrome::Leave, "离开"));
+                    row.spawn(chrome_button(&font, Chrome::Start, "开始"));
+                    row.spawn(chrome_button(&font, Chrome::Cancel, "取消"));
+                });
+                body.spawn((
+                    NeedPlayers,
+                    Text::new(NEED_TWO),
+                    font.sized(14.0),
+                    TextColor(Color::srgb(1.0, 0.62, 0.45)),
+                    TextShadow::default(),
+                    Node {
+                        display: Display::None,
+                        margin: UiRect::top(Val::Px(2.0)),
+                        ..default()
+                    },
+                ));
+            });
+            col.spawn((
+                SettingsPanel,
+                BlocksPointer,
+                Node {
+                    display: Display::None,
+                    flex_direction: FlexDirection::Row,
+                    flex_wrap: FlexWrap::Wrap,
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(4.0),
+                    row_gap: Val::Px(4.0),
+                    padding: UiRect::all(Val::Px(6.0)),
+                    margin: UiRect::top(Val::Px(8.0)),
+                    border_radius: BorderRadius::all(Val::Px(6.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.35)),
+            ))
+            .with_children(|panel| {
+                panel.spawn(label(
+                    &font,
+                    14.0,
+                    "房间设置",
+                    Color::srgba(1.0, 0.9, 0.7, 0.9),
+                ));
+                panel.spawn(label(&font, 14.0, "机器人", Color::WHITE));
+                panel.spawn(chrome_button(&font, Chrome::Bots(0), "关"));
+                for n in 2..=8 {
+                    panel.spawn(chrome_button(&font, Chrome::Bots(n), &n.to_string()));
+                }
+                panel.spawn(label(&font, 14.0, "怪物", Color::WHITE));
+                panel.spawn(chrome_button(&font, Chrome::Monsters(false), "关"));
+                panel.spawn(chrome_button(&font, Chrome::Monsters(true), "开"));
+            });
         });
 
     commands.spawn((
@@ -168,6 +417,7 @@ fn spawn_lobby_ui(mut commands: Commands, font: Res<UiFont>, textures: Res<Textu
                 width: Val::Percent(100.0),
                 flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
+                row_gap: Val::Px(10.0),
                 ..default()
             },
         ))
@@ -175,7 +425,34 @@ fn spawn_lobby_ui(mut commands: Commands, font: Res<UiFont>, textures: Res<Textu
             col.spawn(banner(&font, 112.0, BannerSlot::Count, None));
             col.spawn(banner(&font, 32.0, BannerSlot::Recover, Some(520.0)));
             col.spawn(banner(&font, 20.0, BannerSlot::Notice, Some(560.0)));
+            col.spawn(Node {
+                column_gap: Val::Px(10.0),
+                ..default()
+            })
+            .with_children(|row| {
+                row.spawn(join_button(&font, JoinOffer::QuickStart, "快速开始"));
+                row.spawn(join_button(&font, JoinOffer::CreateRoom, "创建房间"));
+            });
         });
+}
+
+fn join_button(font: &UiFont, offer: JoinOffer, value: &str) -> impl Bundle {
+    (
+        JoinOfferButton(offer),
+        BlocksPointer,
+        Node {
+            display: Display::None,
+            padding: UiRect::axes(Val::Px(12.0), Val::Px(6.0)),
+            border_radius: BorderRadius::all(Val::Px(4.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgb(0.88, 0.64, 0.35)),
+        children![(
+            Text::new(value),
+            font.sized(16.0),
+            TextColor(Color::srgb(0.11, 0.09, 0.07)),
+        )],
+    )
 }
 
 fn banner(font: &UiFont, size: f32, slot: BannerSlot, width: Option<f32>) -> impl Bundle {
@@ -194,41 +471,130 @@ fn banner(font: &UiFont, size: f32, slot: BannerSlot, width: Option<f32>) -> imp
     )
 }
 
+fn layout_lobby(
+    settings: Query<&RoomSettings>,
+    state: Query<&MatchState>,
+    me: Query<&Player, With<LocalPlayer>>,
+    players: Query<&Player>,
+    mut column: Query<&mut Node, With<LobbyColumn>>,
+    mut body: Query<&mut Node, (With<LobbyBody>, Without<LobbyColumn>)>,
+    mut panel: Query<
+        &mut Node,
+        (
+            With<SettingsPanel>,
+            Without<LobbyColumn>,
+            Without<LobbyBody>,
+        ),
+    >,
+    mut need: Query<
+        &mut Node,
+        (
+            With<NeedPlayers>,
+            Without<LobbyColumn>,
+            Without<LobbyBody>,
+            Without<SettingsPanel>,
+        ),
+    >,
+) {
+    let view = RoomView::read(&settings, &state, &me, &players);
+    // Below the match clock and boss bar; the lobby itself stays at the top.
+    let top = Val::Px(if view.lobby() { 12.0 } else { 148.0 });
+    for mut node in &mut column {
+        if node.top != top {
+            node.top = top;
+        }
+    }
+    let body_display = if view.lobby() {
+        Display::Flex
+    } else {
+        Display::None
+    };
+    for mut node in &mut body {
+        if node.display != body_display {
+            node.display = body_display;
+        }
+    }
+    let settings_display = if view.show_settings() {
+        Display::Flex
+    } else {
+        Display::None
+    };
+    for mut node in &mut panel {
+        if node.display != settings_display {
+            node.display = settings_display;
+        }
+    }
+    let need_display = if view.need_two() {
+        Display::Flex
+    } else {
+        Display::None
+    };
+    for mut node in &mut need {
+        if node.display != need_display {
+            node.display = need_display;
+        }
+    }
+}
+
 fn update_lobby(
+    settings: Query<&RoomSettings>,
     state: Query<&MatchState>,
     players: Query<&Player>,
-    mut chrome: Query<&mut Visibility, With<LobbyChrome>>,
     mut lines: Query<(&LobbyLine, &mut Text, &mut Node)>,
+    mut title: Query<
+        (&mut Text, &mut TextFont, &mut TextColor),
+        (With<RoomTitle>, Without<LobbyLine>),
+    >,
 ) {
-    let current = state.iter().next();
-    let lobby = current.is_some_and(|s| s.phase == Phase::Lobby);
-    let shown = if lobby {
-        Visibility::Inherited
-    } else {
-        Visibility::Hidden
-    };
-    for mut vis in &mut chrome {
-        vis.set_if_neq(shown);
-    }
-    let Some(s) = current.filter(|s| s.phase == Phase::Lobby) else {
+    let Some(s) = state.iter().find(|s| s.phase == Phase::Lobby) else {
         return;
     };
+    let settings = settings.iter().next();
+    let private = settings.is_some_and(|room| room.private_room);
     let humans = players.iter().filter(|p| !p.bot).count();
     let bots = players.iter().filter(|p| p.bot).count();
     let countdown = if s.countdown_active {
         format!("{} 秒后开始", seconds_until_start(s.ticks_left))
+    } else if private {
+        WAITING_HOST.to_string()
     } else {
         String::new()
     };
+    let countdown_on = s.countdown_active || private;
     for (kind, mut text, mut node) in &mut lines {
         let (value, on) = match kind {
             LobbyLine::Humans => (format!("真人 {humans}/8"), true),
             LobbyLine::Bots => (format!("机器人 {bots}"), true),
-            LobbyLine::Countdown => (countdown.clone(), s.countdown_active),
+            LobbyLine::Countdown => (countdown.clone(), countdown_on),
         };
         node.display = if on { Display::Flex } else { Display::None };
         if text.0 != value {
             text.0 = value;
+        }
+    }
+    let (value, size, color) = if private {
+        (
+            settings.map(|room| room.code.clone()).unwrap_or_default(),
+            32.0,
+            GOLD,
+        )
+    } else {
+        (
+            PUBLIC_ROOM.to_string(),
+            16.0,
+            Color::srgba(1.0, 0.9, 0.7, 0.9),
+        )
+    };
+    for (mut text, mut font, mut tint) in &mut title {
+        if text.0 != value {
+            text.0 = value.clone();
+        }
+        let size = FontSize::Px(size);
+        if font.font_size != size {
+            font.font_size = size;
+        }
+        if tint.0 != color {
+            tint.0 = color;
         }
     }
 }
@@ -238,6 +604,7 @@ fn sync_roster(
     font: Res<UiFont>,
     textures: Res<Textures>,
     state: Query<&MatchState>,
+    settings: Query<&RoomSettings>,
     players: Query<&Player>,
     roots: Query<Entity, With<RosterRoot>>,
     existing: Query<Entity, With<RosterRow>>,
@@ -256,12 +623,13 @@ fn sync_roster(
     let Ok(root) = roots.single() else {
         return;
     };
+    let host = settings.iter().next().map(|s| s.host).unwrap_or(0);
     let mut rows: Vec<(bool, String, u64, [f32; 3])> = players
         .iter()
         .map(|p| (p.bot, p.name.clone(), p.client_id, p.color))
         .collect();
     rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
-    let mut sig = String::new();
+    let mut sig = format!("host:{host}\n");
     for (bot, name, id, color) in &rows {
         sig.push_str(&format!("{id}|{bot}|{name}|{color:?}\n"));
     }
@@ -273,8 +641,9 @@ fn sync_roster(
         commands.entity(entity).despawn();
     }
     let tag = textures.bot_tag.clone();
+    let crown = textures.host_crown.clone();
     commands.entity(root).with_children(|parent| {
-        for (bot, name, _, color) in &rows {
+        for (bot, name, id, color) in &rows {
             parent
                 .spawn((
                     RosterRow,
@@ -285,6 +654,19 @@ fn sync_roster(
                     },
                 ))
                 .with_children(|row| {
+                    if host != 0 && *id == host {
+                        row.spawn((
+                            ImageNode {
+                                image: crown.clone(),
+                                ..default()
+                            },
+                            Node {
+                                width: Val::Px(CROWN_TEXELS.x * PIXEL),
+                                height: Val::Px(CROWN_TEXELS.y * PIXEL),
+                                ..default()
+                            },
+                        ));
+                    }
                     row.spawn((
                         Text::new(name.clone()),
                         font.sized(16.0),
@@ -307,6 +689,94 @@ fn sync_roster(
                 });
         }
     });
+}
+
+fn drive_room_controls(
+    mouse: Option<Res<ButtonInput<MouseButton>>>,
+    settings: Query<&RoomSettings>,
+    state: Query<&MatchState>,
+    players: Query<&Player>,
+    me: Query<&Player, With<LocalPlayer>>,
+    titles: Query<(&RelativeCursorPosition, &InheritedVisibility), With<RoomTitle>>,
+    mut chrome: Query<(
+        &Chrome,
+        &RelativeCursorPosition,
+        &InheritedVisibility,
+        &mut Node,
+        &mut BackgroundColor,
+        &mut BorderColor,
+    )>,
+    mut senders: Query<&mut MessageSender<RoomCommand>, With<Client>>,
+    mut depart: ResMut<Depart>,
+) {
+    let view = RoomView::read(&settings, &state, &me, &players);
+    let pressed = mouse.is_some_and(|m| m.just_pressed(MouseButton::Left));
+    let mut hit: Option<Chrome> = None;
+    for (chrome, cursor, vis, mut node, mut bg, mut border) in &mut chrome {
+        let (show, enabled, selected) = match *chrome {
+            Chrome::Leave => (true, view.lobby(), false),
+            Chrome::Start => (view.host, view.can_start(), false),
+            Chrome::Cancel => (view.host, view.can_cancel(), false),
+            Chrome::Bots(0) => (true, view.editable(), view.bots.is_none()),
+            Chrome::Bots(n) => (true, view.editable(), view.bots == Some(n)),
+            Chrome::Monsters(on) => (true, view.editable(), view.monsters == on),
+        };
+        let display = if show { Display::Flex } else { Display::None };
+        if node.display != display {
+            node.display = display;
+        }
+        let over = cursor.cursor_over();
+        let color = chip_color(enabled, selected, over);
+        if bg.0 != color {
+            bg.0 = color;
+        }
+        let edge = if selected {
+            Color::srgb(0.95, 0.78, 0.35)
+        } else {
+            Color::srgba(1.0, 1.0, 1.0, 0.2)
+        };
+        border.set_if_neq(BorderColor::all(edge));
+        if pressed && enabled && show && vis.get() && over {
+            hit = Some(*chrome);
+        }
+    }
+    if let Some(chrome) = hit {
+        let cmd = match chrome {
+            Chrome::Leave => Some(RoomCommand::Leave),
+            Chrome::Start => Some(RoomCommand::Start),
+            Chrome::Cancel => Some(RoomCommand::Cancel),
+            Chrome::Bots(n) => {
+                let bots = (n >= 2).then_some(n);
+                (view.editable() && view.bots != bots).then_some(RoomCommand::SetSettings {
+                    bots,
+                    monsters: view.monsters,
+                })
+            }
+            Chrome::Monsters(on) => {
+                (view.editable() && view.monsters != on).then_some(RoomCommand::SetSettings {
+                    bots: view.bots,
+                    monsters: on,
+                })
+            }
+        };
+        if let Some(cmd) = cmd {
+            let leaving = matches!(cmd, RoomCommand::Leave);
+            send_room(&mut senders, cmd);
+            if leaving {
+                depart.request();
+            }
+        }
+        return;
+    }
+    if pressed
+        && view.private
+        && !view.code.is_empty()
+        && titles
+            .iter()
+            .any(|(cursor, vis)| vis.get() && cursor.cursor_over())
+    {
+        copy_room_link(&view.code);
+    }
 }
 
 fn update_phase_banner(
@@ -356,6 +826,23 @@ fn update_phase_banner(
         node.display = if on { Display::Flex } else { Display::None };
         if text.0 != value {
             text.0 = value;
+        }
+    }
+}
+
+fn sync_join_offers(
+    offers: Res<JoinOffers>,
+    state: Query<&MatchState>,
+    mut buttons: Query<(&JoinOfferButton, &mut Node)>,
+) {
+    let covered = state
+        .iter()
+        .any(|s| matches!(s.phase, Phase::Starting | Phase::Recovering));
+    for (button, mut node) in &mut buttons {
+        let on = !covered && offers.buttons.contains(&button.0);
+        let display = if on { Display::Flex } else { Display::None };
+        if node.display != display {
+            node.display = display;
         }
     }
 }

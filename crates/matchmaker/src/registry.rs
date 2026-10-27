@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 use evoclash_game::api::Heartbeat;
 use serde::Serialize;
 
+use crate::rooms::{self, RoomFailure, RoomSeat};
+
 /// A server that misses heartbeats for this long is considered dead and gets no new players.
 pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(6);
 /// Freshly launched servers get this long to send their first heartbeat.
@@ -120,6 +122,7 @@ impl MatchInfo {
             && self.accepting
             && !self.draining
             && !self.overloaded()
+            && !self.is_private
             && self.join_mode == "lobby"
             && self.free_seats(now) > 0
     }
@@ -143,6 +146,9 @@ fn cmp_time_left(a: Option<u32>, b: Option<u32>) -> std::cmp::Ordering {
 #[derive(Default)]
 pub struct Registry {
     pub matches: HashMap<String, MatchInfo>,
+    /// Room codes whose process is gone, kept so a lookup is "closed" rather than a fresh mint.
+    released: HashMap<String, Instant>,
+    attempts: rooms::Attempts,
 }
 
 impl Registry {
@@ -173,11 +179,13 @@ impl Registry {
         Some((m.id.clone(), m.addr))
     }
 
-    /// A named match. `started` / `starting` only when that match exists and is not a quick start.
+    /// A named public match. `started` / `starting` only when that match exists and is not a quick start.
+    /// A private match id falls through to quick start, which never reserves private rooms.
     pub fn plan_join(&mut self, match_id: Option<&str>) -> JoinPlan {
         let now = Instant::now();
         if let Some(id) = match_id.map(str::trim).filter(|id| !id.is_empty())
             && let Some(m) = self.matches.get_mut(id)
+            && !m.is_private
         {
             if m.joinable(now) {
                 let addr = m.addr;
@@ -239,6 +247,7 @@ impl Registry {
     }
 
     /// Forget matches that stopped heartbeating. Returns their ids.
+    /// A private code is held so the next lookup is "closed", not a new room.
     pub fn reap(&mut self) -> Vec<String> {
         let now = Instant::now();
         let dead: Vec<String> = self
@@ -248,9 +257,168 @@ impl Registry {
             .map(|m| m.id.clone())
             .collect();
         for id in &dead {
-            self.matches.remove(id);
+            self.forget_at(id, now);
         }
         dead
+    }
+
+    /// Drop one match and hold its room code. Missing ids are fine (already reaped).
+    pub fn forget(&mut self, id: &str) {
+        self.forget_at(id, Instant::now());
+    }
+
+    fn forget_at(&mut self, id: &str, now: Instant) {
+        if let Some(m) = self.matches.remove(id)
+            && let Some(code) = m.room_code
+        {
+            self.released.insert(code, now);
+        }
+    }
+
+    fn purge_released(&mut self, now: Instant) {
+        self.released
+            .retain(|_, at| now.duration_since(*at) < rooms::HOLD);
+    }
+
+    fn code_taken(&self, code: &str, now: Instant) -> bool {
+        let held = self
+            .released
+            .get(code)
+            .is_some_and(|at| now.duration_since(*at) < rooms::HOLD);
+        held || self
+            .matches
+            .values()
+            .any(|m| m.room_code.as_deref() == Some(code))
+    }
+
+    fn pick_code(&mut self, now: Instant, mut draw: impl FnMut() -> String) -> Option<String> {
+        self.purge_released(now);
+        for _ in 0..64 {
+            let code = draw();
+            if !self.code_taken(&code, now) {
+                return Some(code);
+            }
+        }
+        None
+    }
+
+    /// A fresh 4-character code, skipping anything in use or released under 10 minutes ago.
+    pub fn mint_code(&mut self) -> Option<String> {
+        let now = Instant::now();
+        self.pick_code(now, rooms::random_code)
+    }
+
+    /// Shared budget for room lookups and creates. A format failure must not call this.
+    pub fn allow_ip(&mut self, ip: &str, now: Instant) -> bool {
+        self.attempts.allow(ip, now)
+    }
+
+    /// Join a private room by code. Does not fall through to quick start.
+    pub fn lookup_room(
+        &mut self,
+        raw: &str,
+        ip: &str,
+        now: Instant,
+    ) -> Result<RoomSeat, RoomFailure> {
+        let Some(code) = rooms::normalize(raw) else {
+            return Err(RoomFailure::new(400, "bad_code", rooms::BAD_CODE, None));
+        };
+        if !self.attempts.allow(ip, now) {
+            return Err(RoomFailure::rate());
+        }
+        self.purge_released(now);
+        let found = self
+            .matches
+            .iter()
+            .find(|(_, m)| m.room_code.as_deref() == Some(code.as_str()))
+            .map(|(id, m)| {
+                (
+                    id.clone(),
+                    m.addr,
+                    m.phase.clone(),
+                    m.phase_left_secs,
+                    m.join_mode.clone(),
+                    m.humans,
+                    m.healthy(now),
+                    m.accepting,
+                    m.draining,
+                    m.overloaded(),
+                )
+            });
+        let Some((
+            id,
+            addr,
+            phase,
+            left,
+            join_mode,
+            humans,
+            healthy,
+            accepting,
+            draining,
+            overloaded,
+        )) = found
+        else {
+            return Err(if self.released.contains_key(&code) {
+                RoomFailure::new(410, "closed", rooms::CLOSED, None)
+            } else {
+                RoomFailure::new(404, "not_found", rooms::not_found_message(&code), None)
+            });
+        };
+        if phase == "playing" {
+            let retry_after = left.unwrap_or(0).saturating_add(rooms::RESULTS_SECS);
+            return Err(RoomFailure::new(
+                409,
+                "in_match",
+                rooms::in_match_message(retry_after),
+                Some(retry_after),
+            ));
+        }
+        if phase == "results" {
+            let retry_after = left.unwrap_or(0);
+            return Err(RoomFailure::new(
+                409,
+                "results",
+                rooms::RESULTS,
+                Some(retry_after),
+            ));
+        }
+        // Host already started: lobby countdown or the 3s Starting phase.
+        let countdown =
+            phase == "starting" || (phase == "lobby" && left.is_some() && join_mode != "lobby");
+        if countdown {
+            return Err(RoomFailure::new(
+                409,
+                "starting",
+                rooms::STARTING,
+                Some(left.unwrap_or(0)),
+            ));
+        }
+        if humans >= 8 {
+            return Err(RoomFailure::new(409, "full", rooms::FULL, None));
+        }
+        if healthy
+            && accepting
+            && !draining
+            && !overloaded
+            && join_mode == "lobby"
+            && phase == "lobby"
+        {
+            let m = self.matches.get_mut(&id).expect("match");
+            if m.free_seats(now) == 0 {
+                return Err(RoomFailure::new(409, "full", rooms::FULL, None));
+            }
+            m.reservations.push(now);
+            return Ok(RoomSeat { id, addr, code });
+        }
+        if !healthy {
+            return Err(RoomFailure::new(410, "closed", rooms::CLOSED, None));
+        }
+        Err(RoomFailure::new(
+            503,
+            "busy",
+            "服务器繁忙，请稍后再试。",
+            None,
+        ))
     }
 
     pub fn views(&mut self) -> Vec<MatchView> {
@@ -429,6 +597,153 @@ mod tests {
         assert!(
             reg.heartbeat(&beat("a", 0)),
             "heartbeat reply asks to drain"
+        );
+    }
+
+    fn private_room(id: &str, code: &str, humans: u32) -> Heartbeat {
+        let mut beat = beat(id, humans);
+        beat.max_players = 8;
+        beat.humans = humans;
+        beat.is_private = true;
+        beat.room_code = Some(code.into());
+        beat
+    }
+
+    #[test]
+    fn minted_codes_are_four_alphabet_chars() {
+        assert_eq!(rooms::ALPHABET.chars().count(), 29);
+        assert!(!"0O1ILUV".chars().any(|c| rooms::ALPHABET.contains(c)));
+        let mut reg = Registry::default();
+        let now = Instant::now();
+        for _ in 0..32 {
+            let code = reg.mint_code().expect("code");
+            assert_eq!(code.chars().count(), 4, "{code}");
+            assert!(code.chars().all(|c| rooms::ALPHABET.contains(c)), "{code}");
+            reg.released.insert(code, now);
+        }
+        // A held code is skipped; the next draw is used.
+        reg.released.insert("AAAA".into(), now);
+        let mut draws = 0;
+        let code = reg.pick_code(now, || {
+            draws += 1;
+            if draws == 1 {
+                "AAAA".into()
+            } else {
+                "BBBB".into()
+            }
+        });
+        assert_eq!(code.as_deref(), Some("BBBB"));
+    }
+
+    #[test]
+    fn quick_start_never_returns_a_private_match() {
+        let mut reg = Registry::default();
+        reg.heartbeat(&private_room("priv", "ABCD", 3));
+        assert!(reg.reserve_seat().is_none());
+        assert!(matches!(reg.plan_join(Some("priv")), JoinPlan::Quick));
+        reg.heartbeat(&beat("pub", 0));
+        assert_eq!(reg.reserve_seat().unwrap().0, "pub");
+    }
+
+    #[test]
+    fn bad_code_is_400_and_does_not_count_as_a_lookup() {
+        let mut reg = Registry::default();
+        let now = Instant::now();
+        for raw in ["no", "ABC0", "ab1d", "!!!!", ""] {
+            let err = reg.lookup_room(raw, "9.9.9.9", now).unwrap_err();
+            assert_eq!(err.status, 400, "{raw}");
+            assert_eq!(err.error, "bad_code");
+            assert_eq!(err.message, rooms::BAD_CODE);
+        }
+        for _ in 0..11 {
+            assert_eq!(
+                reg.lookup_room("nope", "9.9.9.9", now).unwrap_err().status,
+                400
+            );
+        }
+        let err = reg.lookup_room("ZZZZ", "9.9.9.9", now).unwrap_err();
+        assert_eq!(err.status, 404, "format failures are not lookups");
+    }
+
+    #[test]
+    fn missing_room_is_404_and_closed_room_is_410() {
+        let mut reg = Registry::default();
+        let now = Instant::now();
+        let err = reg.lookup_room("abcd", "1.1.1.1", now).unwrap_err();
+        assert_eq!(err.status, 404);
+        assert_eq!(err.error, "not_found");
+        assert_eq!(
+            err.message,
+            "找不到房间 ABCD，请检查房间码，或让房主重新发送链接。"
+        );
+        reg.heartbeat(&private_room("priv", "WXYZ", 0));
+        reg.forget("priv");
+        let err = reg
+            .lookup_room("wxyz", "1.1.1.2", Instant::now())
+            .unwrap_err();
+        assert_eq!(err.status, 410);
+        assert_eq!(err.error, "closed");
+        assert_eq!(err.message, rooms::CLOSED);
+        assert!(reg.code_taken("WXYZ", Instant::now()));
+        let later = Instant::now() + rooms::HOLD;
+        let err = reg.lookup_room("wxyz", "1.1.1.3", later).unwrap_err();
+        assert_eq!(err.status, 404, "a code can be new again after 10 minutes");
+    }
+
+    #[test]
+    fn full_private_room_is_409() {
+        let mut reg = Registry::default();
+        let mut room = private_room("priv", "ABCD", 8);
+        room.accepting = false;
+        room.join_mode = "none".into();
+        room.phase_left_secs = None;
+        reg.heartbeat(&room);
+        let err = reg
+            .lookup_room("ABCD", "1.1.1.1", Instant::now())
+            .unwrap_err();
+        assert_eq!(err.status, 409);
+        assert_eq!(err.error, "full");
+        assert_eq!(err.message, rooms::FULL);
+    }
+
+    #[test]
+    fn playing_private_room_is_in_match_with_results_padding() {
+        let mut reg = Registry::default();
+        let mut room = private_room("priv", "ABCD", 2);
+        room.phase = "playing".into();
+        room.join_mode = "none".into();
+        room.phase_left_secs = Some(100);
+        reg.heartbeat(&room);
+        let err = reg
+            .lookup_room("abcd", "1.1.1.1", Instant::now())
+            .unwrap_err();
+        assert_eq!(err.status, 409);
+        assert_eq!(err.error, "in_match");
+        assert_eq!(err.retry_after, Some(100 + rooms::RESULTS_SECS));
+        assert_eq!(
+            err.message,
+            "房间正在对局，约 1 分 52 秒后结束，结束后自动加入。"
+        );
+    }
+
+    #[test]
+    fn eleventh_lookup_from_one_ip_is_429() {
+        let mut reg = Registry::default();
+        let now = Instant::now();
+        for _ in 0..10 {
+            assert_eq!(
+                reg.lookup_room("ZZZZ", "8.8.8.8", now).unwrap_err().status,
+                404
+            );
+        }
+        let err = reg.lookup_room("YYYY", "8.8.8.8", now).unwrap_err();
+        assert_eq!(err.status, 429);
+        assert_eq!(err.error, "rate");
+        assert_eq!(err.message, rooms::RATE);
+        assert_eq!(
+            reg.lookup_room("ZZZZ", "7.7.7.7", now).unwrap_err().status,
+            404,
+            "another IP still has its own budget"
         );
     }
 }

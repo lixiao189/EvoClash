@@ -454,6 +454,28 @@ pub struct MatchState {
     pub boss_eta: u32,
 }
 
+/// Lobby settings for this room. One replicated entity, visible to everyone.
+/// `bots` is `None` when fill is off, or `Some(2..=8)` for the combatant target.
+#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Reflect, Default)]
+pub struct RoomSettings {
+    pub bots: Option<u8>,
+    pub monsters: bool,
+    /// Host `client_id`. 0 when the room has no host.
+    pub host: u64,
+    pub private_room: bool,
+    /// Uppercase room code. Empty on a public room.
+    pub code: String,
+}
+
+/// Host (and Leave) commands on the ordered reliable command channel.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub enum RoomCommand {
+    SetSettings { bots: Option<u8>, monsters: bool },
+    Start,
+    Cancel,
+    Leave,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum GameEvent {
     Kill {
@@ -558,6 +580,7 @@ impl Plugin for ProtocolPlugin {
         app.component::<Puddle>().replicate();
         app.component::<Prop>().replicate();
         app.component::<MatchState>().replicate();
+        app.component::<RoomSettings>().replicate();
 
         app.register_message::<GameEvent>()
             .add_direction(NetworkDirection::ServerToClient);
@@ -577,6 +600,8 @@ impl Plugin for ProtocolPlugin {
         // Death prep (scrap, shop, respec, deploy).
         app.component::<Wallet>().replicate();
         app.register_message::<PlayerCommand>()
+            .add_direction(NetworkDirection::ClientToServer);
+        app.register_message::<RoomCommand>()
             .add_direction(NetworkDirection::ClientToServer);
         app.add_channel::<CommandChannel>(ChannelSettings {
             mode: ChannelMode::OrderedReliable(ReliableSettings::default()),

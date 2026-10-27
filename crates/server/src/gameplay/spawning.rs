@@ -59,7 +59,11 @@ pub fn spawn_pickup(commands: &mut Commands, item: Item, pos: Vec2, ttl: Option<
     entity.id()
 }
 
-pub(super) fn spawn_match_state(mut commands: Commands, arena: Res<Arena>) {
+pub(super) fn spawn_match_state(
+    mut commands: Commands,
+    arena: Res<Arena>,
+    config: Res<ServerConfig>,
+) {
     commands.spawn((
         Name::new("Match"),
         MatchState {
@@ -72,6 +76,7 @@ pub(super) fn spawn_match_state(mut commands: Commands, arena: Res<Arena>) {
             map_seed: arena.seed,
             boss_eta: 0,
         },
+        super::room::settings_from_config(&config),
         Replicate::to_clients(NetworkTarget::All),
     ));
 }

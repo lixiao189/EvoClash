@@ -26,6 +26,7 @@ use crate::skills::HiddenFrom;
 mod damage;
 mod flow;
 mod movement;
+mod room;
 mod spawning;
 #[cfg(test)]
 mod tests;
@@ -33,6 +34,7 @@ mod tests;
 pub use damage::*;
 pub use flow::*;
 pub use movement::*;
+use room::{maintain_host, private_idle_cap, read_room_commands};
 pub use spawning::*;
 
 pub const TICKS_PER_SEC: u32 = 64;
@@ -44,8 +46,13 @@ pub const RESULTS_TICKS: u32 = 12 * TICKS_PER_SEC;
 /// Quick start stops once fewer than this many ticks remain until Playing
 /// (lobby time left plus the 3s Starting). Exactly 8s still accepts.
 pub const JOIN_CUTOFF_TICKS: u32 = 8 * TICKS_PER_SEC;
+/// Lobby portion of a private room's 5s start. The last 3s are `Phase::Starting`.
+pub const PRIVATE_LOBBY_COUNTDOWN_TICKS: u32 = 2 * TICKS_PER_SEC;
 const EMPTY_LOBBY_TICKS: u32 = 30 * TICKS_PER_SEC;
+const PRIVATE_EMPTY_LOBBY_TICKS: u32 = 120 * TICKS_PER_SEC;
 const EMPTY_MATCH_TICKS: u32 = 10 * TICKS_PER_SEC;
+const PRIVATE_IDLE_WARN_TICKS: u32 = 28 * 60 * TICKS_PER_SEC;
+const PRIVATE_IDLE_CLOSE_TICKS: u32 = 30 * 60 * TICKS_PER_SEC;
 /// Lobby deaths stand back up after this, with no death bag.
 pub(super) const LOBBY_RESPAWN_TICKS: u16 = (2 * TICKS_PER_SEC) as u16;
 const FIRST_VAULT_TICKS: u32 = 60 * TICKS_PER_SEC;
@@ -105,6 +112,7 @@ impl Plugin for GameplayPlugin {
             (
                 advance_tick.in_set(SimSet::Input).before(read_human_inputs),
                 read_human_inputs.in_set(SimSet::Input),
+                read_room_commands.in_set(SimSet::Input),
                 (
                     drop_shield_on_attack,
                     movement,
@@ -121,7 +129,9 @@ impl Plugin for GameplayPlugin {
                     match_flow,
                     reset_match,
                     place_starters,
+                    maintain_host,
                     empty_close,
+                    private_idle_cap,
                     flush_outbox,
                 )
                     .chain()
@@ -182,6 +192,25 @@ pub fn lobby_open(state: &MatchState) -> bool {
     state.phase == Phase::Lobby
         && (!state.countdown_active
             || state.ticks_left.saturating_add(STARTING_TICKS) >= JOIN_CUTOFF_TICKS)
+}
+
+/// What the heartbeat should advertise. Private rooms close the moment the host starts;
+/// public rooms stay open until the last 8s, which `lobby_open` already encodes.
+pub fn current_join_mode(state: &MatchState, private_room: bool, accepting: bool) -> &'static str {
+    if !accepting {
+        return "none";
+    }
+    if private_room {
+        if state.phase == Phase::Lobby && !state.countdown_active {
+            "lobby"
+        } else {
+            "none"
+        }
+    } else if lobby_open(state) {
+        "lobby"
+    } else {
+        "none"
+    }
 }
 
 pub fn phase_name(phase: Phase) -> &'static str {

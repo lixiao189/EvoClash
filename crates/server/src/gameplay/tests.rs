@@ -342,3 +342,121 @@ fn lobby_kill_does_not_score_or_drop_a_bag() {
         .count();
     assert_eq!(bags, 0, "lobby deaths leave no bag");
 }
+
+fn private_settings(host: u64) -> RoomSettings {
+    RoomSettings {
+        bots: Some(6),
+        monsters: true,
+        host,
+        private_room: true,
+        code: "ABCD".into(),
+    }
+}
+
+#[test]
+fn non_host_room_command_does_not_change_settings() {
+    let mut state = MatchState {
+        phase: Phase::Lobby,
+        ..default()
+    };
+    let mut settings = private_settings(1);
+    let effect = room::apply_room_command(
+        &RoomCommand::SetSettings {
+            bots: None,
+            monsters: false,
+        },
+        2,
+        &mut state,
+        &mut settings,
+        2,
+    );
+    assert_eq!(effect, room::RoomEffect::Ignore);
+    assert_eq!(settings.bots, Some(6));
+    assert!(settings.monsters);
+    let effect = room::apply_room_command(
+        &RoomCommand::SetSettings {
+            bots: Some(4),
+            monsters: false,
+        },
+        1,
+        &mut state,
+        &mut settings,
+        2,
+    );
+    assert_eq!(effect, room::RoomEffect::Updated);
+    assert_eq!(settings.bots, Some(4));
+    assert!(!settings.monsters);
+}
+
+#[test]
+fn set_settings_during_countdown_is_ignored() {
+    let mut state = MatchState {
+        phase: Phase::Lobby,
+        countdown_active: true,
+        ticks_left: PRIVATE_LOBBY_COUNTDOWN_TICKS,
+        ..default()
+    };
+    let mut settings = private_settings(1);
+    let effect = room::apply_room_command(
+        &RoomCommand::SetSettings {
+            bots: Some(2),
+            monsters: false,
+        },
+        1,
+        &mut state,
+        &mut settings,
+        2,
+    );
+    assert_eq!(effect, room::RoomEffect::Ignore);
+    assert_eq!(settings.bots, Some(6));
+    assert!(settings.monsters);
+    assert!(state.countdown_active);
+}
+
+#[test]
+fn cancel_during_starting_is_ignored() {
+    let mut state = MatchState {
+        phase: Phase::Starting,
+        countdown_active: false,
+        ticks_left: STARTING_TICKS,
+        ..default()
+    };
+    let mut settings = private_settings(1);
+    let effect = room::apply_room_command(&RoomCommand::Cancel, 1, &mut state, &mut settings, 2);
+    assert_eq!(effect, room::RoomEffect::Ignore);
+    assert_eq!(state.phase, Phase::Starting);
+    assert_eq!(state.ticks_left, STARTING_TICKS);
+}
+
+#[test]
+fn host_leave_transfers_to_the_longest_present_human() {
+    let humans = [
+        room::PresentHuman {
+            client_id: 1,
+            name: "host".into(),
+            joined_at: 10,
+            connected: true,
+        },
+        room::PresentHuman {
+            client_id: 2,
+            name: "early".into(),
+            joined_at: 20,
+            connected: true,
+        },
+        room::PresentHuman {
+            client_id: 3,
+            name: "late".into(),
+            joined_at: 50,
+            connected: true,
+        },
+        room::PresentHuman {
+            client_id: 4,
+            name: "ghost".into(),
+            joined_at: 1,
+            connected: false,
+        },
+    ];
+    let (id, name) = room::next_host(&humans, Some(1)).expect("successor");
+    assert_eq!(id, 2);
+    assert_eq!(name, "early");
+}

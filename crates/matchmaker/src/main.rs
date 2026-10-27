@@ -16,20 +16,23 @@
 
 mod fleet;
 mod registry;
+mod rooms;
 mod tokens;
 
+use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use axum::extract::{Path, State};
+use axum::extract::{ConnectInfo, FromRequestParts, Path, State};
+use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use evoclash_game::api::{Heartbeat, JoinRequest, JoinResponse, RejoinRequest};
+use evoclash_game::api::{CreateRoomRequest, Heartbeat, JoinRequest, JoinResponse, RejoinRequest};
 use evoclash_game::net;
 use serde_json::json;
 use tower_http::services::ServeDir;
@@ -105,6 +108,7 @@ async fn issue(
     addr: SocketAddr,
     client_id: u64,
     name: &str,
+    room_code: Option<String>,
 ) -> Response {
     let Some(cert_digest) = cert_digest(state, &match_id).await else {
         return error(StatusCode::SERVICE_UNAVAILABLE, "busy", BUSY);
@@ -117,6 +121,7 @@ async fn issue(
             cert_digest,
             client_id,
             connect_token,
+            room_code,
         })
         .into_response(),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal", e),
@@ -134,15 +139,52 @@ fn launch(registry: &mut Registry, fleet: &Fleet) -> Result<(String, SocketAddr)
     Ok((id, addr))
 }
 
-async fn join(State(state): State<Shared>, Json(request): Json<JoinRequest>) -> Response {
-    let name: String = request
-        .name
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(16)
-        .collect();
+/// Socket address when the listener recorded one. Missing (tests, odd proxies) still rate-limits.
+struct ClientIp(String);
+
+impl<S> FromRequestParts<S> for ClientIp
+where
+    S: Send + Sync,
+{
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let ip = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0.ip().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        Ok(ClientIp(ip))
+    }
+}
+
+fn sanitize_name(name: &str) -> String {
+    name.chars().filter(|c| !c.is_control()).take(16).collect()
+}
+
+fn room_error(fail: rooms::RoomFailure) -> Response {
+    let status = StatusCode::from_u16(fail.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    match fail.retry_after {
+        Some(retry_after) => error_retry(status, fail.error, fail.message, retry_after),
+        None => error(status, fail.error, fail.message),
+    }
+}
+
+fn new_client_id() -> u64 {
+    rand::random_range(1..u64::MAX - (1 << 32))
+}
+
+async fn join(
+    State(state): State<Shared>,
+    ip: ClientIp,
+    Json(request): Json<JoinRequest>,
+) -> Response {
+    if request.room.is_some() {
+        return join_private(state, ip.0, request).await;
+    }
+    let name = sanitize_name(&request.name);
     // Ids below the bot range, never zero.
-    let client_id = rand::random_range(1..u64::MAX - (1 << 32));
+    let client_id = new_client_id();
 
     enum Seat {
         Ready(String, SocketAddr),
@@ -179,13 +221,88 @@ async fn join(State(state): State<Shared>, Json(request): Json<JoinRequest>) -> 
         Seat::Ready(match_id, addr) => {
             println!("{name} ({client_id}) → {match_id}");
             state.joins.fetch_add(1, Ordering::Relaxed);
-            issue(&state, match_id, addr, client_id, &name).await
+            issue(&state, match_id, addr, client_id, &name, None).await
         }
         Seat::Deny(response) => {
             state.join_failures.fetch_add(1, Ordering::Relaxed);
             response
         }
         Seat::Busy => {
+            state.join_failures.fetch_add(1, Ordering::Relaxed);
+            error(StatusCode::SERVICE_UNAVAILABLE, "busy", BUSY)
+        }
+    }
+}
+
+async fn join_private(state: Shared, ip: String, request: JoinRequest) -> Response {
+    let name = sanitize_name(&request.name);
+    let raw = request.room.unwrap_or_default();
+    let client_id = new_client_id();
+    let seat = {
+        let mut registry = state.registry.lock().expect("registry lock");
+        registry.lookup_room(&raw, &ip, Instant::now())
+    };
+    match seat {
+        Ok(seat) => {
+            println!("{} ({client_id}) → {} room {}", name, seat.id, seat.code);
+            state.joins.fetch_add(1, Ordering::Relaxed);
+            issue(
+                &state,
+                seat.id,
+                seat.addr,
+                client_id,
+                &name,
+                Some(seat.code),
+            )
+            .await
+        }
+        Err(fail) => {
+            state.join_failures.fetch_add(1, Ordering::Relaxed);
+            room_error(fail)
+        }
+    }
+}
+
+async fn create_room(
+    State(state): State<Shared>,
+    ip: ClientIp,
+    Json(request): Json<CreateRoomRequest>,
+) -> Response {
+    let name = sanitize_name(&request.name);
+    let client_id = new_client_id();
+    let launched = {
+        let mut registry = state.registry.lock().expect("registry lock");
+        if !registry.allow_ip(&ip.0, Instant::now()) {
+            return room_error(rooms::RoomFailure::rate());
+        }
+        let Some(fleet) = &state.fleet else {
+            return error(StatusCode::SERVICE_UNAVAILABLE, "busy", BUSY);
+        };
+        let Some(code) = registry.mint_code() else {
+            return error(StatusCode::SERVICE_UNAVAILABLE, "busy", BUSY);
+        };
+        let room_seed = rand::random::<u64>();
+        match fleet.launch_room(&registry.used_addrs(), room_seed, Some(&code)) {
+            Ok((id, addr)) => {
+                println!("launched private room {code} as {id} at {addr}");
+                let mut info = MatchInfo::new(id.clone(), addr, fleet.config.max_players);
+                info.is_private = true;
+                info.room_code = Some(code.clone());
+                info.room_seed = room_seed;
+                registry.matches.insert(id.clone(), info);
+                registry.reserve_in(&id);
+                Some((id, addr, code))
+            }
+            Err(_) => None,
+        }
+    };
+    match launched {
+        Some((id, addr, code)) => {
+            println!("{name} ({client_id}) creates {id} room {code}");
+            state.joins.fetch_add(1, Ordering::Relaxed);
+            issue(&state, id, addr, client_id, &name, Some(code)).await
+        }
+        None => {
             state.join_failures.fetch_add(1, Ordering::Relaxed);
             error(StatusCode::SERVICE_UNAVAILABLE, "busy", BUSY)
         }
@@ -201,7 +318,7 @@ async fn rejoin(State(state): State<Shared>, Json(request): Json<RejoinRequest>)
     ) {
         return error(StatusCode::FORBIDDEN, "forbidden", "bad reconnect key");
     }
-    let addr = {
+    let found = {
         let mut registry = state.registry.lock().expect("registry lock");
         let healthy = registry
             .matches
@@ -210,12 +327,28 @@ async fn rejoin(State(state): State<Shared>, Json(request): Json<RejoinRequest>)
         if !healthy {
             return error(StatusCode::GONE, "gone", "match is over or unreachable");
         }
-        registry.reserve_in(&request.match_id)
+        let room_code = registry
+            .matches
+            .get(&request.match_id)
+            .and_then(|m| m.room_code.clone());
+        registry
+            .reserve_in(&request.match_id)
+            .map(|addr| (addr, room_code))
     };
     state.rejoins.fetch_add(1, Ordering::Relaxed);
-    match addr {
+    match found {
         // The server knows the name from the original token; the body is kept on its side.
-        Some(addr) => issue(&state, request.match_id, addr, request.client_id, "").await,
+        Some((addr, room_code)) => {
+            issue(
+                &state,
+                request.match_id,
+                addr,
+                request.client_id,
+                "",
+                room_code,
+            )
+            .await
+        }
         None => error(StatusCode::GONE, "gone", "match not found"),
     }
 }
@@ -345,12 +478,7 @@ async fn janitor(state: Shared) {
         if let Some(fleet) = &state.fleet {
             for (id, code) in fleet.reap() {
                 println!("match {id} exited ({code:?})");
-                state
-                    .registry
-                    .lock()
-                    .expect("registry lock")
-                    .matches
-                    .remove(&id);
+                state.registry.lock().expect("registry lock").forget(&id);
             }
             let mut registry = state.registry.lock().expect("registry lock");
             for _ in registry.idle_matches()..state.warm_matches {
@@ -514,6 +642,7 @@ async fn main() {
     let mut app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/v1/join", post(join))
+        .route("/v1/rooms", post(create_room))
         .route("/v1/rejoin", post(rejoin))
         .route("/v1/servers/heartbeat", post(heartbeat))
         .route("/metrics", get(metrics))
@@ -534,11 +663,14 @@ async fn main() {
         .await
         .unwrap_or_else(|e| panic!("bind {}: {e}", args.listen));
     println!("matchmaker listening on http://{}", args.listen);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            shutdown_signal().await;
-            println!("shutting down; running matches keep going and will be re-adopted");
-        })
-        .await
-        .expect("server error");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        shutdown_signal().await;
+        println!("shutting down; running matches keep going and will be re-adopted");
+    })
+    .await
+    .expect("server error");
 }

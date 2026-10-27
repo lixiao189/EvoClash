@@ -44,8 +44,18 @@ impl Fleet {
         self.children.lock().map(|c| c.len()).unwrap_or(0)
     }
 
-    /// Start a new match server on the first free port.
+    /// Start a public match server on the first free port.
     pub fn launch(&self, used: &[SocketAddr]) -> Result<(String, SocketAddr), String> {
+        self.launch_room(used, rand::random(), None)
+    }
+
+    /// `room_code` set means a private room: `--private --room-code CODE --bots 6`, monsters on.
+    pub fn launch_room(
+        &self,
+        used: &[SocketAddr],
+        room_seed: u64,
+        room_code: Option<&str>,
+    ) -> Result<(String, SocketAddr), String> {
         let mut children = self.children.lock().map_err(|_| "fleet lock poisoned")?;
         if children.len() >= self.config.max_matches {
             return Err("fleet at capacity".into());
@@ -63,7 +73,12 @@ impl Fleet {
             .ok_or("no free ports")?;
         let addr = SocketAddr::new(self.config.public_host, port);
         let id = format!("m{port}-{:06x}", rand::random::<u32>() & 0xff_ffff);
-        let room_seed: u64 = rand::random();
+        // Private rooms always start at 6 bots. The host can change that in the lobby.
+        let bots = if room_code.is_some() {
+            6
+        } else {
+            self.config.bots
+        };
 
         std::fs::create_dir_all(&self.config.log_dir).map_err(|e| format!("log dir: {e}"))?;
         let log = std::fs::File::create(self.config.log_dir.join(format!("{id}.log")))
@@ -79,7 +94,7 @@ impl Fleet {
             .arg("--max-players")
             .arg(self.config.max_players.to_string())
             .arg("--bots")
-            .arg(self.config.bots.to_string())
+            .arg(bots.to_string())
             .arg("--matchmaker")
             .arg(self.config.matchmaker_urls.join(","))
             .arg("--room-seed")
@@ -89,6 +104,9 @@ impl Fleet {
             .stderr(log)
             // Matches outlive a matchmaker restart; the new instance re-adopts them via heartbeats.
             .kill_on_drop(false);
+        if let Some(code) = room_code {
+            command.arg("--private").arg("--room-code").arg(code);
+        }
         if let Ok(key) = std::env::var(KEY_ENV) {
             command.env(KEY_ENV, key);
         }
