@@ -13,7 +13,9 @@ use evoclash_game::protocol::{CommandChannel, MatchState, Phase, Vitals};
 use evoclash_game::shop::{PlayerCommand, Wallet, can_deploy};
 use lightyear::prelude::{Client, MessageSender};
 
+use crate::connect_ui::{ConnectionStatus, LinkStatus};
 use crate::input::LocalPlayer;
+use crate::menu::MenuOpen;
 use crate::perf::{EvoSelectSent, Instant, SlowWarn};
 
 pub struct ButtonsPlugin;
@@ -120,7 +122,7 @@ fn enable_buttons(
                     PlayerCommand::Buy(item) => dead && wallet.can_buy(*item, evo),
                     PlayerCommand::Unbuy(item) => dead && wallet.cart.contains(item),
                     PlayerCommand::Deploy => dead && can_deploy(vitals.respawn_in),
-                    PlayerCommand::DeployLast => dead,
+                    PlayerCommand::DeployLast => dead && can_deploy(vitals.respawn_in),
                 },
                 Act::Unbuy(i) => dead && *i < wallet.cart.len(),
             };
@@ -149,6 +151,8 @@ fn style_buttons(
 
 fn click_buttons(
     mut select_sent: ResMut<EvoSelectSent>,
+    menu: Res<MenuOpen>,
+    link: Res<ConnectionStatus>,
     mouse: Option<Res<ButtonInput<MouseButton>>>,
     state: Query<&MatchState>,
     me: Query<&Wallet, With<LocalPlayer>>,
@@ -156,6 +160,9 @@ fn click_buttons(
     mut senders: Query<&mut MessageSender<PlayerCommand>, With<Client>>,
 ) {
     let _probe = SlowWarn::new("click_buttons");
+    if menu.0 || matches!(link.status, LinkStatus::Reconnecting | LinkStatus::Failed) {
+        return;
+    }
     if !state.iter().any(|s| s.phase == Phase::Playing) {
         return;
     }

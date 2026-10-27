@@ -18,6 +18,7 @@ use crate::buttons::BlocksPointer;
 use crate::effects::{Banner, BossBar, KillFeed};
 use crate::evo_panel::EvoPanelOpen;
 use crate::input::{LocalPlayer, Selection};
+use crate::menu::MenuOpen;
 use crate::perf::SlowWarn;
 use crate::render::UiFont;
 use crate::session::{Depart, JoinNotice};
@@ -265,8 +266,6 @@ fn spawn_hud(mut commands: Commands, font: Res<UiFont>) {
 
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 enum ResultsButton {
-    /// Staying for the next round is already the default.
-    Again,
     Leave,
 }
 
@@ -289,7 +288,8 @@ fn results_button(font: &UiFont, kind: ResultsButton, value: &str) -> impl Bundl
     )
 }
 
-/// Under the winner line. 再来一局 does not send; 离开 asks the server to drop us.
+/// Under the winner line. Staying for the next round is automatic; 离开 asks the server to
+/// drop us and returns to the name page.
 fn spawn_results_bar(commands: &mut Commands, font: &UiFont) {
     commands
         .spawn((
@@ -300,12 +300,18 @@ fn spawn_results_bar(commands: &mut Commands, font: &UiFont) {
                 top: Val::Percent(50.0),
                 width: Val::Percent(100.0),
                 justify_content: JustifyContent::Center,
-                column_gap: Val::Px(12.0),
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(16.0),
                 ..default()
             },
         ))
         .with_children(|row| {
-            row.spawn(results_button(font, ResultsButton::Again, "再来一局"));
+            row.spawn((
+                Text::new("留在房间即可进入下一局"),
+                font.sized(15.0),
+                TextColor(Color::srgba(1.0, 1.0, 1.0, 0.78)),
+                TextShadow::default(),
+            ));
             row.spawn(results_button(font, ResultsButton::Leave, "离开"));
         });
 }
@@ -340,6 +346,7 @@ fn update_results_bar(
 }
 
 fn click_results_bar(
+    menu: Res<MenuOpen>,
     mouse: Option<Res<ButtonInput<MouseButton>>>,
     state: Query<&MatchState>,
     buttons: Query<(
@@ -350,6 +357,9 @@ fn click_results_bar(
     mut senders: Query<&mut MessageSender<RoomCommand>, With<Client>>,
     mut depart: ResMut<Depart>,
 ) {
+    if menu.0 {
+        return;
+    }
     if !state.iter().any(|s| s.phase == Phase::Results) {
         return;
     }
@@ -553,7 +563,7 @@ fn spawn_bottom_center(commands: &mut Commands, font: &UiFont) {
                     row.spawn((
                         EvoUi::Slot(slot),
                         Node {
-                            width: Val::Px(136.0),
+                            width: Val::Px(146.0),
                             height: Val::Px(42.0),
                             padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
                             border: UiRect::all(Val::Px(2.0)),
@@ -780,7 +790,7 @@ fn update_evolution_hud(
                         (
                             format!(
                                 "[{key}] {name}
-未解锁 · 还需 {left} 次进化"
+未解锁 · 还需 {left} 点"
                             ),
                             LOCKED,
                         )

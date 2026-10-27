@@ -13,8 +13,13 @@
   <style>
     html, body { margin: 0; height: 100%; overflow: hidden; background: #1b1712; color: #e8dcc4;
       font: 16px system-ui, "PingFang SC", "Microsoft YaHei", sans-serif; }
-    #game { display: block; width: 100%; height: 100%; outline: none; }
-    #join { position: fixed; inset: 0; display: none; place-content: center; justify-items: center; gap: 12px; text-align: center; }
+    #game { display: block; width: 100%; height: 100%; outline: none; cursor: none; }
+    /* Covers the page before the wasm bundle finishes compiling; the Bevy cover takes over. */
+    #boot { position: fixed; inset: 0; z-index: 2; display: grid; place-content: center; justify-items: center;
+      gap: 10px; background: #1b1712; text-align: center; }
+    #boot .title { font-size: 44px; letter-spacing: 6px; color: #e0a45a; }
+    #boot .sub { font-size: 15px; opacity: .7; }
+    #join { position: fixed; inset: 0; z-index: 3; display: none; place-content: center; justify-items: center; gap: 12px; text-align: center; }
     #join h1 { margin: 0 0 8px; font-size: 40px; letter-spacing: 4px; color: #e0a45a; }
     #join input, #join button { font: inherit; padding: 10px 14px; border-radius: 6px; border: 1px solid #6b5a43; }
     #join input, #join button { box-sizing: border-box; width: 260px; }
@@ -23,14 +28,26 @@
     #join button.secondary { background: transparent; color: #e0a45a; }
     #join p { margin: 8px 0 0; opacity: .7; font-size: 14px; }
     #join a { color: inherit; font-size: 13px; opacity: .55; }
+    #nojs { position: fixed; inset: 0; z-index: 4; display: grid; place-content: center; justify-items: center;
+      gap: 8px; background: #1b1712; text-align: center; line-height: 1.7; }
   </style>
 </head>
 <body>
   <canvas id="game" tabindex="0"></canvas>
+  <div id="boot">
+    <div class="title">EVOCLASH</div>
+    <div class="sub">正在加载…</div>
+  </div>
+  <noscript>
+    <div id="nojs">
+      <strong>EvoClash 需要启用 JavaScript 才能运行。</strong>
+      <span>请在浏览器设置中允许 JavaScript，然后刷新页面。</span>
+    </div>
+  </noscript>
   <form id="join">
     <h1>EVOCLASH</h1>
     <input name="name" maxlength="16" placeholder="你的名字" required autofocus>
-    <input name="room" maxlength="8" placeholder="房间码（可选）" autocomplete="off" autocapitalize="characters" spellcheck="false">
+    <input name="room" maxlength="4" placeholder="房间码（可选）" autocomplete="off" autocapitalize="characters" spellcheck="false">
     <button type="submit">进入废土</button>
     <button type="button" id="create" class="secondary">创建房间</button>
     <p>WASD 移动 · 鼠标瞄准射击 · 空格冲刺 · E 拾取 · Q / 右键投掷<br>1-4 / 滚轮切换 · B 背包 · Tab 进化 · R / T 技能</p>
@@ -41,6 +58,7 @@
     const params = new URLSearchParams(location.search);
     const form = document.getElementById("join");
     const canvas = document.getElementById("game");
+    const boot = document.getElementById("boot");
     // Right click throws; keep the browser menu out of the way.
     canvas.addEventListener("contextmenu", (event) => event.preventDefault());
     // Tab opens the evolution panel; don't let it move focus off the game.
@@ -68,6 +86,8 @@
     }
     if (!params.get("name")?.trim()) {
       form.style.display = "grid";
+      // The form has its own title; the loading splash only covers the wasm boot.
+      boot.style.display = "none";
       form.name.value = localStorage.getItem("evoclash-name") ?? "";
       form.room.value = (params.get("room") ?? "").toUpperCase();
       form.addEventListener("submit", (event) => {
