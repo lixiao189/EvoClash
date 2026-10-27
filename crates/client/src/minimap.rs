@@ -1,5 +1,5 @@
 //! Minimap in the top-left corner: the layout painted once per match, with live markers for
-//! you, bounty targets (and anyone a trap gave away) and the vault.
+//! you, bounty targets (and anyone a trap gave away), the vault, and a finale leader blip.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::ImageSampler;
@@ -22,7 +22,7 @@ pub struct MinimapPlugin;
 impl Plugin for MinimapPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_minimap);
-        app.add_systems(Update, (repaint, place_markers).chain());
+        app.add_systems(Update, (repaint, place_markers, leader_marker).chain());
     }
 }
 
@@ -36,6 +36,34 @@ enum Marker {
     Bounty(usize),
     /// The behemoth, while it is out.
     Boss,
+}
+
+/// Finale blip of whoever is first. A square, so it is not the round gold bounty dot
+/// or the round boss dot. Shown even when that combatant is the local player.
+#[derive(Component)]
+struct LeaderMarker;
+
+const LEADER_SIZE: f32 = 10.0;
+/// How long one leader blip stays up after its `tick` changes.
+const LEADER_FLASH_SECS: f32 = 3.0;
+
+/// Opacity of a leader blip `age` seconds after the flash tick changed.
+/// `None` once the blip should hide. While visible it fades out and pulses.
+pub(crate) fn leader_flash_alpha(age: f32) -> Option<f32> {
+    if !age.is_finite() || age < 0.0 || age >= LEADER_FLASH_SECS {
+        return None;
+    }
+    let fade = 1.0 - age / LEADER_FLASH_SECS;
+    let pulse = 0.55 + 0.45 * (age * std::f32::consts::TAU).cos().abs();
+    Some(fade * pulse)
+}
+
+fn map_point(p: Vec2, size: f32) -> (f32, f32) {
+    let half = size * 0.5;
+    (
+        (p.x + ARENA_HALF.x) * SCALE - half,
+        (ARENA_HALF.y - p.y) * SCALE - half,
+    )
 }
 
 const BOUNTY_MARKERS: usize = 4;
@@ -86,6 +114,19 @@ fn spawn_minimap(mut commands: Commands) {
             }
             map.spawn((Marker::Boss, dot(11.0, Color::srgb(1.0, 0.25, 0.12))));
             map.spawn((Marker::Me, dot(7.0, Color::WHITE)));
+            map.spawn((
+                LeaderMarker,
+                Node {
+                    position_type: PositionType::Absolute,
+                    width: Val::Px(LEADER_SIZE),
+                    height: Val::Px(LEADER_SIZE),
+                    border: UiRect::all(Val::Px(1.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgb(0.95, 0.08, 0.1)),
+                BorderColor::all(Color::srgb(1.0, 0.82, 0.75)),
+                Visibility::Hidden,
+            ));
         });
 }
 
@@ -205,5 +246,105 @@ fn place_markers(
         node.left = Val::Px(left);
         node.top = Val::Px(top);
         visibility.set_if_neq(Visibility::Inherited);
+    }
+}
+
+#[derive(Default)]
+struct FlashSeen {
+    /// False until the match entity has been seen once. That first sample is not a new flash.
+    primed: bool,
+    blipped: Option<u32>,
+}
+
+struct LeaderBlip {
+    pos: Vec2,
+    started: f32,
+}
+
+fn leader_marker(
+    time: Res<Time>,
+    state: Query<(&MatchState, &LeaderPing)>,
+    mut marker: Query<
+        (
+            &mut Node,
+            &mut Visibility,
+            &mut BackgroundColor,
+            &mut BorderColor,
+        ),
+        With<LeaderMarker>,
+    >,
+    mut seen: Local<FlashSeen>,
+    mut blip: Local<Option<LeaderBlip>>,
+) {
+    let now = time.elapsed_secs();
+    match state.iter().next() {
+        None => {
+            *seen = FlashSeen::default();
+            *blip = None;
+        }
+        Some((_, ping)) if !seen.primed => {
+            seen.primed = true;
+            seen.blipped = ping.latest.map(|flash| flash.tick);
+            *blip = None;
+        }
+        Some((match_state, ping)) => {
+            if match_state.finale() {
+                if let Some(flash) = ping.latest
+                    && seen.blipped != Some(flash.tick)
+                {
+                    seen.blipped = Some(flash.tick);
+                    *blip = Some(LeaderBlip {
+                        pos: flash.pos,
+                        started: now,
+                    });
+                }
+            } else {
+                *blip = None;
+            }
+        }
+    }
+    let show = blip
+        .as_ref()
+        .and_then(|blip| leader_flash_alpha(now - blip.started));
+    let pos = blip.as_ref().map(|blip| blip.pos);
+    if show.is_none() {
+        *blip = None;
+    }
+    for (mut node, mut visibility, mut background, mut border) in &mut marker {
+        let Some(alpha) = show else {
+            visibility.set_if_neq(Visibility::Hidden);
+            continue;
+        };
+        if let Some(pos) = pos {
+            let (left, top) = map_point(pos, LEADER_SIZE);
+            node.left = Val::Px(left);
+            node.top = Val::Px(top);
+        }
+        background.0 = Color::srgb(0.95, 0.08, 0.1).with_alpha(alpha);
+        *border = BorderColor::all(Color::srgb(1.0, 0.82, 0.75).with_alpha(alpha));
+        visibility.set_if_neq(Visibility::Inherited);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn leader_flash_lasts_three_seconds_then_fades_out() {
+        assert_eq!(LEADER_FLASH_SECS, 3.0);
+        assert_eq!(leader_flash_alpha(0.0), Some(1.0));
+        assert!(leader_flash_alpha(-0.001).is_none());
+        assert!(leader_flash_alpha(LEADER_FLASH_SECS).is_none());
+        assert!(leader_flash_alpha(LEADER_FLASH_SECS + 0.5).is_none());
+        assert!(leader_flash_alpha(f32::NAN).is_none());
+        assert!(leader_flash_alpha(f32::INFINITY).is_none());
+        for age in [0.0, 0.25, 0.8, 1.5, 2.2, 2.99] {
+            let alpha = leader_flash_alpha(age).unwrap();
+            let fade = 1.0 - age / LEADER_FLASH_SECS;
+            assert!(alpha > 0.0 && alpha <= fade + 1e-5, "{age} -> {alpha}");
+            assert!(alpha + 1e-5 >= fade * 0.55, "{age} -> {alpha}");
+        }
+        assert!(leader_flash_alpha(2.8).unwrap() < leader_flash_alpha(0.2).unwrap());
     }
 }

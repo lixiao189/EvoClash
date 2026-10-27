@@ -68,15 +68,15 @@ struct ResultsPaused;
 
 /// Sort key shared with the server: score, kills, deaths, earlier final score, client id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct RankKey {
-    score: u32,
-    kills: u32,
-    deaths: u32,
-    last_score_tick: u32,
-    client_id: u64,
+pub(crate) struct RankKey {
+    pub(crate) score: u32,
+    pub(crate) kills: u32,
+    pub(crate) deaths: u32,
+    pub(crate) last_score_tick: u32,
+    pub(crate) client_id: u64,
 }
 
-fn cmp_rank(a: RankKey, b: RankKey) -> Ordering {
+pub(crate) fn cmp_rank(a: RankKey, b: RankKey) -> Ordering {
     b.score
         .cmp(&a.score)
         .then(b.kills.cmp(&a.kills))

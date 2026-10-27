@@ -13,6 +13,7 @@ mod connect_ui;
 mod death_screen;
 mod effects;
 mod evo_panel;
+mod finale_ui;
 mod hud;
 mod input;
 mod loading_ui;
@@ -113,6 +114,7 @@ fn main() {
     app.add_plugins((
         effects::EffectsPlugin,
         hud::HudPlugin,
+        finale_ui::FinaleUiPlugin,
         results_ui::ResultsUiPlugin,
         lobby_ui::LobbyUiPlugin,
         backpack::BackpackPlugin,

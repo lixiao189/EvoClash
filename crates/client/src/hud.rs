@@ -826,11 +826,18 @@ fn update_hud(
                     Phase::Lobby | Phase::Starting | Phase::Recovering | Phase::Results => {
                         String::new()
                     }
-                    Phase::Playing => format!(
-                        "剩余 {}    地堡开启 {}",
-                        fmt_time(s.ticks_left),
-                        fmt_time(s.vault_in)
-                    ),
+                    Phase::Playing => {
+                        color.0 = if s.finale() {
+                            Color::srgb(1.0, 0.22, 0.18)
+                        } else {
+                            Color::WHITE
+                        };
+                        format!(
+                            "剩余 {}    地堡开启 {}",
+                            fmt_time(s.ticks_left),
+                            fmt_time(s.vault_in)
+                        )
+                    }
                 },
                 None => String::new(),
             },
