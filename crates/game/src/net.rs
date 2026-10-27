@@ -3,7 +3,7 @@
 use core::time::Duration;
 
 /// Bump when the wire protocol changes so stale clients are rejected at handshake.
-pub const PROTOCOL_ID: u64 = 0x4556_4f43_0000_0011;
+pub const PROTOCOL_ID: u64 = 0x4556_4f43_0000_0012;
 
 /// Simulation rate. 64 Hz keeps input-to-action latency around 16 ms on the server.
 pub const TICK_HZ: f64 = 64.0;

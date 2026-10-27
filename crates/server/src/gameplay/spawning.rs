@@ -91,6 +91,7 @@ pub(super) fn spawn_match_state(
         super::room::settings_from_config(&config),
         Departed::default(),
         LeaderPing::default(),
+        RoomBoard::default(),
         Replicate::to_clients(NetworkTarget::All),
     ));
 }
