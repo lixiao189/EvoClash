@@ -435,24 +435,45 @@ fn resolve_turret_damage(
 /// `STEALTH_SIGHT` (they keep the last state they saw, without updates).
 fn stealth_visibility(
     mut commands: Commands,
-    mut sneaks: Query<(Entity, &Pos, &Vitals, &mut HiddenFrom)>,
+    mut sneaks: Query<(Entity, &Player, &Pos, &Vitals, &mut HiddenFrom)>,
     viewers: Query<(Entity, &Pos, &ControlledBy), With<Human>>,
+    bodies: Query<(&Player, &Pos)>,
+    specs: Query<(&crate::spectate::SpectatorSession, &Spectator)>,
 ) {
-    for (entity, pos, vitals, mut hidden) in &mut sneaks {
+    for (entity, player, pos, vitals, mut hidden) in &mut sneaks {
         let settled =
             Skill::Stealth.duration().saturating_sub(vitals.stealth) >= STEALTH_HIDE_DELAY;
         let mut want: Vec<Entity> = if vitals.alive && vitals.stealth > 0 && settled {
-            viewers
+            let mut links: Vec<Entity> = viewers
                 .iter()
                 .filter(|(viewer, viewer_pos, _)| {
                     *viewer != entity && !visible(vitals, pos.0, viewer_pos.0)
                 })
                 .map(|(_, _, control)| control.owner)
-                .collect()
+                .collect();
+            // A watcher sees with the followed combatant's eyes, including this sneak.
+            for (session, spec) in &specs {
+                if session.disconnected_ticks != 0 || spec.following == 0 {
+                    continue;
+                }
+                if spec.following == player.client_id || session.link == Entity::PLACEHOLDER {
+                    continue;
+                }
+                let Some(eye) = bodies.iter().find_map(|(body, body_pos)| {
+                    (body.client_id == spec.following).then_some(body_pos.0)
+                }) else {
+                    continue;
+                };
+                if !visible(vitals, pos.0, eye) {
+                    links.push(session.link);
+                }
+            }
+            links
         } else {
             Vec::new()
         };
         want.sort();
+        want.dedup();
         if want == hidden.0 {
             continue;
         }

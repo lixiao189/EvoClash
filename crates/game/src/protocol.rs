@@ -507,6 +507,18 @@ pub struct LeaderFlash {
 /// Every room fields this many combatants: humans first, bots fill the rest.
 pub const ROOM_COMBATANTS: u8 = 8;
 
+/// Connections that watch a match and never take a combat seat.
+pub const MAX_SPECTATORS: u8 = 4;
+
+/// Replicated only to the watching client (the entity's `Replicate` target is that peer).
+/// `following` is a combatant's `client_id`, or 0 when the arena has nobody to follow.
+/// `queue_pos` is this watcher's 1-based place in arrival order. 0 is unused.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Reflect, Default)]
+pub struct Spectator {
+    pub following: u64,
+    pub queue_pos: u8,
+}
+
 /// Lobby settings for this room. One replicated entity, visible to everyone.
 /// `bots` is always `Some(ROOM_COMBATANTS)` in production; tests may override it.
 #[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Reflect, Default)]
@@ -540,6 +552,10 @@ pub enum RoomCommand {
     /// Host only, in Results or Lobby, before the countdown is running.
     /// Clears `RoomSettings::auto_paused`. The held lobby still waits for `Start`.
     ResumeAutoStart,
+    /// Spectator only. Cycle to the next combatant in final-rank order (wraps).
+    SpectateNext,
+    /// Spectator only. Cycle to the previous combatant in final-rank order (wraps).
+    SpectatePrev,
 }
 
 /// One human who left during Playing. Shown on the results screen, not ranked.
@@ -681,6 +697,7 @@ impl Plugin for ProtocolPlugin {
         app.component::<LeaderPing>().replicate();
         app.component::<RoomSettings>().replicate();
         app.component::<Departed>().replicate();
+        app.component::<Spectator>().replicate();
 
         app.register_message::<GameEvent>()
             .add_direction(NetworkDirection::ServerToClient);

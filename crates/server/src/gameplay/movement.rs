@@ -20,12 +20,17 @@ pub fn read_human_inputs(
         With<Human>,
     >,
     delays: Query<&InterpolationDelay>,
+    specs: Query<&crate::spectate::SpectatorSession>,
     mut injected: Option<ResMut<Injected>>,
 ) {
     let scripted = injected
         .as_mut()
         .map(|injected| std::mem::take(&mut injected.inputs))
         .unwrap_or_default();
+    let scripted: Vec<_> = scripted
+        .into_iter()
+        .filter(|(id, _)| !crate::spectate::is_spectator(&specs, *id))
+        .collect();
     for (mut current, mut rewind, human, player, action, control) in &mut humans {
         if !human.connected() {
             // Disconnected bodies stand still instead of replaying the last held keys.

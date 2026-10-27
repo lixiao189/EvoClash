@@ -164,7 +164,8 @@ impl Plugin for BotsPlugin {
             FixedUpdate,
             (rebuild_nav, seed_match_once, balance_bots, prepare, think)
                 .chain()
-                .in_set(SimSet::Input),
+                .in_set(SimSet::Input)
+                .in_set(crate::spectate::SeatSet::Bots),
         );
     }
 }
@@ -176,11 +177,11 @@ fn rebuild_nav(mut commands: Commands, arena: Res<Arena>, nav: Option<Res<Nav>>)
     }
 }
 
-/// Unit tests insert this so bots are not replicated. A match process never does.
+/// Unit tests insert this so a spawned body is not replicated. A match process never does.
 #[derive(Resource)]
-struct PlainBots;
+pub(crate) struct PlainBots;
 
-fn balance_bots(
+pub(crate) fn balance_bots(
     mut commands: Commands,
     config: Res<ServerConfig>,
     state: Query<&MatchState>,

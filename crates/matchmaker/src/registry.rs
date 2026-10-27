@@ -476,6 +476,7 @@ mod tests {
             phase_left_secs: None,
             humans: players,
             bots: 0,
+            spectators: 0,
             is_private: false,
             room_code: None,
             room_seed: 1,

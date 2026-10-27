@@ -55,9 +55,10 @@ fn select_slots(mut players: Query<(&CurrentInput, &mut Selecting, &mut Loadout)
 }
 
 /// Rearranging in the backpack panel arrives as reliable messages on the client's link.
-fn apply_moves(
+pub(crate) fn apply_moves(
     mut links: Query<(Entity, &mut MessageReceiver<InventoryMove>), With<ClientOf>>,
     mut players: Query<(&Player, Option<&ControlledBy>, &mut Loadout)>,
+    specs: Query<&crate::spectate::SpectatorSession>,
     mut injected: Option<ResMut<Injected>>,
     mut trace: Option<ResMut<Trace>>,
 ) {
@@ -66,6 +67,9 @@ fn apply_moves(
         for (id, m) in moves {
             if let Some(trace) = trace.as_mut() {
                 trace.push(format!("inv {id} {} {}", m.from, m.to));
+            }
+            if crate::spectate::is_spectator(&specs, id) {
+                continue;
             }
             let Some((_, _, mut loadout)) = players
                 .iter_mut()

@@ -40,7 +40,8 @@ pub use flow::*;
 pub(crate) use idle::Idle;
 use idle::watch_idle;
 pub use movement::*;
-use room::{maintain_host, private_idle_cap, read_room_commands};
+pub(crate) use room::read_room_commands;
+use room::{maintain_host, private_idle_cap};
 pub use spawning::*;
 
 pub const TICKS_PER_SEC: u32 = 64;

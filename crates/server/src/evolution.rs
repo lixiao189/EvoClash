@@ -170,7 +170,7 @@ pub fn handle_command(
 
 /// Commands from each client link, applied to the body it controls.
 #[allow(clippy::type_complexity)]
-fn read_commands(
+pub(crate) fn read_commands(
     state: Query<&MatchState>,
     mut links: Query<(Entity, &mut MessageReceiver<PlayerCommand>), With<ClientOf>>,
     mut players: Query<(
@@ -182,6 +182,7 @@ fn read_commands(
         &mut SkillState,
         &mut LifeLog,
     )>,
+    specs: Query<&crate::spectate::SpectatorSession>,
     mut injected: Option<ResMut<Injected>>,
     mut trace: Option<ResMut<Trace>>,
 ) {
@@ -191,6 +192,10 @@ fn read_commands(
         for (id, cmd) in cmds {
             if let Some(trace) = trace.as_mut() {
                 trace.push(format!("cmd {id} {}", crate::journal::fmt_command(&cmd)));
+            }
+            // Watchers have no body. A logged command for one must not land on anyone else.
+            if crate::spectate::is_spectator(&specs, id) {
+                continue;
             }
             let Some((_, _, mut evo, mut wallet, mut vitals, mut skills, mut life)) = players
                 .iter_mut()

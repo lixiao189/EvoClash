@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::journal::{Injected, Trace, fmt_room};
+use crate::spectate::{SpectateInbox, SpectatorSession};
 
 /// Someone still in the room, for picking the next host.
 #[derive(Clone, Debug)]
@@ -112,6 +113,7 @@ pub fn apply_room_command(
             // Cleared during Results, the next begin_lobby auto-starts on its own.
             RoomEffect::Updated
         }
+        RoomCommand::SpectateNext | RoomCommand::SpectatePrev => RoomEffect::Ignore,
     }
 }
 
@@ -135,7 +137,27 @@ pub(super) fn next_host(humans: &[PresentHuman], leaving: Option<u64>) -> Option
     best.map(|(_, id, name)| (id, name))
 }
 
-pub(super) fn read_room_commands(
+/// Camera commands, and Leave from a watcher, never touch the room. Returns true when the
+/// command was consumed here.
+fn forward_spectate(
+    inbox: &mut Option<ResMut<SpectateInbox>>,
+    specs: &Query<&SpectatorSession>,
+    client_id: u64,
+    cmd: &RoomCommand,
+) -> bool {
+    let is_spec = specs.iter().any(|session| session.client_id == client_id);
+    let camera = matches!(cmd, RoomCommand::SpectateNext | RoomCommand::SpectatePrev);
+    let leave = matches!(cmd, RoomCommand::Leave) && is_spec;
+    if !camera && !leave {
+        return false;
+    }
+    if is_spec && let Some(inbox) = inbox.as_mut() {
+        inbox.commands.push((client_id, cmd.clone()));
+    }
+    true
+}
+
+pub(crate) fn read_room_commands(
     mut commands: Commands,
     mut links: Query<(Entity, &mut MessageReceiver<RoomCommand>), With<ClientOf>>,
     mut humans: Query<(
@@ -152,6 +174,8 @@ pub(super) fn read_room_commands(
     mut outbox: ResMut<Outbox>,
     mut injected: Option<ResMut<Injected>>,
     mut trace: Option<ResMut<Trace>>,
+    specs: Query<&SpectatorSession>,
+    mut spectate_inbox: Option<ResMut<SpectateInbox>>,
 ) {
     let Ok(mut state) = states.single_mut() else {
         return;
@@ -174,6 +198,9 @@ pub(super) fn read_room_commands(
     for (client_id, cmd) in scripted {
         if let Some(trace) = trace.as_mut() {
             trace.push(format!("room {client_id} {}", fmt_room(&cmd)));
+        }
+        if forward_spectate(&mut spectate_inbox, &specs, client_id, &cmd) {
+            continue;
         }
         let Some((entity, name, link, snap)) =
             humans
@@ -207,6 +234,10 @@ pub(super) fn read_room_commands(
         }
     }
     for (link, cmds) in inbox {
+        let spec_id = specs
+            .iter()
+            .find(|session| session.link == link)
+            .map(|session| session.client_id);
         let Some((entity, client_id, name, snap)) =
             humans
                 .iter()
@@ -221,6 +252,14 @@ pub(super) fn read_room_commands(
                     })
                 })
         else {
+            if let Some(client_id) = spec_id {
+                for cmd in &cmds {
+                    if let Some(trace) = trace.as_mut() {
+                        trace.push(format!("room {client_id} {}", fmt_room(cmd)));
+                    }
+                    forward_spectate(&mut spectate_inbox, &specs, client_id, cmd);
+                }
+            }
             continue;
         };
         for cmd in &cmds {
