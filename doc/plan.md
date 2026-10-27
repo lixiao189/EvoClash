@@ -10,10 +10,6 @@
 
 还剩第 4 期（要做）和第 5 期（可选，先拍板）。玩法规则在 [gameplay.md](gameplay.md)，现有结构在 [architecture.md](architecture.md)。
 
-## 动手前先拆 `journal.rs`
-
-`crates/server/src/journal.rs` 大约 1700 行，已经超过仓库约定的约 600 行。第 4 期会同时改日志读写、快进和阶段机。先单独开一个重构 PR，把它拆成目录：`mod.rs` 放类型和插件，写入、清理、解析、重放各一个文件。不要和崩溃恢复混在同一个 PR 里。
-
 ## 第 4 期：崩溃恢复
 
 范围是规格 §9.2–9.5，只走本地 `fleet`（`make run`）。不做 Helm，不改 Agones。
@@ -42,7 +38,7 @@
 
 ### 对局进程 `--recover`
 
-文件：`crates/server/src/config.rs`、`main.rs`、`journal.rs`（拆完之后的重放模块）、`gameplay/flow.rs`。
+文件：`crates/server/src/config.rs`、`main.rs`、`journal/replay.rs`、`gameplay/flow.rs`。
 
 新进程读 `logs/` 里这个 `match_id` 的房间日志，和最新一份对局日志。
 

@@ -35,7 +35,7 @@ Rust · Bevy 0.20（客户端只在浏览器里跑，目标 `wasm32`）· lighty
 
 ## 服务器
 
-无头权威进程。插件：连接、玩法、战斗（用位置历史做延迟补偿）、背包（快捷栏、B 面板的 `InventoryMove`、拾取、死亡包；`take` 是唯一发放 `Item` 的函数）、环境（箱子、爆炸桶、保险柜、辐射）、机器人、野怪、运维（心跳和排空）、房间（`gameplay/room.rs`）、日志（`journal.rs`）。
+无头权威进程。插件：连接、玩法、战斗（用位置历史做延迟补偿）、背包（快捷栏、B 面板的 `InventoryMove`、拾取、死亡包；`take` 是唯一发放 `Item` 的函数）、环境（箱子、爆炸桶、保险柜、辐射）、机器人、野怪、运维（心跳和排空）、房间（`gameplay/room.rs`）、日志（`journal/`：`record.rs` 写入和清理，`parse.rs` 解析，`replay.rs` 重放）。
 
 64 Hz 的 `FixedUpdate`，顺序写在 `server/src/gameplay/mod.rs` 的 `SimSet`：`Input → Simulate → Combat → Resolve → Flow`。伤害先放进 `DamageQueue`，在 `Resolve` 结算。向外的事件先进 `Outbox`，在 `Flow` 发出。新系统放进对应的 set。
 
