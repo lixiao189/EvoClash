@@ -84,6 +84,8 @@ pub struct ScoreLine {
     pub kills: u32,
     pub deaths: u32,
     pub xp: u32,
+    /// Tick of the last score gain. 0 if they never scored. Earlier ranks higher.
+    pub last_score_tick: u32,
 }
 
 struct LogBuf {
@@ -282,8 +284,13 @@ impl Journal {
             let mut parts = Vec::new();
             for score in scores {
                 parts.push(format!(
-                    "{}:{}:{}:{}:{}",
-                    score.client_id, score.score, score.kills, score.deaths, score.xp
+                    "{}:{}:{}:{}:{}:{}",
+                    score.client_id,
+                    score.score,
+                    score.kills,
+                    score.deaths,
+                    score.xp,
+                    score.last_score_tick
                 ));
             }
             log.line(&format!("scores {}", parts.join(" ")));
@@ -400,6 +407,8 @@ pub fn fmt_room(cmd: &RoomCommand) -> String {
         RoomCommand::Start => "start".into(),
         RoomCommand::Cancel => "cancel".into(),
         RoomCommand::Leave => "leave".into(),
+        RoomCommand::PauseAutoStart => "pause_auto".into(),
+        RoomCommand::ResumeAutoStart => "resume_auto".into(),
     }
 }
 
@@ -414,10 +423,11 @@ fn settings_line(settings: &RoomSettings) -> String {
         settings.code.clone()
     };
     format!(
-        "settings {bots} {} {} {} {code}",
+        "settings {bots} {} {} {} {code} {}",
         u8::from(settings.monsters),
         settings.host,
         u8::from(settings.private_room),
+        u8::from(settings.auto_paused),
     )
 }
 
@@ -495,6 +505,7 @@ pub fn scoreboard(world: &mut World) -> Vec<ScoreLine> {
             kills: stats.kills,
             deaths: stats.deaths,
             xp: evo.xp,
+            last_score_tick: stats.last_score_tick,
         })
         .collect();
     rows.sort_by_key(|row| row.client_id);
@@ -575,33 +586,48 @@ fn open_logs(mut commands: Commands, config: Res<ServerConfig>, clock: Option<Re
 fn apply_presence(
     mut commands: Commands,
     mut injected: ResMut<Injected>,
-    mut humans: Query<(Entity, &mut Human, &Player)>,
+    state: Query<&MatchState>,
+    mut departed: Query<&mut Departed>,
+    mut humans: Query<(Entity, &mut Human, &Player, &Stats, &Evolution)>,
 ) {
     let connects = std::mem::take(&mut injected.connects);
     let disconnects = std::mem::take(&mut injected.disconnects);
     let leaves = std::mem::take(&mut injected.leaves);
+    let playing = state.iter().any(|s| s.phase == Phase::Playing);
     for id in connects {
-        if let Some((_, mut human, _)) = humans
+        if let Some((_, mut human, _, _, _)) = humans
             .iter_mut()
-            .find(|(_, _, player)| player.client_id == id)
+            .find(|(_, _, player, _, _)| player.client_id == id)
         {
             human.disconnected_ticks = 0;
             human.left = false;
         }
     }
     for id in disconnects {
-        if let Some((_, mut human, _)) = humans
+        if let Some((_, mut human, _, _, _)) = humans
             .iter_mut()
-            .find(|(_, _, player)| player.client_id == id)
+            .find(|(_, _, player, _, _)| player.client_id == id)
             && human.connected()
         {
             human.disconnected_ticks = 1;
         }
     }
+    let mut gone = Vec::new();
     for id in leaves {
-        if let Some((entity, _, _)) = humans.iter().find(|(_, _, player)| player.client_id == id) {
+        if let Some((entity, _, player, stats, evo)) = humans
+            .iter()
+            .find(|(_, _, player, _, _)| player.client_id == id)
+        {
+            if playing {
+                gone.push(Departure::from_combatant(player, stats, evo));
+            }
             commands.entity(entity).despawn();
         }
+    }
+    if !gone.is_empty()
+        && let Ok(mut departed) = departed.single_mut()
+    {
+        departed.0.extend(gone);
     }
 }
 
@@ -734,6 +760,7 @@ fn journal_flow(
                 kills: stats.kills,
                 deaths: stats.deaths,
                 xp: evo.xp,
+                last_score_tick: stats.last_score_tick,
             })
             .collect();
         // scores sorted inside seal via the passed vec — sort here.
@@ -917,8 +944,8 @@ pub fn replay_cli(path: &Path) -> i32 {
     }
     for line in &report.scores {
         println!(
-            "score {} {} kills {} deaths {} xp {}",
-            line.client_id, line.score, line.kills, line.deaths, line.xp
+            "score {} {} kills {} deaths {} xp {} tick {}",
+            line.client_id, line.score, line.kills, line.deaths, line.xp, line.last_score_tick
         );
     }
     for kill in &report.kills {
@@ -1007,12 +1034,15 @@ fn spawn_roster(app: &mut App, roster: &[RosterEntry]) {
                     .entity(entity)
                     .insert((Bot::fresh(), crate::gameplay::Aggressors::default()));
             } else {
-                commands.entity(entity).insert(Human {
-                    peer: PeerId::Netcode(entry.client_id),
-                    disconnected_ticks: 0,
-                    joined_at: 0,
-                    left: false,
-                });
+                commands.entity(entity).insert((
+                    Human {
+                        peer: PeerId::Netcode(entry.client_id),
+                        disconnected_ticks: 0,
+                        joined_at: 0,
+                        left: false,
+                    },
+                    crate::gameplay::Idle::default(),
+                ));
             }
         }
     }
@@ -1052,8 +1082,8 @@ fn blank_config(header: &Header) -> ServerConfig {
         port: 0,
         public_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         match_id: "replay".into(),
-        max_players: 8,
-        min_combatants: header.settings.bots.unwrap_or(0) as usize,
+        max_players: ROOM_COMBATANTS as usize,
+        min_combatants: ROOM_COMBATANTS as usize,
         matchmakers: Vec::new(),
         single_match: false,
         monsters: header.settings.monsters,
@@ -1191,6 +1221,7 @@ fn parse_settings(rest: &str) -> Option<RoomSettings> {
     let host = parts.next()?.parse().ok()?;
     let private_room = parts.next()? == "1";
     let code = parts.next().unwrap_or("-");
+    let auto_paused = parts.next().is_some_and(|flag| flag == "1");
     Some(RoomSettings {
         bots,
         monsters,
@@ -1201,6 +1232,7 @@ fn parse_settings(rest: &str) -> Option<RoomSettings> {
         } else {
             code.to_string()
         },
+        auto_paused,
     })
 }
 
@@ -1305,6 +1337,8 @@ fn parse_room(body: &str) -> Option<(u64, RoomCommand)> {
         "start" => RoomCommand::Start,
         "cancel" => RoomCommand::Cancel,
         "leave" => RoomCommand::Leave,
+        "pause_auto" => RoomCommand::PauseAutoStart,
+        "resume_auto" => RoomCommand::ResumeAutoStart,
         "settings" => {
             let bots = match parts.next()? {
                 "off" => None,
@@ -1328,6 +1362,7 @@ fn parse_scores(rest: &str) -> Vec<ScoreLine> {
                 kills: n.next()?.parse().ok()?,
                 deaths: n.next()?.parse().ok()?,
                 xp: n.next()?.parse().ok()?,
+                last_score_tick: n.next()?.parse().ok()?,
             })
         })
         .collect()
@@ -1407,13 +1442,13 @@ mod tests {
         *done = true;
     }
 
-    fn test_config(dir: &Path, seed: u64, bots: usize, monsters: bool) -> ServerConfig {
+    fn test_config(dir: &Path, seed: u64, monsters: bool) -> ServerConfig {
         ServerConfig {
             port: 0,
             public_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             match_id: "match".into(),
-            max_players: 8,
-            min_combatants: bots,
+            max_players: ROOM_COMBATANTS as usize,
+            min_combatants: ROOM_COMBATANTS as usize,
             matchmakers: Vec::new(),
             single_match: false,
             monsters,
@@ -1551,12 +1586,15 @@ mod tests {
                 bot: false,
             };
             let entity = spawn_combatant(&mut commands, player, None);
-            commands.entity(entity).insert(Human {
-                peer: PeerId::Netcode(*id),
-                disconnected_ticks: 0,
-                joined_at: 0,
-                left: false,
-            });
+            commands.entity(entity).insert((
+                Human {
+                    peer: PeerId::Netcode(*id),
+                    disconnected_ticks: 0,
+                    joined_at: 0,
+                    left: false,
+                },
+                crate::gameplay::Idle::default(),
+            ));
         }
         app.world_mut().flush();
     }
@@ -1585,7 +1623,7 @@ mod tests {
     #[test]
     fn replay_bot_match_matches_scores_kills_and_digests() {
         let dir = temp("bots");
-        let app = recording_app(test_config(&dir, 0xB07, 6, true), 6);
+        let app = recording_app(test_config(&dir, 0xB07, true), ROOM_COMBATANTS as usize);
         let played = play(app, 1280, None);
         assert_replay(&played);
     }
@@ -1593,7 +1631,7 @@ mod tests {
     #[test]
     fn replay_two_humans_matches_scores_kills_and_digests() {
         let dir = temp("humans");
-        let mut app = recording_app(test_config(&dir, 0xA11, 0, false), 2);
+        let mut app = recording_app(test_config(&dir, 0xA11, false), 2);
         spawn_humans(&mut app, &[11, 22]);
         let played = play(app, 1280, Some((11, 22)));
         let text = fs::read_to_string(&played.path).unwrap();
@@ -1607,7 +1645,7 @@ mod tests {
     #[test]
     fn replay_names_the_first_mismatched_digest_tick() {
         let dir = temp("poison");
-        let app = recording_app(test_config(&dir, 0xB07, 6, true), 6);
+        let app = recording_app(test_config(&dir, 0xB07, true), ROOM_COMBATANTS as usize);
         let played = play(app, 1280, None);
         let report = replay_log(
             &played.path,
@@ -1647,7 +1685,7 @@ mod tests {
         let dir = temp("startup-purge");
         fs::write(dir.join("stale.log"), "end 1\n").unwrap();
         fs::write(dir.join("live.log"), "t 1 digest 0\n").unwrap();
-        let mut config = test_config(&dir, 1, 0, false);
+        let mut config = test_config(&dir, 1, false);
         config.logging = true;
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
@@ -1662,10 +1700,27 @@ mod tests {
     }
 
     #[test]
+    fn score_line_keeps_the_last_score_tick() {
+        let line = ScoreLine {
+            client_id: 7,
+            score: 4,
+            kills: 3,
+            deaths: 1,
+            xp: 9,
+            last_score_tick: 128,
+        };
+        let text = format!(
+            "{}:{}:{}:{}:{}:{}",
+            line.client_id, line.score, line.kills, line.deaths, line.xp, line.last_score_tick
+        );
+        assert_eq!(parse_scores(&text), vec![line]);
+    }
+
+    #[test]
     #[ignore]
     fn replay_eight_minutes() {
         let dir = temp("eight");
-        let app = recording_app(test_config(&dir, 0xB07, 6, true), 6);
+        let app = recording_app(test_config(&dir, 0xB07, true), ROOM_COMBATANTS as usize);
         let played = play(app, 8 * 60 * 64, None);
         let started = std::time::Instant::now();
         let report = replay_log(&played.path, ReplayOptions::default());

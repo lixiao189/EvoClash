@@ -34,6 +34,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use evoclash_game::api::{CreateRoomRequest, Heartbeat, JoinRequest, JoinResponse, RejoinRequest};
 use evoclash_game::net;
+use evoclash_game::protocol::ROOM_COMBATANTS;
 use serde_json::json;
 use tower_http::services::ServeDir;
 
@@ -534,8 +535,8 @@ fn parse_args() -> Args {
         public_host: IpAddr::from([127, 0, 0, 1]),
         ports: (7000, 7099),
         max_matches: 16,
-        max_players: 8,
-        bots: 6,
+        max_players: ROOM_COMBATANTS.into(),
+        bots: ROOM_COMBATANTS.into(),
         server_bin: None,
         log_dir: PathBuf::from("logs"),
         launch: true,
@@ -562,7 +563,13 @@ fn parse_args() -> Args {
                 args.ports = (a.parse().expect("port"), b.parse().expect("port"));
             }
             "--max-matches" => args.max_matches = value("--max-matches").parse().expect("number"),
-            "--max-players" => args.max_players = value("--max-players").parse().expect("number"),
+            "--max-players" => {
+                // Every room is fixed at ROOM_COMBATANTS; clamp older flags to it.
+                args.max_players = value("--max-players")
+                    .parse::<u32>()
+                    .expect("number")
+                    .min(ROOM_COMBATANTS.into());
+            }
             "--bots" => args.bots = value("--bots").parse().expect("number"),
             "--server-bin" => args.server_bin = Some(value("--server-bin").into()),
             "--log-dir" => args.log_dir = value("--log-dir").into(),
@@ -580,7 +587,7 @@ fn parse_args() -> Args {
             "-h" | "--help" => {
                 println!(
                     "evoclash-matchmaker [--listen 127.0.0.1:8080] [--public-host 127.0.0.1] [--ports 7000-7099]\n\
-                     \x20                   [--max-matches 16] [--max-players 8] [--bots 6]\n\
+                     \x20                   [--max-matches 16] [--max-players 8] [--bots 8]\n\
                      \x20                   [--server-bin PATH] [--log-dir logs] [--no-launch]\n\
                      \x20                   [--warm-matches 1] [--peer URL[,URL...]] [--web-dir DIR]\n\n\
                      --no-launch     only adopt servers that heartbeat in (external orchestrator)\n\

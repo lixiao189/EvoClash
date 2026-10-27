@@ -77,6 +77,7 @@ pub(super) fn resolve_monster_damage(
     mut blasts: ResMut<GhoulBlasts>,
     mut boss: ResMut<BossState>,
     state: Query<&MatchState>,
+    tick: Res<SimTick>,
     rng: Res<crate::rng::SimRng>,
 ) {
     let playing = state.iter().any(|s| s.phase == Phase::Playing);
@@ -181,7 +182,7 @@ pub(super) fn resolve_monster_damage(
                 {
                     let points = monster.score();
                     if points > 0 {
-                        stats.score += points;
+                        stats.add_score(points, tick.0);
                         outbox.announce(format!(
                             "{} 击杀了{}，+{points} 分",
                             player.name,

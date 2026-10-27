@@ -13,6 +13,7 @@ use std::process::Stdio;
 use std::sync::Mutex;
 
 use evoclash_game::net::KEY_ENV;
+use evoclash_game::protocol::ROOM_COMBATANTS;
 use tokio::process::{Child, Command};
 
 pub struct FleetConfig {
@@ -49,7 +50,7 @@ impl Fleet {
         self.launch_room(used, rand::random(), None)
     }
 
-    /// `room_code` set means a private room: `--private --room-code CODE --bots 6`, monsters on.
+    /// `room_code` set means a private room: `--private --room-code CODE --bots 8`, monsters on.
     pub fn launch_room(
         &self,
         used: &[SocketAddr],
@@ -73,9 +74,10 @@ impl Fleet {
             .ok_or("no free ports")?;
         let addr = SocketAddr::new(self.config.public_host, port);
         let id = format!("m{port}-{:06x}", rand::random::<u32>() & 0xff_ffff);
-        // Private rooms always start at 6 bots. The host can change that in the lobby.
+        // Every room is fixed at ROOM_COMBATANTS, private ones included: the host cannot
+        // disable bots or change the fill target.
         let bots = if room_code.is_some() {
-            6
+            u32::from(ROOM_COMBATANTS)
         } else {
             self.config.bots
         };

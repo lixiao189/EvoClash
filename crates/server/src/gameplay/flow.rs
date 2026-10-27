@@ -1,9 +1,28 @@
 //! Loot spawns, match phases, reset and flushing outgoing events.
 
+use std::cmp::Reverse;
+
 use evoclash_game::rng::mix;
 
 use super::*;
 use crate::rng::{SimRng, Stream};
+
+/// Final-standings key: score desc, kills desc, deaths asc, last score tick asc, client_id asc.
+pub(crate) fn final_rank(
+    score: u32,
+    kills: u32,
+    deaths: u32,
+    last_score_tick: u32,
+    client_id: u64,
+) -> (u32, u32, Reverse<u32>, Reverse<u32>, Reverse<u64>) {
+    (
+        score,
+        kills,
+        Reverse(deaths),
+        Reverse(last_score_tick),
+        Reverse(client_id),
+    )
+}
 
 pub(super) fn loot_spawner(
     mut commands: Commands,
@@ -88,7 +107,7 @@ pub fn match_flow(
                 // Public rooms start on the first human. Later joins do not reset it.
                 // A private room waits for the host's Start.
                 state.countdown_active = true;
-                state.ticks_left = LOBBY_COUNTDOWN_TICKS;
+                state.ticks_left = public_lobby_countdown_ticks(state.match_index);
             } else if state.countdown_active {
                 state.ticks_left = state.ticks_left.saturating_sub(1);
                 if state.ticks_left == 0 {
@@ -144,10 +163,22 @@ pub fn match_flow(
                     fire: false,
                 });
             }
-            let leader = players.iter().max_by_key(|(_, s)| s.score);
-            let won = leader.is_some_and(|(_, s)| s.score >= SCORE_TO_WIN);
-            if won || state.ticks_left == 0 {
-                let winner = leader.map(|(p, _)| p.name.clone());
+            // No point target: the match always runs the full 8 minutes, then the final
+            // scoreboard decides (score, kills, fewer deaths, earlier final score, client_id).
+            // The finale (last two minutes) is `finale::step_finale`, chained right after this.
+            if state.ticks_left == 0 {
+                let winner = players
+                    .iter()
+                    .max_by_key(|(player, stats)| {
+                        final_rank(
+                            stats.score,
+                            stats.kills,
+                            stats.deaths,
+                            stats.last_score_tick,
+                            player.client_id,
+                        )
+                    })
+                    .map(|(player, _)| player.name.clone());
                 outbox.announce(match &winner {
                     Some(name) => format!("{name} 赢得了本局！"),
                     None => "本局结束".to_string(),
@@ -179,6 +210,7 @@ pub fn match_flow(
                     &humans,
                     &players,
                     private_room,
+                    settings.auto_paused,
                 );
             }
         }
@@ -224,7 +256,10 @@ fn begin_playing(
         }
     }
     info!("match started with {combatants} combatants");
-    outbox.announce(format!("对局开始！先拿到 {SCORE_TO_WIN} 分者获胜"));
+    outbox.announce(format!(
+        "对局开始！{} 分钟后按积分排名决出胜者",
+        MATCH_TICKS / (60 * TICKS_PER_SEC)
+    ));
 }
 
 fn begin_lobby(
@@ -236,6 +271,7 @@ fn begin_lobby(
     humans: &Query<&Human>,
     players: &Query<(&Player, &Stats)>,
     private_room: bool,
+    auto_paused: bool,
 ) {
     state.match_index = state.match_index.saturating_add(1);
     state.map_seed = mix(config.room_seed, state.match_index);
@@ -245,11 +281,16 @@ fn begin_lobby(
     state.winner = None;
     state.boss_eta = 0;
     state.vault_in = FIRST_VAULT_TICKS;
-    // Whoever is still here starts the next public countdown immediately.
-    // A private room waits for the host again.
-    if !private_room && connected_humans(humans) > 0 && players.iter().count() >= 2 {
+    // Public rooms, and a private room from the second round on, open the 15s
+    // countdown (12s lobby + 3s Starting) for whoever is still here.
+    // The first private round waits for the host. A paused private room does too.
+    let private_auto = private_room && state.match_index > 0 && !auto_paused;
+    if (private_auto || !private_room)
+        && connected_humans(humans) > 0
+        && players.iter().count() >= 2
+    {
         state.countdown_active = true;
-        state.ticks_left = LOBBY_COUNTDOWN_TICKS;
+        state.ticks_left = public_lobby_countdown_ticks(state.match_index);
     } else {
         state.countdown_active = false;
         state.ticks_left = 0;
@@ -290,9 +331,13 @@ pub fn reset_match(
     mut loot: ResMut<LootState>,
     mut props: ResMut<PropSlots>,
     mut blasts: ResMut<Blasts>,
+    mut departed: Query<&mut Departed>,
 ) {
     if !std::mem::take(&mut reset.0) {
         return;
+    }
+    for mut departed in &mut departed {
+        departed.0.clear();
     }
     for (mut vitals, mut loadout, mut stats, mut evo, mut skills, mut wallet, mut life) in
         &mut players

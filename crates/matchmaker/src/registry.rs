@@ -722,7 +722,7 @@ mod tests {
         assert_eq!(err.retry_after, Some(100 + rooms::RESULTS_SECS));
         assert_eq!(
             err.message,
-            "房间正在对局，约 1 分 52 秒后结束，结束后自动加入。"
+            "房间正在对局，约 1 分 55 秒后结束，结束后自动加入。"
         );
     }
 

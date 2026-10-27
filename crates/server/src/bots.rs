@@ -15,7 +15,7 @@ use rand::Rng;
 use crate::config::ServerConfig;
 use crate::connections::Human;
 use crate::evolution::{LifeLog, apply_evolution, handle_command};
-use crate::gameplay::{Aggressors, CurrentInput, SimSet, spawn_combatant};
+use crate::gameplay::{Aggressors, CurrentInput, SimSet, spawn_combatant, spawn_plain_combatant};
 use crate::inventory::{BagContents, auto_wants};
 use crate::rng::{SimRng, Stream};
 use evoclash_game::evolution::seen_from;
@@ -176,6 +176,10 @@ fn rebuild_nav(mut commands: Commands, arena: Res<Arena>, nav: Option<Res<Nav>>)
     }
 }
 
+/// Unit tests insert this so bots are not replicated. A match process never does.
+#[derive(Resource)]
+struct PlainBots;
+
 fn balance_bots(
     mut commands: Commands,
     config: Res<ServerConfig>,
@@ -183,6 +187,7 @@ fn balance_bots(
     settings: Query<&RoomSettings>,
     humans: Query<&Human>,
     bots: Query<(Entity, &Player), With<Bot>>,
+    plain: Option<Res<PlainBots>>,
     mut counter: Local<u64>,
     mut cooldown: Local<u32>,
     rng: Res<SimRng>,
@@ -199,8 +204,10 @@ fn balance_bots(
     }
     let humans_n = humans.iter().filter(|human| !human.left).count();
     let mut bot_count = bots.iter().count();
-    // Fill target comes from the replicated settings, so a lobby change applies on the next tick.
-    // Total combatants = max(target, humans), capped at the room size. `None` spawns nobody.
+    // Fill target comes from the replicated settings. Production rooms are always
+    // `Some(ROOM_COMBATANTS)`: humans first, bots fill the rest, and a human join over the
+    // target is impossible because the room caps humans at the same number. `None` spawns
+    // nobody (tests and self-play only).
     let target = settings
         .iter()
         .next()
@@ -228,7 +235,11 @@ fn balance_bots(
                 rng.random_range(0..EvoPath::ALL.len()),
             )
         });
-        let entity = spawn_combatant(&mut commands, player, None);
+        let entity = if plain.is_some() {
+            spawn_plain_combatant(&mut commands, player)
+        } else {
+            spawn_combatant(&mut commands, player, None)
+        };
         commands.entity(entity).insert((
             Bot {
                 goal: Vec2::ZERO,
@@ -664,6 +675,7 @@ mod tests {
     use evoclash_game::evolution::{MAX_RANK, SKILL_A_RANK, SKILL_B_RANK, xp_to_reach};
     use evoclash_game::items::{AmmoKind, MELEE_SLOT};
     use evoclash_game::shop::RESPAWN_MAX_TICKS;
+    use lightyear::prelude::PeerId;
 
     use super::*;
 
@@ -729,6 +741,137 @@ mod tests {
             assert!(Perk::ALL.iter().all(|p| evo.rank(*p) <= MAX_RANK));
             assert!(evo.skills().1.is_some());
         }
+    }
+
+    fn balance_app() -> App {
+        let mut app = App::new();
+        // Skip replication so a bot despawn does not need the netcode visibility registry.
+        app.insert_resource(PlainBots);
+        app.insert_resource(ServerConfig {
+            port: 0,
+            public_addr: "127.0.0.1:0".parse().unwrap(),
+            match_id: "test".into(),
+            max_players: ROOM_COMBATANTS as usize,
+            min_combatants: ROOM_COMBATANTS as usize,
+            matchmakers: Vec::new(),
+            single_match: false,
+            monsters: false,
+            threads: 1,
+            agones: false,
+            room_seed: 1,
+            private: false,
+            room_code: String::new(),
+            log_dir: std::env::temp_dir(),
+            replay: None,
+            logging: false,
+        });
+        app.insert_resource(SimRng::from_match_seed(1));
+        app.world_mut().spawn((
+            MatchState {
+                phase: Phase::Lobby,
+                ..default()
+            },
+            RoomSettings {
+                bots: Some(ROOM_COMBATANTS),
+                ..default()
+            },
+        ));
+        app.add_systems(Update, balance_bots);
+        app
+    }
+
+    fn spawn_humans(app: &mut App, n: usize) -> Vec<Entity> {
+        (0..n)
+            .map(|i| {
+                let client_id = i as u64 + 1;
+                app.world_mut()
+                    .spawn((
+                        Player {
+                            client_id,
+                            name: format!("h{client_id}"),
+                            color: [1.0; 3],
+                            bot: false,
+                        },
+                        Human {
+                            peer: PeerId::Netcode(client_id),
+                            disconnected_ticks: 0,
+                            joined_at: 0,
+                            left: false,
+                        },
+                    ))
+                    .id()
+            })
+            .collect()
+    }
+
+    /// `(players, bots)` right now.
+    fn roster(app: &mut App) -> (usize, usize) {
+        let world = app.world_mut();
+        let mut players = world.query::<&Player>();
+        let total = players.iter(world).count();
+        let mut bots = world.query_filtered::<&Player, With<Bot>>();
+        let bots = bots.iter(world).count();
+        (total, bots)
+    }
+
+    #[test]
+    fn a_lobby_fills_to_eight_and_eight_humans_leave_no_bots() {
+        assert_eq!(ROOM_COMBATANTS, 8);
+        // Fewer humans: bots fill the remaining seats, total stays 8.
+        let mut app = balance_app();
+        spawn_humans(&mut app, 2);
+        app.update();
+        assert_eq!(roster(&mut app), (8, 6));
+
+        // Eight humans: zero bots.
+        let mut app = balance_app();
+        spawn_humans(&mut app, 8);
+        app.update();
+        assert_eq!(roster(&mut app), (8, 0));
+    }
+
+    #[test]
+    fn bots_leave_and_refill_so_the_room_stays_eight() {
+        let mut app = balance_app();
+        app.update();
+        assert_eq!(roster(&mut app), (8, 8), "an empty lobby fields eight bots");
+
+        // Two humans join: the newest bots leave so the total stays 8.
+        let humans = spawn_humans(&mut app, 2);
+        app.update();
+        assert_eq!(roster(&mut app), (8, 6));
+
+        // A human leaves: a bot takes the free seat back.
+        assert!(app.world_mut().despawn(humans[0]));
+        app.update();
+        assert_eq!(roster(&mut app), (8, 7));
+    }
+
+    #[test]
+    fn a_playing_seat_is_refilled_by_a_fresh_bot() {
+        let mut app = balance_app();
+        let humans = spawn_humans(&mut app, 7);
+        {
+            let world = app.world_mut();
+            let mut states = world.query::<&mut MatchState>();
+            states.single_mut(world).unwrap().phase = Phase::Playing;
+        }
+        app.update();
+        assert_eq!(roster(&mut app), (8, 1));
+        assert!(app.world_mut().despawn(humans[0]));
+        // Outside the lobby the fill waits out the one-second cooldown, then adds one bot.
+        for _ in 0..64 {
+            app.update();
+        }
+        app.update();
+        assert_eq!(roster(&mut app), (8, 2));
+        let world = app.world_mut();
+        let mut bots = world.query_filtered::<(&Player, &Stats), With<Bot>>();
+        let rows: Vec<(u32, u8)> = bots
+            .iter(world)
+            .map(|(_, stats)| (stats.score, stats.level))
+            .collect();
+        assert!(rows.iter().all(|(score, level)| *score == 0 && *level == 1));
     }
 
     #[test]

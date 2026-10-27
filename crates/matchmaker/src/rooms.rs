@@ -10,8 +10,8 @@ pub const ALPHABET: &str = "23456789ABCDEFGHJKMNPQRSTWXYZ";
 pub const HOLD: Duration = Duration::from_secs(10 * 60);
 pub const RATE_WINDOW: Duration = Duration::from_secs(60);
 pub const RATE_MAX: usize = 10;
-/// Results lasts 12s. An in-match retry waits out the rest of the round plus that.
-pub const RESULTS_SECS: u32 = 12;
+/// Results lasts 15s. An in-match retry waits out the rest of the round plus that.
+pub const RESULTS_SECS: u32 = 15;
 
 pub const BAD_CODE: &str = "房间码是 4 位字母或数字。";
 pub const CLOSED: &str = "房间已关闭。你可以创建新的私人房间。";
@@ -105,5 +105,16 @@ impl Attempts {
         }
         hits.push_back(now);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn results_window_and_full_copy_match_eight_players() {
+        assert_eq!(RESULTS_SECS, 15);
+        assert!(FULL.contains("8/8"));
     }
 }

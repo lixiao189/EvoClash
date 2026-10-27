@@ -8,7 +8,9 @@ use evoclash_game::items::{AmmoKind, ArmorKind, Item, WeaponKind, roll_loot};
 use evoclash_game::map::{ArenaMap, VAULT_CENTER};
 use evoclash_game::protocol::*;
 use evoclash_game::rng::mix;
-use evoclash_game::shop::{DeathRecap, RESPAWN_MAX_TICKS, Wallet, can_deploy, player_kill_scrap};
+use evoclash_game::shop::{
+    DeathRecap, PlayerCommand, RESPAWN_MAX_TICKS, Wallet, can_deploy, player_kill_scrap,
+};
 use evoclash_game::sim::{self, Arena, Obstacles, gear_tier, underdog_mult};
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::server::*;
@@ -24,7 +26,9 @@ use crate::rng::SimRng;
 use crate::skills::HiddenFrom;
 
 mod damage;
+mod finale;
 mod flow;
+mod idle;
 mod movement;
 mod room;
 mod spawning;
@@ -33,16 +37,20 @@ mod tests;
 
 pub use damage::*;
 pub use flow::*;
+pub(crate) use idle::Idle;
+use idle::watch_idle;
 pub use movement::*;
 use room::{maintain_host, private_idle_cap, read_room_commands};
 pub use spawning::*;
 
 pub const TICKS_PER_SEC: u32 = 64;
-/// Lobby portion of the public 20s countdown. The last 3s are `Phase::Starting`.
+/// Lobby portion of the first public round's 20s countdown. The last 3s are `Phase::Starting`.
 pub const LOBBY_COUNTDOWN_TICKS: u32 = 17 * TICKS_PER_SEC;
+/// Lobby portion of a later public round. 12s here plus 3s Starting is the 15s intermission.
+pub const NEXT_LOBBY_COUNTDOWN_TICKS: u32 = 12 * TICKS_PER_SEC;
 pub const STARTING_TICKS: u32 = 3 * TICKS_PER_SEC;
 pub const MATCH_TICKS: u32 = 8 * 60 * TICKS_PER_SEC;
-pub const RESULTS_TICKS: u32 = 12 * TICKS_PER_SEC;
+pub const RESULTS_TICKS: u32 = 15 * TICKS_PER_SEC;
 /// Quick start stops once fewer than this many ticks remain until Playing
 /// (lobby time left plus the 3s Starting). Exactly 8s still accepts.
 pub const JOIN_CUTOFF_TICKS: u32 = 8 * TICKS_PER_SEC;
@@ -55,9 +63,10 @@ const PRIVATE_IDLE_WARN_TICKS: u32 = 28 * 60 * TICKS_PER_SEC;
 const PRIVATE_IDLE_CLOSE_TICKS: u32 = 30 * 60 * TICKS_PER_SEC;
 /// Lobby deaths stand back up after this, with no death bag.
 pub(super) const LOBBY_RESPAWN_TICKS: u16 = (2 * TICKS_PER_SEC) as u16;
+/// Playing: a dead human who never deploys is sent with DeployLast after this.
+pub const AUTO_DEPLOY_TICKS: u16 = (45 * TICKS_PER_SEC) as u16;
 pub(crate) const FIRST_VAULT_TICKS: u32 = 60 * TICKS_PER_SEC;
 const VAULT_INTERVAL_TICKS: u32 = 90 * TICKS_PER_SEC;
-pub const SCORE_TO_WIN: u32 = 25;
 const DROP_TTL_TICKS: u32 = 30 * TICKS_PER_SEC;
 /// Fresh spawns can't be hurt for this long (or until they shoot), so nobody gets spawn-camped.
 pub(crate) const SPAWN_SHIELD_TICKS: u16 = (2.5 * TICKS_PER_SEC as f32) as u16;
@@ -125,8 +134,10 @@ impl Plugin for GameplayPlugin {
                     .chain()
                     .in_set(SimSet::Resolve),
                 (
+                    watch_idle,
                     loot_spawner,
                     match_flow,
+                    finale::step_finale,
                     reset_match,
                     place_starters,
                     maintain_host,
@@ -187,7 +198,16 @@ pub struct PendingStart(pub bool);
 #[derive(Component, Default)]
 pub struct Aggressors(pub Vec<Entity>);
 
-/// Public lobby still offered by quick start. The 20s clock is lobby time plus Starting;
+/// Lobby ticks before Starting. Match 0 is 17s (20s with Starting); later rounds are 12s (15s).
+pub fn public_lobby_countdown_ticks(match_index: u32) -> u32 {
+    if match_index > 0 {
+        NEXT_LOBBY_COUNTDOWN_TICKS
+    } else {
+        LOBBY_COUNTDOWN_TICKS
+    }
+}
+
+/// Public lobby still offered by quick start. The clock is lobby time plus Starting;
 /// a seat is offered while that clock has not started, or still has at least 8s left.
 pub fn lobby_open(state: &MatchState) -> bool {
     state.phase == Phase::Lobby

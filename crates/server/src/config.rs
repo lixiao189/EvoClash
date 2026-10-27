@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use bevy::prelude::*;
 use evoclash_game::net::DEFAULT_GAME_PORT;
+use evoclash_game::protocol::ROOM_COMBATANTS;
 
 #[derive(Resource, Clone, Debug)]
 pub struct ServerConfig {
@@ -11,8 +12,11 @@ pub struct ServerConfig {
     /// Address clients use to reach this server (what connect tokens point at).
     pub public_addr: SocketAddr,
     pub match_id: String,
+    /// Maximum connected humans. Production rooms are always [`ROOM_COMBATANTS`]; tests and the
+    /// self-play harness construct this config directly.
     pub max_players: usize,
-    /// Bots fill the arena up to this many combatants and leave as humans join.
+    /// Combatant target including bots: [`ROOM_COMBATANTS`] in production. Used only as the
+    /// fallback fill target when no replicated room settings exist (tests, self-play).
     pub min_combatants: usize,
     /// Matchmaker base URLs for heartbeats, e.g. `http://127.0.0.1:8080`. Every replica gets
     /// its own heartbeat, so any of them can place players here and survive the others failing.
@@ -51,8 +55,8 @@ impl ServerConfig {
         let mut port = DEFAULT_GAME_PORT;
         let mut public_addr: Option<SocketAddr> = None;
         let mut match_id = "local".to_string();
-        let mut max_players = 8;
-        let mut min_combatants = 6;
+        let max_players = ROOM_COMBATANTS as usize;
+        let min_combatants = ROOM_COMBATANTS as usize;
         let mut matchmakers = Vec::new();
         let mut single_match = false;
         let mut monsters = true;
@@ -80,12 +84,16 @@ impl ServerConfig {
                     )
                 }
                 "--match-id" => match_id = value("--match-id"),
+                // Every production room is fixed at ROOM_COMBATANTS. Both flags are accepted so
+                // existing scripts/Helm values keep working, but their values are ignored.
                 "--max-players" => {
-                    max_players = value("--max-players")
-                        .parse()
-                        .expect("invalid --max-players")
+                    value("--max-players")
+                        .parse::<usize>()
+                        .expect("invalid --max-players");
                 }
-                "--bots" => min_combatants = value("--bots").parse().expect("invalid --bots"),
+                "--bots" => {
+                    value("--bots").parse::<usize>().expect("invalid --bots");
+                }
                 "--matchmaker" => matchmakers.extend(
                     value("--matchmaker")
                         .split(',')
@@ -112,7 +120,7 @@ impl ServerConfig {
                 "-h" | "--help" => {
                     println!(
                         "evoclash-server [--port 7000] [--public-addr 127.0.0.1:7000] [--match-id ID]\n\
-                         \x20               [--max-players 8] [--bots 6] [--matchmaker URL[,URL...]] [--single-match]\n\
+                         \x20               [--max-players 8] [--bots 8] [--matchmaker URL[,URL...]] [--single-match]\n\
                          \x20               [--no-monsters] [--threads 1] [--agones] [--room-seed U64]\n\
                          \x20               [--private] [--room-code CODE] [--log-dir logs] [--replay FILE]\n\n\
                          --bots N          keep at least N combatants in the arena by adding bots (0 disables)\n\

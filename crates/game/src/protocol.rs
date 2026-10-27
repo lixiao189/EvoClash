@@ -7,7 +7,7 @@ use lightyear::prelude::input::native::InputPlugin;
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::evolution::{Evolution, Skill, SkillState};
+use crate::evolution::{EvoPath, Evolution, Skill, SkillState};
 use crate::items::{ArmorKind, Item, WeaponKind};
 pub use crate::items::{InventoryMove, Loadout};
 use crate::map::PropKind;
@@ -131,6 +131,10 @@ pub struct Vitals {
     pub stealth: u16,
     /// Ticks this combatant is revealed to everyone (sprung a trap).
     pub revealed: u16,
+    /// Ticks until a dead human is sent out with `DeployLast`.
+    /// 0 when this is not counting: alive, a bot, or not a Playing death.
+    /// Seconds left for the death screen are `deploy_in.div_ceil(64)`.
+    pub deploy_in: u16,
 }
 
 impl Default for Vitals {
@@ -146,6 +150,7 @@ impl Default for Vitals {
             shield: 0,
             stealth: 0,
             revealed: 0,
+            deploy_in: 0,
         }
     }
 }
@@ -158,6 +163,9 @@ pub struct Stats {
     pub streak: u32,
     /// Evolution level, mirrored here for the scoreboard.
     pub level: u8,
+    /// Sim tick of the last score gain. 0 if this combatant has not scored.
+    /// When score, kills and deaths tie, the earlier tick ranks higher.
+    pub last_score_tick: u32,
 }
 
 impl Default for Stats {
@@ -168,6 +176,7 @@ impl Default for Stats {
             deaths: 0,
             streak: 0,
             level: 1,
+            last_score_tick: 0,
         }
     }
 }
@@ -176,6 +185,16 @@ impl Stats {
     /// A kill streak puts a price on your head: you are revealed and worth more.
     pub fn has_bounty(&self) -> bool {
         self.streak >= crate::sim::BOUNTY_STREAK
+    }
+
+    /// Add `points` and stamp `tick` as the moment this score was reached.
+    /// A zero award does not move the tiebreak clock.
+    pub fn add_score(&mut self, points: u32, tick: u32) {
+        if points == 0 {
+            return;
+        }
+        self.score = self.score.saturating_add(points);
+        self.last_score_tick = tick;
     }
 }
 
@@ -442,7 +461,8 @@ pub struct MatchState {
     pub phase: Phase,
     /// Ticks left in the current phase. In a lobby this is the countdown (0 if it has not started).
     pub ticks_left: u32,
-    /// Lobby only: the public 20s countdown is running (the last 3s of it are `Starting`).
+    /// Lobby only: the public countdown is running (the last 3s of it are `Starting`).
+    /// The first round is 20s; every later round is 15s.
     pub countdown_active: bool,
     /// Round inside this room process. The first lobby is 0; each return from results adds 1.
     pub match_index: u32,
@@ -455,8 +475,40 @@ pub struct MatchState {
     pub boss_eta: u32,
 }
 
+/// Playing ticks left when the finale starts (2 minutes at 64 Hz, `TICKS_PER_SEC`).
+/// Not a separate flag: [`MatchState::finale`] reads this clock, so the two cannot drift.
+pub const FINALE_TICKS: u32 = 2 * 60 * 64;
+
+impl MatchState {
+    /// Last two minutes of a live match.
+    /// False in the lobby, during countdown, on the results screen, and when the clock is 0.
+    pub fn finale(&self) -> bool {
+        self.phase == Phase::Playing && self.ticks_left > 0 && self.ticks_left <= FINALE_TICKS
+    }
+}
+
+/// One minimap flash of the current first place. Same entity as [`MatchState`].
+/// `latest` is `None` until the first flash of the round, and after the round resets.
+/// A skipped flash (the leader is dead, or every score is still 0) keeps the previous value.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Reflect, Default)]
+pub struct LeaderPing {
+    pub latest: Option<LeaderFlash>,
+}
+
+/// One finale flash. Clients blip `pos` when `tick` changes.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Reflect)]
+pub struct LeaderFlash {
+    pub client_id: u64,
+    pub pos: Vec2,
+    /// Sim tick of this flash.
+    pub tick: u32,
+}
+
+/// Every room fields this many combatants: humans first, bots fill the rest.
+pub const ROOM_COMBATANTS: u8 = 8;
+
 /// Lobby settings for this room. One replicated entity, visible to everyone.
-/// `bots` is `None` when fill is off, or `Some(2..=8)` for the combatant target.
+/// `bots` is always `Some(ROOM_COMBATANTS)` in production; tests may override it.
 #[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Reflect, Default)]
 pub struct RoomSettings {
     pub bots: Option<u8>,
@@ -466,16 +518,61 @@ pub struct RoomSettings {
     pub private_room: bool,
     /// Uppercase room code. Empty on a public room.
     pub code: String,
+    /// Private room: the host paused automatic continue. The lobby waits for Start.
+    /// Countdown already running is not paused this way; the host uses Cancel.
+    pub auto_paused: bool,
 }
 
 /// Host (and Leave) commands on the ordered reliable command channel.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum RoomCommand {
-    SetSettings { bots: Option<u8>, monsters: bool },
+    // `bots` stays on the wire for compatibility, but production rooms always fill to
+    // `ROOM_COMBATANTS`; only `monsters` changes.
+    SetSettings {
+        bots: Option<u8>,
+        monsters: bool,
+    },
     Start,
     Cancel,
     Leave,
+    /// Host only, in Results or Lobby, and only before the countdown is running.
+    PauseAutoStart,
+    /// Host only, in Results or Lobby, before the countdown is running.
+    /// Clears `RoomSettings::auto_paused`. The held lobby still waits for `Start`.
+    ResumeAutoStart,
 }
+
+/// One human who left during Playing. Shown on the results screen, not ranked.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Reflect)]
+pub struct Departure {
+    pub name: String,
+    pub score: u32,
+    pub kills: u32,
+    pub deaths: u32,
+    /// Evolution level at the moment they left.
+    pub level: u8,
+    /// Leading path then. None if they never spent a point.
+    pub path: Option<EvoPath>,
+}
+
+impl Departure {
+    pub fn from_combatant(player: &Player, stats: &Stats, evo: &Evolution) -> Self {
+        Self {
+            name: player.name.clone(),
+            score: stats.score,
+            kills: stats.kills,
+            deaths: stats.deaths,
+            level: evo.level,
+            path: evo.lead_path(),
+        }
+    }
+}
+
+/// Leavers from the current round, on the same entity as `MatchState`.
+/// Cleared when the round resets (results back to the lobby, and the next start).
+/// Only Playing departures are recorded. They do not take a place in the ranking.
+#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Reflect, Default)]
+pub struct Departed(pub Vec<Departure>);
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum GameEvent {
@@ -581,7 +678,9 @@ impl Plugin for ProtocolPlugin {
         app.component::<Puddle>().replicate();
         app.component::<Prop>().replicate();
         app.component::<MatchState>().replicate();
+        app.component::<LeaderPing>().replicate();
         app.component::<RoomSettings>().replicate();
+        app.component::<Departed>().replicate();
 
         app.register_message::<GameEvent>()
             .add_direction(NetworkDirection::ServerToClient);

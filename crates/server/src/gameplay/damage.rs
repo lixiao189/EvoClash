@@ -47,13 +47,23 @@ pub fn resolve_damage(
         return;
     }
     let playing = state.phase == Phase::Playing;
+    // Snapshot first place before this tick's deaths change kills or deaths.
+    let leader = if super::finale::finale_for_kills(&state) {
+        super::finale::leader_client_id(
+            players
+                .iter()
+                .map(|(player, _, _, _, stats, ..)| (player.client_id, stats)),
+        )
+    } else {
+        None
+    };
     // (victim, killer, how, victim's gear tier and level at the moment of death)
     let mut deaths: Vec<(Entity, Option<Entity>, &'static str, u8, u8)> = Vec::new();
     for dmg in queue.0.drain(..) {
         let attacker = dmg.attacker.and_then(|a| players.get(a).ok());
         let attacker_id = attacker.map_or(0, |(p, ..)| p.client_id);
         let attacker_tier = attacker.map(|(_, _, _, loadout, ..)| loadout.weapon().spec().tier());
-        let Ok((_, pos, mut vitals, mut loadout, _, evo, mut skills, mut recovery, ..)) =
+        let Ok((player, pos, mut vitals, mut loadout, _, evo, mut skills, mut recovery, ..)) =
             players.get_mut(dmg.target)
         else {
             continue;
@@ -132,6 +142,12 @@ pub fn resolve_damage(
             } else {
                 RESPAWN_MAX_TICKS
             };
+            // Humans get 45s on the death screen, then DeployLast. Bots still leave on their own.
+            vitals.deploy_in = if playing && !player.bot {
+                AUTO_DEPLOY_TICKS
+            } else {
+                0
+            };
             vitals.stealth = 0;
             // Active skills end with you; cooldowns and perks carry over.
             skills.active_a = 0;
@@ -151,7 +167,9 @@ pub fn resolve_damage(
             continue;
         };
         let victim_name = player.name.clone();
+        let victim_id = player.client_id;
         let had_bounty = stats.has_bounty();
+        let was_leader = leader == Some(victim_id);
         stats.deaths += 1;
         stats.streak = 0;
 
@@ -192,7 +210,19 @@ pub fn resolve_damage(
                         killer_stats.kills += 1;
                         killer_life.kills += 1;
                         killer_stats.streak += 1;
-                        killer_stats.score += if had_bounty { 3 } else { 1 };
+                        let points = (if had_bounty { 3 } else { 1 })
+                            + if was_leader {
+                                super::finale::FINALE_LEADER_BONUS
+                            } else {
+                                0
+                            };
+                        killer_stats.add_score(points, tick.0);
+                        if was_leader {
+                            outbox.announce(format!(
+                                "{} 击杀了第一名 {victim_name}，+2",
+                                killer_player.name
+                            ));
+                        }
                         let killer_tier = killer_loadout.weapon().spec().tier();
                         let giant_slayer = victim_tier >= killer_tier + GIANT_SLAYER_GAP;
                         xp.0.push(XpAward {
@@ -212,7 +242,7 @@ pub fn resolve_damage(
                             killer_loadout.add_ammo(kind, refill, killer_evo);
                         }
                         if giant_slayer {
-                            killer_stats.score += 1;
+                            killer_stats.add_score(1, tick.0);
                             outbox.announce(format!(
                                 "{} 以弱胜强击败了 {victim_name}，额外 +1 分！",
                                 killer_player.name
@@ -287,9 +317,10 @@ pub(super) fn salvage_target(loadout: &Loadout) -> Option<WeaponKind> {
 }
 
 /// Bring the dead back. Playing: only after Deploy / DeployLast (`deploy_asap`); an
-/// unconfirmed human sticks at `respawn_in == 1`. Lobby: the 2s timer counts down to 0 on
-/// its own. Whatever was bought in the shop is equipped on the spot.
-pub(super) fn respawn(
+/// unconfirmed human sticks at `respawn_in == 1` until `deploy_in` hits 0, which sends
+/// them with DeployLast. Bots are unchanged (their `deploy_in` stays 0). Lobby: the 2s
+/// timer counts down to 0 on its own. Whatever was bought in the shop is equipped on the spot.
+pub fn respawn(
     arena: Res<Arena>,
     tick: Res<SimTick>,
     state: Query<&MatchState>,
@@ -301,7 +332,8 @@ pub(super) fn respawn(
         &mut Dash,
         &mut PosHistory,
         &mut Loadout,
-        &Evolution,
+        &mut Evolution,
+        &mut SkillState,
         &mut Wallet,
         &mut LifeLog,
         Option<&Player>,
@@ -317,7 +349,7 @@ pub(super) fn respawn(
     let mut dead: Vec<(u64, Entity)> = players
         .iter()
         .filter(|(_, _, v, ..)| !v.alive)
-        .map(|(entity, _, _, _, _, _, _, _, _, player)| {
+        .map(|(entity, _, _, _, _, _, _, _, _, _, player)| {
             (player.map(|p| p.client_id).unwrap_or(u64::MAX), entity)
         })
         .collect();
@@ -330,10 +362,11 @@ pub(super) fn respawn(
             mut dash,
             mut history,
             mut loadout,
-            evo,
+            mut evo,
+            mut skills,
             mut wallet,
             mut life,
-            _,
+            player,
         )) = players.get_mut(entity)
         else {
             continue;
@@ -342,6 +375,23 @@ pub(super) fn respawn(
             continue;
         }
         if playing {
+            let human = player.is_some_and(|p| !p.bot);
+            if human && vitals.deploy_in > 0 {
+                vitals.deploy_in -= 1;
+                if vitals.deploy_in == 0 && !life.deploy_asap {
+                    let changed = crate::evolution::handle_command(
+                        &PlayerCommand::DeployLast,
+                        &mut evo,
+                        &mut wallet,
+                        &mut vitals,
+                        &mut life,
+                        true,
+                    );
+                    if changed {
+                        crate::evolution::apply_evolution(&evo, &mut skills, &mut vitals);
+                    }
+                }
+            }
             if life.deploy_asap && can_deploy(vitals.respawn_in) {
                 vitals.respawn_in = 0;
             } else if vitals.respawn_in > 1 {
@@ -391,7 +441,7 @@ pub(super) fn respawn(
             ..default()
         };
         for item in wallet.take_cart() {
-            take(item, &mut vitals, &mut loadout, evo);
+            take(item, &mut vitals, &mut loadout, &evo);
         }
         // Death already wrote a fresh log; revival only stamps this life and drops the confirm.
         life.born = tick.0;

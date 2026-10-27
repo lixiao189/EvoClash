@@ -4,8 +4,9 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Instant;
 
 use bevy::prelude::*;
+use evoclash_game::evolution::Evolution;
 use evoclash_game::net::{self, CONNECTION_TIMEOUT_SECS, PROTOCOL_ID};
-use evoclash_game::protocol::{MatchState, Phase, Player};
+use evoclash_game::protocol::{Departed, Departure, MatchState, Phase, Player, Stats};
 use lightyear::connection::client::Connected;
 use lightyear::netcode::{NetcodeServer, TokenUserData};
 use lightyear::prelude::server::*;
@@ -198,6 +199,7 @@ fn on_connected(
             joined_at: tick.as_ref().map(|tick| tick.0).unwrap_or(0),
             left: false,
         },
+        crate::gameplay::Idle::default(),
     ));
     if let Some(trace) = trace.as_mut() {
         trace.push(format!("connect {client_id}"));
@@ -223,12 +225,23 @@ pub fn color_for(id: u64) -> [f32; 3] {
 /// Count down the grace period of humans whose link went away; remove them once it expires.
 fn track_presence(
     mut commands: Commands,
-    mut humans: Query<(Entity, &mut Human, &Player, Option<&ControlledBy>)>,
+    state: Query<&MatchState>,
+    mut departed: Query<&mut Departed>,
+    mut humans: Query<(
+        Entity,
+        &mut Human,
+        &Player,
+        &Stats,
+        &Evolution,
+        Option<&ControlledBy>,
+    )>,
     live_links: Query<(), With<Connected>>,
     mut outbox: ResMut<Outbox>,
     mut trace: Option<ResMut<Trace>>,
 ) {
-    for (entity, mut human, player, control) in &mut humans {
+    let playing = state.iter().any(|s| s.phase == Phase::Playing);
+    let mut expired = Vec::new();
+    for (entity, mut human, player, stats, evo, control) in &mut humans {
         if human.left {
             continue;
         }
@@ -250,8 +263,16 @@ fn track_presence(
             if let Some(trace) = trace.as_mut() {
                 trace.push(format!("leave {}", player.client_id));
             }
+            if playing {
+                expired.push(Departure::from_combatant(player, stats, evo));
+            }
             commands.entity(entity).despawn();
         }
+    }
+    if !expired.is_empty()
+        && let Ok(mut departed) = departed.single_mut()
+    {
+        departed.0.extend(expired);
     }
 }
 

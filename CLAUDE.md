@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-EvoClash is a top-down 2D multiplayer shooter set in a post-apocalyptic wasteland (Rust, Bevy 0.20, lightyear 0.31 over WebTransport/netcode.io, axum matchmaker). The client runs only in the browser (wasm32). Gameplay rules are in `doc/gameplay.md`, architecture in `doc/architecture.md`, and the remaining crash-recovery work in `doc/plan.md`. README.md (in Chinese) keeps the quick start, deploy commands and release process.
+EvoClash is a top-down 2D multiplayer shooter set in a post-apocalyptic wasteland (Rust, Bevy 0.20, lightyear 0.31 over WebTransport/netcode.io, axum matchmaker). The client runs only in the browser (wasm32). Every room fields exactly 8 combatants — humans first, bots fill the rest — in an 8-minute match won by the highest final score (kills, then fewer deaths, then whoever reached their score first break ties; there is no point target), and rooms loop match after match. Gameplay rules are in `doc/gameplay.md`, architecture in `doc/architecture.md`, and the remaining crash-recovery work in `doc/plan.md`. README.md (in Chinese) keeps the quick start, deploy commands and release process.
 
 ## Git workflow (required)
 
@@ -28,7 +28,7 @@ cargo deny --all-features check                      # CI: advisories / licenses
 helm lint --strict deploy/helm/evoclash               # CI: Helm chart
 ```
 
-Run locally (needs `cargo install trunk`; `make web` adds the wasm32 target itself): `make run` builds the wasm client into `target/web` and starts `evoclash-matchmaker --web-dir target/web`, which serves it at `http://127.0.0.1:8080/play/` and launches match servers on demand (`make run LISTEN=host:port BOTS=n`, defaults 127.0.0.1:8080 and 6; local match-server output goes to `logs/`, cleared by `make clean-logs`). `make watch` rebuilds the client on change; `make check` runs the CI lints/tests. Page query params: `?name=` (required; index.html asks), `&lag=<ms>` simulates latency. A bare `evoclash-server --port 7000 --bots 4` still runs, but browsers can only reach a server through the matchmaker (they need its certificate hash). Server `--no-monsters` disables monsters.
+Run locally (needs `cargo install trunk`; `make web` adds the wasm32 target itself): `make run` builds the wasm client into `target/web` and starts `evoclash-matchmaker --web-dir target/web`, which serves it at `http://127.0.0.1:8080/play/` and launches match servers on demand (every room fields 8 combatants, bots fill and humans replace them; `make run LISTEN=host:port`; local match-server output goes to `logs/`, cleared by `make clean-logs`). `make watch` rebuilds the client on change; `make check` runs the CI lints/tests. Page query params: `?name=` (required; index.html asks), `&lag=<ms>` simulates latency. A bare `evoclash-server --port 7000 --bots 8` still runs, but browsers can only reach a server through the matchmaker (they need its certificate hash). Server `--no-monsters` disables monsters.
 
 The client crate still compiles natively so `cargo test`/clippy cover it (sprite preview tests), but its native `main` just exits; dead-code lints are relaxed natively and enforced by the wasm clippy run.
 

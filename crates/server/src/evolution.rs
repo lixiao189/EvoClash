@@ -9,7 +9,7 @@ use evoclash_game::shop::{PlayerCommand, ShopItem, Wallet, can_deploy};
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
-use crate::gameplay::{Outbox, SimSet, resolve_damage};
+use crate::gameplay::{Outbox, SimSet, respawn};
 use crate::journal::{Injected, Trace};
 
 /// 再生组织 starts this long after the last hit.
@@ -30,7 +30,7 @@ impl Plugin for EvolutionPlugin {
                 (lifesteal, grant_xp, recover)
                     .chain()
                     .in_set(SimSet::Resolve)
-                    .after(resolve_damage),
+                    .after(respawn),
             ),
         );
     }
