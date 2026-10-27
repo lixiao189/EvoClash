@@ -18,7 +18,7 @@ use lightyear::webtransport::prelude::endpoint::WebTransportEndpoint;
 
 use crate::config::ServerConfig;
 use crate::gameplay::{Outbox, SimSet, SimTick, spawn_combatant};
-use crate::journal::Trace;
+use crate::journal::{CatchingUp, Trace};
 use crate::ops::OpsState;
 use crate::spectate::{self, Admit, NewSpectator, SpectateSeq, SpectatorSession, first_id};
 
@@ -283,6 +283,7 @@ pub fn color_for(id: u64) -> [f32; 3] {
 fn track_presence(
     mut commands: Commands,
     state: Query<&MatchState>,
+    catching: Option<Res<CatchingUp>>,
     mut departed: Query<&mut Departed>,
     mut humans: Query<(
         Entity,
@@ -296,6 +297,10 @@ fn track_presence(
     mut outbox: ResMut<Outbox>,
     mut trace: Option<ResMut<Trace>>,
 ) {
+    // Catch-up has no links yet. Recovering keeps its own 20s grace.
+    if catching.is_some() || state.iter().any(|s| s.phase == Phase::Recovering) {
+        return;
+    }
     let playing = state.iter().any(|s| s.phase == Phase::Playing);
     let mut expired = Vec::new();
     for (entity, mut human, player, stats, evo, control) in &mut humans {

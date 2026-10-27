@@ -1,4 +1,5 @@
-//! Lobby chrome, private-room controls, and the full-screen Starting / Recovering overlay.
+//! Lobby chrome, private-room controls, and the full-screen Starting overlay.
+//! Crash-recovery copy lives in `recover_ui`.
 //!
 //! The host crown is `Textures.host_crown` (11×8 texels at [`PIXEL`]) next to `RoomSettings.host`.
 //! Bots keep `Textures.bot_tag`.
@@ -15,7 +16,7 @@ use crate::hud::GOLD;
 use crate::input::LocalPlayer;
 use crate::menu::MenuOpen;
 use crate::render::UiFont;
-use crate::session::{Depart, JoinNotice, JoinOffer, JoinOfferButton, JoinOffers};
+use crate::session::{Depart, JoinNotice, JoinOffer, JoinOfferButton, JoinOffers, RecoverHold};
 use crate::textures::{PIXEL, Textures};
 
 const TICKS_PER_SEC: u32 = 64;
@@ -28,7 +29,6 @@ const CROWN_TEXELS: Vec2 = Vec2::new(11.0, 8.0);
 const TITLE: &str = "等待大厅";
 const PUBLIC_ROOM: &str = "公开房间";
 const PRACTICE: &str = "练习场：不计分、不掉落，开局会重置";
-const RECOVERING: &str = "服务器恢复中…";
 const WAITING_HOST: &str = "等待房主开始";
 
 const NORMAL_BG: Color = Color::srgba(0.12, 0.12, 0.12, 0.85);
@@ -109,7 +109,6 @@ struct PhaseShade;
 #[derive(Component, Clone, Copy)]
 enum BannerSlot {
     Count,
-    Recover,
     Notice,
 }
 
@@ -410,7 +409,6 @@ fn spawn_lobby_ui(mut commands: Commands, font: Res<UiFont>) {
         ))
         .with_children(|col| {
             col.spawn(banner(&font, 112.0, BannerSlot::Count, None));
-            col.spawn(banner(&font, 32.0, BannerSlot::Recover, Some(520.0)));
             col.spawn(banner(&font, 20.0, BannerSlot::Notice, Some(560.0)));
             col.spawn(Node {
                 column_gap: Val::Px(10.0),
@@ -769,6 +767,7 @@ fn drive_room_controls(
 fn update_phase_banner(
     state: Query<&MatchState>,
     notice: Res<JoinNotice>,
+    hold: Res<RecoverHold>,
     mut shade: Query<(&mut Visibility, &mut BackgroundColor), With<PhaseShade>>,
     mut slots: Query<(&BannerSlot, &mut Text, &mut Node)>,
 ) {
@@ -776,7 +775,6 @@ fn update_phase_banner(
     let phase = current.map(|s| s.phase);
     let ticks = current.map(|s| s.ticks_left).unwrap_or(0);
     let (dim, alpha) = match phase {
-        Some(Phase::Recovering) => (true, 0.78),
         Some(Phase::Starting) => (true, 0.45),
         _ => (false, 0.0),
     };
@@ -798,12 +796,9 @@ fn update_phase_banner(
                 Some(Phase::Starting) => (starting_count(ticks).to_string(), true),
                 _ => (String::new(), false),
             },
-            BannerSlot::Recover => match phase {
-                Some(Phase::Recovering) => (RECOVERING.to_string(), true),
-                _ => (String::new(), false),
-            },
             BannerSlot::Notice => {
-                if covered || notice.0.is_empty() {
+                // `hold` is the fast-forward shade; its line is drawn in `recover_ui`.
+                if covered || hold.0 || notice.0.is_empty() {
                     (String::new(), false)
                 } else {
                     (notice.0.clone(), true)
@@ -819,12 +814,14 @@ fn update_phase_banner(
 
 fn sync_join_offers(
     offers: Res<JoinOffers>,
+    hold: Res<RecoverHold>,
     state: Query<&MatchState>,
     mut buttons: Query<(&JoinOfferButton, &mut Node)>,
 ) {
-    let covered = state
-        .iter()
-        .any(|s| matches!(s.phase, Phase::Starting | Phase::Recovering));
+    let covered = hold.0
+        || state
+            .iter()
+            .any(|s| matches!(s.phase, Phase::Starting | Phase::Recovering));
     for (button, mut node) in &mut buttons {
         let on = !covered && offers.buttons.contains(&button.0);
         let display = if on { Display::Flex } else { Display::None };

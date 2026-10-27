@@ -245,7 +245,10 @@ pub fn match_flow(
                 );
             }
         }
-        Phase::Recovering => {}
+        Phase::Recovering => {
+            // Clocks stay frozen. `recovering::step_recovering`, chained right after this,
+            // counts the 20s grace and the 3s resume.
+        }
     }
 }
 
@@ -438,11 +441,16 @@ pub(super) fn empty_close(
     settings: Query<&RoomSettings>,
     presence: Presence,
     ops: Option<Res<OpsState>>,
+    catching: Option<Res<crate::journal::CatchingUp>>,
     mut empty_for: Local<u32>,
     mut exit: MessageWriter<AppExit>,
 ) {
     // Replay has no ops resource and must keep simulating with nobody connected.
+    // Catch-up humans have no link yet; do not treat the replay as an empty room.
     let Some(ops) = ops else {
+        return;
+    };
+    if catching.is_some() {
         return;
     };
     let Some(state) = state.iter().next() else {

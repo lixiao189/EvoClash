@@ -451,7 +451,8 @@ pub enum Phase {
     Starting,
     Playing,
     Results,
-    /// On the wire for crash recovery. The server never enters it in this phase.
+    /// After a crash the server replayed the log and is waiting for humans to reconnect.
+    /// Nothing simulates; every match clock is frozen. See [`RecoverWait`].
     Recovering,
 }
 
@@ -473,6 +474,20 @@ pub struct MatchState {
     pub map_seed: u64,
     /// Ticks until the behemoth appears while its countdown runs, otherwise 0.
     pub boss_eta: u32,
+    /// Only meaningful while `phase` is `Recovering`; default otherwise.
+    pub recover: RecoverWait,
+}
+
+/// Recovering stage. `ticks_left` above stays the frozen match clock; this has its own.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Reflect, Default)]
+pub struct RecoverWait {
+    /// Humans reconnected so far, out of `total` (the humans seated when the server crashed).
+    pub back: u8,
+    pub total: u8,
+    /// False: waiting for humans (at most the 20s grace). True: the 3s countdown to resume.
+    pub resuming: bool,
+    /// Ticks left in the current stage (grace wait or resume countdown).
+    pub ticks_left: u32,
 }
 
 /// Playing ticks left when the finale starts (2 minutes at 64 Hz, `TICKS_PER_SEC`).

@@ -4,7 +4,6 @@
 //! external inputs after that. The match log records those inputs and a digest every 640
 //! ticks. Replay rebuilds Playing from the header and checks the digests.
 
-use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::net::SocketAddr;
@@ -33,6 +32,7 @@ use crate::rng::SimRng;
 mod format;
 mod parse;
 mod record;
+mod recover;
 mod replay;
 #[cfg(test)]
 mod tests;
@@ -83,6 +83,14 @@ impl Trace {
 /// Override `SystemTime::now` in tests. Production leaves it unset.
 #[derive(Resource, Clone, Copy)]
 pub struct LogClock(pub SystemTime);
+
+/// Playing catch-up. Journal writes and presence kicks stay off until it is removed.
+#[derive(Resource)]
+pub struct CatchingUp;
+
+/// Offline replay or catch-up. The live Recovering countdown must not run.
+#[derive(Resource)]
+pub struct Replaying;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KillLine {
@@ -145,6 +153,7 @@ impl Plugin for JournalPlugin {
             schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
         });
         app.add_systems(Startup, open_logs);
+        app.add_systems(Startup, recover::recover_on_startup.after(open_logs));
         app.add_systems(
             FixedUpdate,
             (

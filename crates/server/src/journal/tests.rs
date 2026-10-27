@@ -50,6 +50,7 @@ fn test_config(dir: &Path, seed: u64, monsters: bool) -> ServerConfig {
         room_code: String::new(),
         log_dir: dir.to_path_buf(),
         replay: None,
+        recover: false,
         logging: true,
     }
 }
@@ -243,6 +244,7 @@ fn replay_names_the_first_mismatched_digest_tick() {
         &played.path,
         ReplayOptions {
             nudge_after_tick: Some(100),
+            ..Default::default()
         },
     );
     assert!(!report.ok);
@@ -424,4 +426,314 @@ fn replay_keeps_a_watcher_and_ignores_their_input() {
     );
     assert!(report.digests_checked >= 1);
     assert_eq!(report.spectators, rows);
+}
+
+#[derive(Clone, PartialEq, Debug)]
+struct Body {
+    id: u64,
+    x: u32,
+    y: u32,
+    score: u32,
+    level: u8,
+    loadout: Loadout,
+}
+
+fn bodies(world: &mut World) -> Vec<Body> {
+    let mut query = world.query::<(&Player, &Pos, &Stats, &Evolution, &Loadout)>();
+    let mut rows: Vec<Body> = query
+        .iter(world)
+        .map(|(player, pos, stats, evo, loadout)| Body {
+            id: player.client_id,
+            x: pos.0.x.to_bits(),
+            y: pos.0.y.to_bits(),
+            score: stats.score,
+            level: evo.level,
+            loadout: *loadout,
+        })
+        .collect();
+    rows.sort_by_key(|row| row.id);
+    rows
+}
+
+fn truncate_log(path: &Path, tick: u32) {
+    let text = fs::read_to_string(path).unwrap();
+    let mut out = String::new();
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("t ") {
+            let n: u32 = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or("0")
+                .parse()
+                .unwrap();
+            if n > tick {
+                continue;
+            }
+        }
+        if line.starts_with("scores ") || line.starts_with("kills ") || line.starts_with("end ") {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    fs::write(path, out).unwrap();
+}
+
+fn fresh_app(dir: &Path, seed: u64) -> App {
+    recording_app(test_config(dir, seed, false), 99)
+}
+
+#[test]
+fn recover_matches_the_truncated_tick_and_a_second_pass() {
+    let dir = temp("recover");
+    let mut app = fresh_app(&dir, 0xA11);
+    spawn_humans(&mut app, &[11, 22]);
+    let mut snap = None;
+    for _ in 0..8_000 {
+        let tick = tick_of(&app);
+        if phase_of(&mut app) == Phase::Playing {
+            let mut injected = app.world_mut().resource_mut::<Injected>();
+            injected.inputs.push((11, scripted(1, tick)));
+            injected.inputs.push((22, scripted(-1, tick)));
+        }
+        app.world_mut().run_schedule(FixedUpdate);
+        let tick = tick_of(&app);
+        if phase_of(&mut app) == Phase::Playing && tick == 640 {
+            snap = Some(bodies(app.world_mut()));
+        }
+        if tick >= 700 && phase_of(&mut app) == Phase::Playing {
+            break;
+        }
+    }
+    let snap = snap.expect("tick 640");
+    app.world_mut().resource_mut::<Journal>().flush();
+    let path = app
+        .world()
+        .resource::<Journal>()
+        .match_path
+        .clone()
+        .unwrap();
+    drop(app);
+    truncate_log(&path, 640);
+
+    let mut recovered = fresh_app(&dir, 0xA11);
+    super::recover::recover_into(recovered.world_mut()).expect("recover");
+    assert_eq!(phase_of(&mut recovered), Phase::Recovering);
+    assert_eq!(bodies(recovered.world_mut()), snap);
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains("\nrecover 640\n") || text.contains("recover 640\n"),
+        "{text}"
+    );
+    assert!(text.contains("t 640 freeze"), "{text}");
+
+    // Grace is 20s from now, not whatever disconnect time the log had reached.
+    {
+        let world = recovered.world_mut();
+        let mut humans = world.query::<&crate::connections::Human>();
+        for human in humans.iter(world) {
+            assert_eq!(human.disconnected_ticks, 1);
+        }
+        let (frozen_clock, frozen_vault, frozen_eta) = {
+            let mut states = world.query::<&mut MatchState>();
+            let mut state = states.iter_mut(world).next().unwrap();
+            assert_eq!(
+                state.recover.ticks_left,
+                20 * crate::gameplay::TICKS_PER_SEC
+            );
+            assert!(!state.recover.resuming);
+            let frozen_clock = state.ticks_left;
+            let frozen_vault = state.vault_in;
+            let frozen_eta = state.boss_eta;
+            state.boss_eta = 1234;
+            (frozen_clock, frozen_vault, frozen_eta)
+        };
+        let mut idles = world.query::<&mut crate::gameplay::Idle>();
+        for mut idle in idles.iter_mut(world) {
+            idle.set_count(40);
+        }
+        let saved = {
+            let mut dead = world.query::<(&Player, &Vitals)>();
+            dead.iter(world)
+                .find(|(player, _)| player.client_id == 11)
+                .map(|(_, vitals)| *vitals)
+                .unwrap()
+        };
+        {
+            let mut dead = world.query::<(&Player, &mut Vitals)>();
+            let mut armed = false;
+            for (player, mut vitals) in dead.iter_mut(world) {
+                if player.client_id == 11 {
+                    vitals.alive = false;
+                    vitals.deploy_in = 80;
+                    armed = true;
+                }
+            }
+            assert!(armed);
+        }
+        for _ in 0..30 {
+            world.run_schedule(FixedUpdate);
+        }
+        let state = world.query::<&MatchState>().iter(world).next().unwrap();
+        assert_eq!(state.phase, Phase::Recovering);
+        assert_eq!(state.ticks_left, frozen_clock);
+        assert_eq!(state.vault_in, frozen_vault);
+        assert_eq!(state.boss_eta, 1234);
+        assert_eq!(
+            state.recover.ticks_left,
+            20 * crate::gameplay::TICKS_PER_SEC - 30
+        );
+        assert!(
+            world
+                .query::<&crate::gameplay::Idle>()
+                .iter(world)
+                .all(|idle| idle.ticks() == 40)
+        );
+        let vitals = world
+            .query::<(&Player, &Vitals)>()
+            .iter(world)
+            .find(|(player, _)| player.client_id == 11)
+            .unwrap()
+            .1;
+        assert!(!vitals.alive);
+        assert_eq!(vitals.deploy_in, 80);
+        // Those pokes are not in the log. Put the body back before play continues.
+        let mut dead = world.query::<(&Player, &mut Vitals)>();
+        for (player, mut vitals) in dead.iter_mut(world) {
+            if player.client_id == 11 {
+                *vitals = saved;
+            }
+        }
+        let mut idles = world.query::<&mut crate::gameplay::Idle>();
+        for mut idle in idles.iter_mut(world) {
+            idle.set_count(0);
+        }
+        let mut states = world.query::<&mut MatchState>();
+        if let Some(mut state) = states.iter_mut(world).next() {
+            state.boss_eta = frozen_eta;
+        }
+    }
+    {
+        let world = recovered.world_mut();
+        let mut humans = world.query::<&mut crate::connections::Human>();
+        for mut human in humans.iter_mut(world) {
+            human.disconnected_ticks = 0;
+        }
+    }
+    let mut resumed_at = None;
+    for _ in 0..20_000 {
+        recovered.world_mut().run_schedule(FixedUpdate);
+        let tick = tick_of(&recovered);
+        if phase_of(&mut recovered) == Phase::Playing {
+            resumed_at = Some(tick);
+            break;
+        }
+    }
+    let resumed_at = resumed_at.expect("resumed");
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains(" thaw"), "freeze/thaw missing: {text}");
+    for _ in 0..8_000 {
+        let tick = tick_of(&recovered);
+        if phase_of(&mut recovered) == Phase::Playing {
+            let mut injected = recovered.world_mut().resource_mut::<Injected>();
+            injected.inputs.push((11, scripted(1, tick + 1)));
+            injected.inputs.push((22, scripted(-1, tick + 1)));
+        }
+        recovered.world_mut().run_schedule(FixedUpdate);
+        let tick = tick_of(&recovered);
+        if phase_of(&mut recovered) == Phase::Playing
+            && tick > resumed_at
+            && tick.is_multiple_of(640)
+        {
+            break;
+        }
+    }
+    recovered.world_mut().resource_mut::<Journal>().flush();
+    let cut = tick_of(&recovered);
+    let snap2 = bodies(recovered.world_mut());
+    drop(recovered);
+    truncate_log(&path, cut);
+
+    let mut again = fresh_app(&dir, 0xA11);
+    super::recover::recover_into(again.world_mut()).expect("second recover");
+    assert_eq!(phase_of(&mut again), Phase::Recovering);
+    assert_eq!(bodies(again.world_mut()), snap2);
+}
+
+#[test]
+fn a_changed_input_abandons_with_the_tick() {
+    let dir = temp("poison-recover");
+    let mut app = fresh_app(&dir, 0xB07);
+    spawn_humans(&mut app, &[11, 22]);
+    let played = play(app, 700, Some((11, 22)));
+    truncate_log(&played.path, 640);
+    let text = fs::read_to_string(&played.path).unwrap();
+    let mut changed = 0;
+    let poisoned: String = text
+        .lines()
+        .map(|line| {
+            let mut parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() > 8 && parts[2] == "input" {
+                changed += 1;
+                parts[4] = "0";
+                parts[5] = "-1";
+                parts[8] = "0";
+                return parts.join(" ");
+            }
+            line.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(changed > 10, "inputs {changed}");
+    fs::write(&played.path, format!("{poisoned}\n")).unwrap();
+    let mut recovered = fresh_app(&dir, 0xB07);
+    let err = super::recover::recover_into(recovered.world_mut()).unwrap_err();
+    assert!(err.contains("tick"), "{err}");
+    assert!(err.contains("640"), "{err}");
+}
+
+#[test]
+fn lobby_and_results_restore_the_room() {
+    let dir = temp("lobby-recover");
+    let mut app = fresh_app(&dir, 42);
+    let room = dir.join("room-match.log");
+    fs::write(
+        &room,
+        "EVOCLASH room v1\nroom_seed=42 code=ABCD private=1 bots=8 monsters=0 host=7 match_index=3 phase=lobby paused=1\n",
+    )
+    .unwrap();
+    super::recover::recover_into(app.world_mut()).unwrap();
+    let world = app.world_mut();
+    let state = world.query::<&MatchState>().iter(world).next().unwrap();
+    assert_eq!(state.phase, Phase::Lobby);
+    assert_eq!(state.match_index, 3);
+    assert!(!state.countdown_active);
+    assert_eq!(state.ticks_left, 0);
+    let settings = world.query::<&RoomSettings>().iter(world).next().unwrap();
+    assert_eq!(settings.host, 7);
+    assert_eq!(settings.code, "ABCD");
+    assert!(settings.private_room);
+    assert!(settings.auto_paused);
+    assert!(!settings.monsters);
+    assert_eq!(settings.bots, Some(8));
+    drop(app);
+
+    let mut app = fresh_app(&dir, 42);
+    fs::write(
+        &room,
+        "EVOCLASH room v1\nroom_seed=42 code=- private=0 bots=8 monsters=1 host=9 match_index=4 phase=results paused=0\n",
+    )
+    .unwrap();
+    super::recover::recover_into(app.world_mut()).unwrap();
+    let world = app.world_mut();
+    let state = world.query::<&MatchState>().iter(world).next().unwrap();
+    assert_eq!(state.phase, Phase::Lobby);
+    assert_eq!(state.match_index, 5);
+    assert!(state.countdown_active);
+    assert_eq!(state.ticks_left, crate::gameplay::LOBBY_COUNTDOWN_TICKS);
+    assert_eq!(state.map_seed, evoclash_game::rng::mix(42, 5));
+    let settings = world.query::<&RoomSettings>().iter(world).next().unwrap();
+    assert_eq!(settings.host, 9);
+    assert!(settings.code.is_empty());
+    assert!(!settings.private_room);
 }

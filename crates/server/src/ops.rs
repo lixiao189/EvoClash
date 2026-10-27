@@ -35,6 +35,18 @@ impl OpsState {
         }
     }
 
+    /// Heartbeat phase while `--recover` is still catching up, or once the wait has a clock.
+    pub fn publish_phase(&self, phase: &str, left: Option<u32>, join_mode: &str) {
+        if let Ok(mut beat) = self.snapshot.lock() {
+            beat.phase = phase.to_string();
+            beat.phase_left_secs = left;
+            beat.join_mode = join_mode.to_string();
+            if phase == "recovering" && left.is_none() {
+                beat.accepting = false;
+            }
+        }
+    }
+
     /// The next heartbeats say this process is leaving on purpose, not crashing.
     pub fn mark_exiting(&self) {
         if let Ok(mut beat) = self.snapshot.lock() {
@@ -106,6 +118,9 @@ impl Plugin for OpsPlugin {
                 exiting: false,
             })),
         };
+        if config.recover {
+            ops.publish_phase("recovering", None, "none");
+        }
         for url in &config.matchmakers {
             spawn_heartbeat_thread(url.clone(), ops.clone());
         }

@@ -15,6 +15,7 @@
 //! replica can place players and the others keep working when one goes down.
 
 mod fleet;
+mod recovery;
 mod registry;
 mod rooms;
 mod tokens;
@@ -324,12 +325,22 @@ async fn rejoin(State(state): State<Shared>, Json(request): Json<RejoinRequest>)
     }
     let found = {
         let mut registry = state.registry.lock().expect("registry lock");
-        let healthy = registry
-            .matches
-            .get(&request.match_id)
-            .is_some_and(|m| m.healthy(std::time::Instant::now()));
-        if !healthy {
-            return error(StatusCode::GONE, "gone", "match is over or unreachable");
+        match registry.rejoin_gate(&request.match_id) {
+            recovery::RejoinGate::Recovering => {
+                return error_retry(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "recovering",
+                    recovery::RECOVERING_MSG,
+                    recovery::RETRY_AFTER_SECS,
+                );
+            }
+            recovery::RejoinGate::Abandoned => {
+                return error(StatusCode::GONE, "abandoned", recovery::ABANDONED_MSG);
+            }
+            recovery::RejoinGate::Gone => {
+                return error(StatusCode::GONE, "gone", "match is over or unreachable");
+            }
+            recovery::RejoinGate::Ready => {}
         }
         let room_code = registry
             .matches
@@ -473,23 +484,73 @@ async fn janitor(state: Shared) {
     let mut interval = tokio::time::interval(Duration::from_secs(2));
     loop {
         interval.tick().await;
-        let dead = state.registry.lock().expect("registry lock").reap();
-        for id in dead {
-            println!("match {id} stopped heartbeating; removed");
-            if let Some(fleet) = &state.fleet {
-                fleet.kill(&id);
-            }
-        }
         if let Some(fleet) = &state.fleet {
-            for (id, code) in fleet.reap() {
-                println!("match {id} exited ({code:?})");
-                state.registry.lock().expect("registry lock").forget(&id);
+            let exited = fleet.reap();
+            let mut steps = Vec::new();
+            {
+                let mut registry = state.registry.lock().expect("registry lock");
+                for (id, code) in exited {
+                    println!("match {id} exited ({code:?})");
+                    steps.push(registry.on_process_exit(&id, code));
+                }
+                steps.extend(registry.poll_crashes(Instant::now()));
+            }
+            for step in steps {
+                apply_step(&state, fleet, step);
             }
             let mut registry = state.registry.lock().expect("registry lock");
             for _ in registry.idle_matches()..state.warm_matches {
                 if let Err(e) = launch(&mut registry, fleet) {
                     println!("cannot warm a spare match: {e}");
                     break;
+                }
+            }
+        } else {
+            // Adopt-only: nothing to relaunch, so a missed heartbeat just drops the entry.
+            let dead = state.registry.lock().expect("registry lock").reap();
+            for id in dead {
+                println!("match {id} stopped heartbeating; removed");
+            }
+        }
+    }
+}
+
+fn apply_step(state: &AppState, fleet: &Fleet, step: recovery::Step) {
+    match step {
+        recovery::Step::None => {}
+        recovery::Step::Dropped(id) => {
+            println!("match {id} removed");
+            fleet.kill(&id);
+        }
+        recovery::Step::Abandoned(id) => {
+            println!("match {id} abandoned");
+            fleet.kill(&id);
+        }
+        recovery::Step::Relaunch(launch) => {
+            let used = state.registry.lock().expect("registry lock").used_addrs();
+            match fleet.launch_recover(
+                &launch.id,
+                &used,
+                launch.room_seed,
+                launch.room_code.as_deref(),
+            ) {
+                Ok(addr) => {
+                    println!("recovering match {} at {addr}", launch.id);
+                    let mut registry = state.registry.lock().expect("registry lock");
+                    if let Some(entry) = registry.matches.get_mut(&launch.id) {
+                        entry.addr = addr;
+                        entry.launched_at = Instant::now();
+                        entry.last_heartbeat = None;
+                        entry.cert_digest = None;
+                    }
+                }
+                Err(err) => {
+                    println!("cannot recover {}: {err}", launch.id);
+                    state
+                        .registry
+                        .lock()
+                        .expect("registry lock")
+                        .on_process_exit(&launch.id, Some(recovery::ABANDON_EXIT));
                 }
             }
         }

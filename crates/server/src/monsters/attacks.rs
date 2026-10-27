@@ -234,10 +234,14 @@ pub(super) fn ghoul_blasts(
 pub(super) fn puddles(
     mut commands: Commands,
     tick: Res<SimTick>,
+    state: Query<&MatchState>,
     mut puddles: Query<(Entity, &Pos, &Puddle, &mut PuddleLife)>,
     players: Query<(Entity, &Pos, &Vitals), With<Player>>,
     mut damage: ResMut<DamageQueue>,
 ) {
+    if state.iter().any(|s| s.phase == Phase::Recovering) {
+        return;
+    }
     let bite = tick.0.is_multiple_of(PUDDLE_EVERY);
     for (entity, pos, puddle, mut life) in &mut puddles {
         life.ttl = life.ttl.saturating_sub(1);

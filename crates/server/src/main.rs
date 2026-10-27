@@ -36,6 +36,9 @@ use crate::config::ServerConfig;
 
 fn main() {
     let mut config = ServerConfig::from_args();
+    if config.recover {
+        info!("recovering match {}", config.match_id);
+    }
     if let Some(path) = config.replay.clone() {
         // Offline: do not bind a port and do not talk to the matchmaker.
         let code = journal::replay_cli(&path);

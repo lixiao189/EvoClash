@@ -193,6 +193,9 @@ pub(crate) fn balance_bots(
     mut cooldown: Local<u32>,
     rng: Res<SimRng>,
 ) {
+    if state.iter().any(|s| s.phase == Phase::Recovering) {
+        return;
+    }
     let lobby = state.iter().any(|s| s.phase == Phase::Lobby);
     // Outside the lobby, adjust at most once a second so joins/leaves don't thrash.
     // A lobby fills or sheds bots on the same tick a human arrives or leaves.
@@ -491,6 +494,9 @@ fn think(
     let Some(nav) = nav else {
         return;
     };
+    if state.iter().any(|s| s.phase == Phase::Recovering) {
+        return;
+    }
     let lobby = state.iter().any(|s| s.phase == Phase::Lobby);
     let playing = state.iter().any(|s| s.phase == Phase::Playing);
     rng.with(playing, Stream::Bots, |mut rng| {
@@ -764,6 +770,7 @@ mod tests {
             room_code: String::new(),
             log_dir: std::env::temp_dir(),
             replay: None,
+            recover: false,
             logging: false,
         });
         app.insert_resource(SimRng::from_match_seed(1));

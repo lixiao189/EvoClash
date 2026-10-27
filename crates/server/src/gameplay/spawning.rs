@@ -86,6 +86,7 @@ pub(super) fn spawn_match_state(
             winner: None,
             map_seed: arena.seed,
             boss_eta: 0,
+            recover: RecoverWait::default(),
         },
         super::room::settings_from_config(&config),
         Departed::default(),

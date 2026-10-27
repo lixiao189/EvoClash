@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use super::*;
 
 #[derive(Clone, Debug)]
@@ -27,6 +29,10 @@ pub(super) struct Parsed {
     pub(super) header: Header,
     pub(super) events: BTreeMap<u32, Vec<Event>>,
     pub(super) digests: BTreeMap<u32, u64>,
+    /// Ticks after which the sim is held (Recovering) until a matching thaw.
+    pub(super) freezes: BTreeSet<u32>,
+    /// Ticks after which the sim returns to Playing.
+    pub(super) thaws: BTreeSet<u32>,
     pub(super) scores: Option<Vec<ScoreLine>>,
     pub(super) kills: Option<Vec<KillLine>>,
     pub(super) max_tick: u32,
@@ -47,6 +53,8 @@ pub(super) fn parse_log(text: &str) -> Result<Parsed, String> {
     let mut spectators = Vec::new();
     let mut events: BTreeMap<u32, Vec<Event>> = BTreeMap::new();
     let mut digests = BTreeMap::new();
+    let mut freezes = BTreeSet::new();
+    let mut thaws = BTreeSet::new();
     let mut scores = None;
     let mut kills = None;
     let mut max_tick = 0;
@@ -85,6 +93,10 @@ pub(super) fn parse_log(text: &str) -> Result<Parsed, String> {
             if kind == "digest" {
                 let hash = u64::from_str_radix(body.trim(), 16).map_err(|_| "bad digest")?;
                 digests.insert(tick, hash);
+            } else if kind == "freeze" {
+                freezes.insert(tick);
+            } else if kind == "thaw" {
+                thaws.insert(tick);
             } else if let Some(event) = parse_event(kind, body) {
                 events.entry(tick).or_default().push(event);
             }
@@ -113,6 +125,8 @@ pub(super) fn parse_log(text: &str) -> Result<Parsed, String> {
         },
         events,
         digests,
+        freezes,
+        thaws,
         scores,
         kills,
         max_tick,

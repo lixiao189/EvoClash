@@ -47,10 +47,10 @@ Rust · Bevy 0.20（客户端只在浏览器里跑，目标 `wasm32`）· lighty
 
 `logs/` 下两类文本日志（`--log-dir` 可改）：
 
-- `room-<match_id>.log`：房间种子、房间码、是否私人、设置、房主、`match_index`、阶段。每次变化追加一行。给以后的大厅恢复用，现在还不读它。
+- `room-<match_id>.log`：房间种子、房间码、是否私人、设置、房主、`match_index`、阶段。每次变化追加一行。`--recover` 读最后一行。
 - `match-<match_id>-<match_index>.log`：Playing 开始时写下 `PROTOCOL_ID`、构建号（`EVOCLASH_BUILD`，否则 `dev`）、种子、设置、按 `client_id` 排序的名单。之后每个 tick 只记外部输入：`PlayerInput`、`PlayerCommand`、`InventoryMove`、`RoomCommand`、连接 / 断线 / 离开，以及旁观者的进出（`spectate` / `unspectate`）和切换跟随。旁观者不进摘要哈希。机器人、野怪和掉落不记，靠种子推出来。每 640 tick 一条摘要，哈希按 `client_id` 排序后的位置、血量、分数和经验。Results 结束时写分数、击杀序列和带时间戳的 `end`。
 
-内存缓冲，每 16 tick 追加并 `fsync` 一次。崩溃最多丢 0.25 秒输入。带 `end` 的日志在 16 分钟后删除；没写完的留给崩溃恢复，现在不删。
+内存缓冲，每 16 tick 追加并 `fsync` 一次。崩溃最多丢 0.25 秒输入。带 `end` 的日志在 16 分钟后删除；没写完的留给崩溃恢复。
 
 `--replay <文件>` 不监听端口。用日志头重建 Playing，按 tick 注入输入，逐条比对摘要。第一处不一致打印 `digest mismatch at tick N` 并以 1 退出。8 分钟机器人局的重放要在 15 秒内跑完（发布构建里大约 0.6 秒）。
 
@@ -60,7 +60,7 @@ Rust · Bevy 0.20（客户端只在浏览器里跑，目标 `wasm32`）· lighty
 
 席位预留、签名连接令牌（`tokens.rs`）、心跳喂出来的注册表（`registry.rs`）、房间码（`rooms.rs`）、本地拉起进程（`fleet.rs`；`--no-launch` 只接收外面已经启动的服务器）、在 `/play/` 提供网页（`--web-dir`，默认可执行文件旁边的 `web/`）。
 
-心跳每 2 秒一次，带人数、`max_players`（固定 8）、`tick_us`、证书哈希、阶段、`phase_left_secs`、真人 / 机器人数量、是否私人、房间码、`room_seed`、`match_index`、`join_mode`（`none`、`lobby` 或 `spectate`：Playing / Results 中旁观者少于 4 且没在排空）、`spectators`（旁观人数，不算在 `players` 里）、`exiting`。`players` 仍是真人数。匹配服务只信 `join_mode`，不自己重算阶段。主机名会展开成全部解析到的地址（headless Service 的每个副本）。大约 6 秒没有心跳就摘掉。`exiting: true` 表示正常退出前的最后一次心跳，用来和崩溃区分；崩溃后的自动拉起还没做。
+心跳每 2 秒一次，带人数、`max_players`（固定 8）、`tick_us`、证书哈希、阶段、`phase_left_secs`、真人 / 机器人数量、是否私人、房间码、`room_seed`、`match_index`、`join_mode`（`none`、`lobby` 或 `spectate`：Playing / Results 中旁观者少于 4 且没在排空）、`spectators`（旁观人数，不算在 `players` 里）、`exiting`。`players` 仍是真人数。匹配服务只信 `join_mode`，不自己重算阶段。主机名会展开成全部解析到的地址（headless Service 的每个副本）。大约 6 秒没有心跳就摘掉。`exiting: true` 表示正常退出前的最后一次心跳，用来和崩溃区分，崩溃会触发恢复（见「崩溃恢复」）。快进期间心跳报 `recovering` 且 `phase_left_secs` 为空，等人时带冻结的对局剩余秒数。
 
 快速开始：跳过私人房。先在 `join_mode == lobby` 的局里按真人数从多到少、再按 `phase_left_secs` 从多到少（`None` 在最后）挑；没有的话，在 `join_mode == spectate` 的局里挑「本局剩余 + 结算」最短的进旁观；都没有就拉起新局。旁观席有单独的预留，上限 4。私人房在对局中且 `join_mode == spectate` 时，房间码加入直接进旁观。
 
@@ -112,12 +112,22 @@ Rust · Bevy 0.20（客户端只在浏览器里跑，目标 `wasm32`）· lighty
 
 ## 高可用
 
-下面是现在已经做到的。崩溃后把同一局拉起来，是 [plan.md](plan.md) 的第 4 期，还没做。
+下面是现在已经做到的。
 
-- **对局进程崩溃**：目前只影响这一局。匹配服务大约 6 秒内发现心跳中断并摘除，新人去别的局。本地 `fleet` 能看见子进程退出，但还不会用 `--recover` 重启。
+- **对局进程崩溃**：本地 `fleet` 上自动恢复，见下一节。Agones 上还只影响这一局（第 5 期，见 [plan.md](plan.md)）。
 - **匹配服务重启**：对局进程不是它的子进程（`kill_on_drop(false)`），不受影响。新实例靠心跳在大约 2 秒内重新认领。重连密钥是 HMAC，不需要会话存储。注册表本身在内存里，重启会丢掉「正在恢复」这种还没落盘的状态。
 - **玩家断线**：角色保留 20 秒，装备和分数都在。客户端退避重连，用重连密钥换新令牌，接回原来的角色。
 - **多副本**：`--peer` 列出其他副本，新局向每一个发心跳。每个副本都有完整视图，都能分配。席位预留互不共享，偶尔超卖时由服务器的 netcode 人数上限（8 名战斗者 + 4 名旁观者 = 12）兜底，被拒的客户端会换一局。
+
+### 崩溃恢复
+
+只在本地 `fleet`（`make run`、单机部署）上生效。
+
+- **判定**：子进程非零退出或被信号杀死，立即判定；心跳中断约 6 秒且最后一次不是 `exiting`，也判定。`exiting` 和退出码 0 只摘除。注册表条目不删，标成恢复中（`recovery.rs`）。
+- **拉起**：同一个 `--match-id`、`--room-seed`，加 `--recover`。端口和证书会变。最多恢复 2 次，第 3 次崩溃或新进程以退出码 2 结束就放弃：房间关闭，私人房释放房间码，本局不计结果。
+- **快进**（`journal/recover.rs`）：读房间日志最后一行。Lobby / Starting 恢复成 Lobby（公开房重新 20 秒，私人房等房主），Results 进下一个 Lobby。Playing 走 `replay_world` 追到最后刷盘的 tick，逐条比摘要；日志缺失或损坏、构建号不符、摘要不一致、超过 30 秒都以退出码 2 放弃，错误里带 tick。追完在同一份对局日志追加 `recover T` 和 `freeze`。
+- **Recovering 阶段**（`gameplay/recovering.rs`）：不模拟，对局、地堡、巨兽、挂机和自动出发的计时都冻结。所有真人和旁观者算刚断线，20 秒宽限从这一刻重算；`MatchState.recover` 带已回来人数和宽限。全员回来或宽限到时，没回来的人按断线离开处理，然后 3 秒倒计时，全员复活保护，回到 Playing，日志写 `thaw`。`--replay` 遇到 `freeze` / `thaw` 同样冻结，所以同一局可以第二次恢复。
+- **重连**：快进期间 `/v1/rejoin` 和房间码加入返回 503 `recovering`（带 `retry_after`），客户端按它重试，不计入重连次数；快速开始跳过恢复中的房间。追完后照常发新令牌，旧的重连密钥仍然有效。放弃后返回 410 `abandoned`，客户端显示「服务器出错，本局已作废。」和「快速开始」。
 - **客户端**：从哪个地址打开页面，就向哪个地址要匹配。原局没了就自动加入新局。
 - **排空**：`POST /v1/matches/{id}/drain`，或给进程发 SIGTERM（再发一次立刻退出）。当前局打完再退，不中途踢人。没有真人的局直接退出。匹配服务也响应 SIGTERM。
 - **令牌**：匹配服务用共享密钥签名，30 秒过期。名字在加密的 user data 里。生产必须设 `EVOCLASH_NETCODE_KEY`（64 位十六进制），否则用开发密钥。

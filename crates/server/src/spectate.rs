@@ -286,6 +286,9 @@ fn update_spectators(
     let lobby = state
         .iter()
         .any(|match_state| match_state.phase == Phase::Lobby);
+    let recovering = state
+        .iter()
+        .any(|match_state| match_state.phase == Phase::Recovering);
     let ids = ranked_ids(
         players
             .iter()
@@ -303,7 +306,7 @@ fn update_spectators(
         let Ok((_, session, _)) = sessions.get(*entity) else {
             continue;
         };
-        if !session.watched {
+        if recovering || !session.watched {
             continue;
         }
         if live_links.contains(session.link) {
@@ -528,6 +531,7 @@ mod tests {
             room_code: String::new(),
             log_dir: std::env::temp_dir(),
             replay: None,
+            recover: false,
             logging: false,
         }
     }

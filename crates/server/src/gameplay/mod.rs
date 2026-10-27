@@ -30,6 +30,7 @@ mod finale;
 mod flow;
 mod idle;
 mod movement;
+mod recovering;
 mod room;
 mod spawning;
 #[cfg(test)]
@@ -40,6 +41,7 @@ pub use flow::*;
 pub(crate) use idle::Idle;
 use idle::watch_idle;
 pub use movement::*;
+pub use recovering::{begin_wait, resume_playing};
 pub(crate) use room::read_room_commands;
 use room::{maintain_host, private_idle_cap};
 pub use spawning::*;
@@ -104,7 +106,8 @@ impl Plugin for GameplayPlugin {
             .init_resource::<DamageQueue>()
             .init_resource::<LootState>()
             .init_resource::<ResetRequested>()
-            .init_resource::<PendingStart>();
+            .init_resource::<PendingStart>()
+            .init_resource::<recovering::ResumePending>();
         app.configure_sets(
             FixedUpdate,
             (
@@ -121,6 +124,9 @@ impl Plugin for GameplayPlugin {
             FixedUpdate,
             (
                 advance_tick.in_set(SimSet::Input).before(read_human_inputs),
+                recovering::apply_resume
+                    .in_set(SimSet::Input)
+                    .before(read_human_inputs),
                 read_human_inputs.in_set(SimSet::Input),
                 read_room_commands.in_set(SimSet::Input),
                 (
@@ -138,6 +144,7 @@ impl Plugin for GameplayPlugin {
                     watch_idle,
                     loot_spawner,
                     match_flow,
+                    recovering::step_recovering,
                     finale::step_finale,
                     reset_match,
                     place_starters,
