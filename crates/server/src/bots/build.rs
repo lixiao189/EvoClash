@@ -73,6 +73,31 @@ pub(super) fn next_perk(evo: &Evolution, path: EvoPath) -> Option<Perk> {
 pub(super) const GUNS: [ShopItem; 3] = [ShopItem::Rifle, ShopItem::PipeShotgun, ShopItem::Bow];
 pub(super) const ARMORS: [ShopItem; 2] = [ShopItem::Kevlar, ShopItem::ScrapArmor];
 
+/// What to put in the cart. `banked` is set when this life skips a gun it could afford,
+/// so the next life does not also deploy empty.
+pub(super) fn shop_list(scrap: u32, last: WeaponKind, banked: bool) -> (Vec<ShopItem>, bool) {
+    let gun = GUNS.into_iter().find(|item| item.price() <= scrap);
+    let Some(gun) = gun else {
+        return (Vec::new(), false);
+    };
+    let hold = scrap < ShopItem::Rifle.price()
+        && !banked
+        && !matches!(last, WeaponKind::Bow | WeaponKind::PipeShotgun);
+    if hold {
+        return (Vec::new(), true);
+    }
+    let mut cart = vec![gun];
+    let mut left = scrap - gun.price();
+    if let Some(armor) = ARMORS.into_iter().find(|item| item.price() <= left) {
+        left -= armor.price();
+        cart.push(armor);
+    }
+    if left >= ShopItem::Emp.price() {
+        cart.push(ShopItem::Emp);
+    }
+    (cart, false)
+}
+
 /// A bot's death prep, through the same commands a human sends: spend points on the build,
 /// and once it may deploy, buy the best gun, armor and EMPs it can afford and go.
 /// Returns true if the perks changed.
@@ -82,6 +107,8 @@ pub fn prep_bot(
     wallet: &mut Wallet,
     vitals: &mut Vitals,
     life: &mut LifeLog,
+    last_gun: WeaponKind,
+    banked: &mut bool,
 ) -> bool {
     let mut changed = false;
     while let Some(perk) = next_perk(evo, path) {
@@ -93,24 +120,10 @@ pub fn prep_bot(
     if vitals.alive || !can_deploy(vitals.respawn_in) {
         return changed;
     }
-    for group in [&GUNS[..], &ARMORS[..]] {
-        if let Some(item) = group
-            .iter()
-            .copied()
-            .find(|item| wallet.can_buy(*item, evo))
-        {
-            handle_command(&PlayerCommand::Buy(item), evo, wallet, vitals, life, true);
-        }
-    }
-    while wallet.can_buy(ShopItem::Emp, evo) {
-        handle_command(
-            &PlayerCommand::Buy(ShopItem::Emp),
-            evo,
-            wallet,
-            vitals,
-            life,
-            true,
-        );
+    let (cart, hold) = shop_list(wallet.scrap, last_gun, *banked);
+    *banked = hold;
+    for item in cart {
+        handle_command(&PlayerCommand::Buy(item), evo, wallet, vitals, life, true);
     }
     handle_command(&PlayerCommand::Deploy, evo, wallet, vitals, life, true);
     changed
@@ -119,7 +132,7 @@ pub fn prep_bot(
 pub(super) fn prepare(
     state: Query<&MatchState>,
     mut bots: Query<(
-        &Bot,
+        &mut Bot,
         &mut Evolution,
         &mut Wallet,
         &mut Vitals,
@@ -131,8 +144,16 @@ pub(super) fn prepare(
     if !state.iter().any(|s| s.phase == Phase::Playing) {
         return;
     }
-    for (bot, mut evo, mut wallet, mut vitals, mut skills, mut life) in &mut bots {
-        if prep_bot(bot.path, &mut evo, &mut wallet, &mut vitals, &mut life) {
+    for (mut bot, mut evo, mut wallet, mut vitals, mut skills, mut life) in &mut bots {
+        if prep_bot(
+            bot.path,
+            &mut evo,
+            &mut wallet,
+            &mut vitals,
+            &mut life,
+            bot.last_gun,
+            &mut bot.banked,
+        ) {
             apply_evolution(&evo, &mut skills, &mut vitals);
         }
     }

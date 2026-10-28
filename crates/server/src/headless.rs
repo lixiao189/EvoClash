@@ -15,7 +15,9 @@ use crate::bots::{BotSkill, SkillMix};
 use crate::config::{HeadlessOpts, ServerConfig};
 use crate::gameplay::{MATCH_TICKS, PendingStart, ResetRequested};
 use crate::journal::install_sim;
-use crate::stats::{Fold, MatchRecord, StatsBus, StatsPlugin, print_table, targets};
+use crate::stats::{
+    Fold, MatchRecord, StatsBus, StatsPlugin, autopsy_summary, print_table, targets,
+};
 
 pub fn run(opts: &HeadlessOpts) -> i32 {
     let skills = parse_skills(&opts.skills);
@@ -48,6 +50,7 @@ pub fn run(opts: &HeadlessOpts) -> i32 {
         "repeat_winners": repeat,
         "per_match": records,
         "targets": rows,
+        "autopsy": autopsy_summary(&records),
     });
     if let Some(parent) = opts.report.parent()
         && !parent.as_os_str().is_empty()

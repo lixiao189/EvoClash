@@ -11,8 +11,49 @@ use evoclash_game::protocol::GameEvent;
 
 use crate::gameplay::{DamageQueue, Outbox, SimSet, flush_outbox, reset_match, resolve_damage};
 
-pub use fold::Fold;
+pub use fold::{Autopsy, Fold, TraceSnap};
 pub use targets::{print_table, targets};
+
+/// Stance / weapon / nearby-threat picture of bot deaths, grouped by how they died.
+pub fn autopsy_summary(records: &[MatchRecord]) -> serde_json::Value {
+    use std::collections::BTreeMap;
+    let mut snaps: BTreeMap<&str, Vec<&TraceSnap>> = BTreeMap::new();
+    for record in records {
+        for case in &record.autopsies {
+            snaps
+                .entry(case.how.as_str())
+                .or_default()
+                .extend(&case.snaps);
+        }
+    }
+    let mut out = serde_json::Map::new();
+    for (how, rows) in snaps {
+        let mut stance = BTreeMap::<u8, usize>::new();
+        let mut weapon = BTreeMap::<&str, usize>::new();
+        let mut threats: Vec<u8> = rows.iter().map(|s| s.threat_n).collect();
+        let mut stick = 0usize;
+        for snap in &rows {
+            *stance.entry(snap.stance).or_default() += 1;
+            *weapon.entry(snap.weapon.as_str()).or_default() += 1;
+            if snap.weapon == "木棍" {
+                stick += 1;
+            }
+        }
+        threats.sort_unstable();
+        let mid = threats.get(threats.len() / 2).copied().unwrap_or(0);
+        out.insert(
+            how.to_string(),
+            serde_json::json!({
+                "snaps": rows.len(),
+                "stance": stance,
+                "weapon": weapon,
+                "threat_median": mid,
+                "stick_pct": if rows.is_empty() { 0 } else { stick * 100 / rows.len() },
+            }),
+        );
+    }
+    serde_json::Value::Object(out)
+}
 
 /// Same ordering as `gameplay::final_rank`: higher is better.
 pub(super) fn rank_key(
@@ -159,6 +200,12 @@ pub struct MatchRecord {
     pub scrap_earned: u32,
     pub scrap_player: u32,
     pub scrap_container: u32,
+    /// Safes a combatant cracked. Not the vault-open announcement.
+    pub safes_cracked: u32,
+    /// Times a bot entered Retreat, once per continuous stretch.
+    pub bot_retreats: u32,
+    /// Times a bot entered Avoid, once per continuous stretch.
+    pub bot_avoids: u32,
     pub snap_2m: Option<Vec<SnapRow>>,
     pub snap_5m: Option<Vec<SnapRow>>,
     pub snap_6m: Option<Vec<SnapRow>>,
@@ -176,6 +223,11 @@ pub struct MatchRecord {
     pub boss_end_tick: Option<u32>,
     pub boss_top_not_leader: Option<bool>,
     pub max_streak: u32,
+    /// Bot deaths, in order, capped at 40. Headless only.
+    pub autopsies: Vec<Autopsy>,
+    /// Lives that started this match, and how many of those already held a gun.
+    pub births: u32,
+    pub births_armed: u32,
     pub monster_ttk_ticks: Vec<u32>,
     pub elite_ttk_ticks: Vec<u32>,
     pub fight_ticks: Vec<u32>,

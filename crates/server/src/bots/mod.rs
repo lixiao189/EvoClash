@@ -21,8 +21,11 @@ use crate::rng::{SimRng, Stream};
 use evoclash_game::evolution::seen_from;
 
 mod build;
+mod engage;
+mod fight;
 mod nav;
 mod roster;
+mod scavenge;
 #[cfg(test)]
 mod tests;
 mod think;
@@ -129,6 +132,23 @@ pub struct Bot {
     pub skill: BotSkill,
     /// Evolution path whose build order this bot spends its points on.
     pub path: EvoPath,
+    /// 0.7..1.3, rolled in [`seed_match_once`] after aim and path. Scales how long
+    /// this bot scavenges and how readily it picks a fight. 1.0 until then.
+    aggression: f32,
+    /// Safe this bot has committed to cracking, so a nearer crate doesn't reset it.
+    crack: Option<Entity>,
+    /// Last full think: 0 idle, 1 avoid, 2 retreat, 3 fight. A repeat does not count.
+    mind: u8,
+    /// Sim tick until `mind` may change again.
+    mind_until: u32,
+    /// Sim tick the current dodge started while the threat could still see us. 0 if hidden.
+    hide_since: u32,
+    /// Who the held mind is about.
+    focus: Option<Entity>,
+    /// Best gun carried last life. Stick if they never had one.
+    last_gun: WeaponKind,
+    /// Skipped a gun they could afford, to pool scrap for a rifle.
+    banked: bool,
 }
 
 impl Bot {
@@ -146,8 +166,28 @@ impl Bot {
             reaction_thinks: REACTION_THINKS,
             skill: BotSkill::Default,
             path: EvoPath::Mutant,
+            aggression: 1.0,
+            crack: None,
+            mind: 0,
+            mind_until: 0,
+            hide_since: 0,
+            focus: None,
+            last_gun: WeaponKind::Stick,
+            banked: false,
         }
     }
+
+    /// Headless autopsy only: stance, who they're on, and a safe they're cracking.
+    pub(crate) fn trace(&self) -> (u8, Option<Entity>, Option<Entity>) {
+        (self.mind, self.focus.or(self.target), self.crack)
+    }
+}
+
+/// Headless tally of stance edges. Online matches ignore it.
+#[derive(Resource, Default)]
+pub(crate) struct BotPulse {
+    pub retreats: u32,
+    pub avoids: u32,
 }
 
 /// Walkable grid for the current arena; raiders path with it too.
@@ -162,6 +202,7 @@ pub struct BotsPlugin;
 
 impl Plugin for BotsPlugin {
     fn build(&self, app: &mut App) {
+        app.init_resource::<BotPulse>();
         app.add_systems(
             FixedUpdate,
             (rebuild_nav, seed_match_once, balance_bots, prepare, think)
