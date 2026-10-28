@@ -48,7 +48,7 @@ fn high_win(done: &[&MatchRecord]) -> TargetRow {
             27,
             "高手夺冠率",
             "hard",
-            "25–40%",
+            "25-40%",
             "需要 --skills high:1,default:7",
         );
     }
@@ -66,7 +66,7 @@ fn high_win(done: &[&MatchRecord]) -> TargetRow {
         27,
         "高手夺冠率",
         "hard",
-        "25–40%",
+        "25-40%",
         wins,
         rows.len() as u32,
         |v| (25.0..=40.0).contains(v),
@@ -89,7 +89,7 @@ fn high_rank(done: &[&MatchRecord]) -> TargetRow {
             28,
             "高手平均名次",
             "soft",
-            "2.0–3.0",
+            "2.0-3.0",
             "需要 --skills high:1,default:7",
         );
     }
@@ -98,7 +98,7 @@ fn high_rank(done: &[&MatchRecord]) -> TargetRow {
         28,
         "高手平均名次",
         "soft",
-        "2.0–3.0",
+        "2.0-3.0",
         Some(json_num(v)),
         Some((2.0..=3.0).contains(&v)),
         None,
@@ -153,7 +153,7 @@ fn sourced_row(done: &[&MatchRecord]) -> TargetRow {
         31,
         "冠军击杀来自地堡/巨兽/保险柜",
         "soft",
-        "25–50%",
+        "25-50%",
         num,
         den,
         |v| (25.0..=50.0).contains(v),

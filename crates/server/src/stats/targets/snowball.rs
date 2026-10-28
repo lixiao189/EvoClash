@@ -8,7 +8,7 @@ pub(super) fn rows(done: &[&MatchRecord]) -> Vec<TargetRow> {
         19,
         "2:00 第一名最终夺冠",
         "hard",
-        "20–35%",
+        "20-35%",
         done.iter()
             .filter(|m| leader_won(m, m.snap_2m.as_deref()))
             .count() as u32,
@@ -19,7 +19,7 @@ pub(super) fn rows(done: &[&MatchRecord]) -> Vec<TargetRow> {
         20,
         "5:00 第一名最终夺冠",
         "soft",
-        "35–55%",
+        "35-55%",
         done.iter()
             .filter(|m| leader_won(m, m.snap_5m.as_deref()))
             .count() as u32,
@@ -57,7 +57,7 @@ pub(super) fn rows(done: &[&MatchRecord]) -> Vec<TargetRow> {
         24,
         "悬赏后 60 秒内被杀",
         "soft",
-        "55–80%",
+        "55-80%",
         done.iter().map(|m| m.bounties_killed_60s).sum(),
         done.iter().map(|m| m.bounties).sum(),
         |v| (55.0..=80.0).contains(v),
@@ -66,7 +66,7 @@ pub(super) fn rows(done: &[&MatchRecord]) -> Vec<TargetRow> {
         25,
         "以弱胜强击杀",
         "soft",
-        "15–30%",
+        "15-30%",
         done.iter()
             .flat_map(|m| m.kills.iter())
             .filter(|k| k.cause == "player" && k.underdog)

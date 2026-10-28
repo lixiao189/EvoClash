@@ -10,7 +10,7 @@ pub(super) fn rows(done: &[&MatchRecord]) -> Vec<TargetRow> {
         14,
         "实际交战时长",
         "soft",
-        "2–5 秒",
+        "2-5 秒",
         &mut done
             .iter()
             .flat_map(|m| m.fight_ticks.iter().map(|t| secs(*t)))
@@ -42,14 +42,14 @@ pub(super) fn rows(done: &[&MatchRecord]) -> Vec<TargetRow> {
         17,
         "高一级 1v1 胜率",
         "hard",
-        "65–80%",
+        "65-80%",
         "需要场景对决（下一阶段）",
     ));
     rows.push(skip(
         18,
         "新手高配打高手低配",
         "hard",
-        "40–60%",
+        "40-60%",
         "需要场景对决（下一阶段）",
     ));
     rows
@@ -126,7 +126,7 @@ fn ttk_row() -> TargetRow {
         level: "hard",
         status: "measured",
         value: Some(serde_json::Value::Object(value)),
-        target: "T1 1.0–1.8 秒，T2 0.8–1.4 秒，T3 0.6–1.2 秒".into(),
+        target: "T1 1.0-1.8 秒，T2 0.8-1.4 秒，T3 0.6-1.2 秒".into(),
         ok: Some(ok),
         reason: None,
     }

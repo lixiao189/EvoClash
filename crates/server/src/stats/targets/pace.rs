@@ -6,7 +6,7 @@ pub(super) fn rows(done: &[&MatchRecord]) -> Vec<TargetRow> {
         1,
         "首次玩家击杀",
         "hard",
-        "45–90 秒",
+        "45-90 秒",
         &mut done
             .iter()
             .map(|m| {
@@ -25,7 +25,7 @@ pub(super) fn rows(done: &[&MatchRecord]) -> Vec<TargetRow> {
         2,
         "每分钟玩家击杀",
         "hard",
-        "2.5–5",
+        "2.5-5",
         &mut done
             .iter()
             .map(|m| player_kills(m) as f64 / 8.0)
@@ -46,7 +46,7 @@ pub(super) fn rows(done: &[&MatchRecord]) -> Vec<TargetRow> {
         4,
         "单条命存活",
         "soft",
-        "90–180 秒",
+        "90-180 秒",
         done,
         |m| {
             m.lives

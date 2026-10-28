@@ -7,7 +7,7 @@ pub(super) fn rows(done: &[&MatchRecord]) -> Vec<TargetRow> {
         34,
         "野怪/巨兽/环境致死",
         "hard",
-        "10–25%",
+        "10-25%",
         done.iter()
             .flat_map(|m| m.kills.iter())
             .filter(|k| k.cause != "player")
@@ -20,7 +20,7 @@ pub(super) fn rows(done: &[&MatchRecord]) -> Vec<TargetRow> {
         36,
         "巨兽被击杀率",
         "soft",
-        "60–85%",
+        "60-85%",
         done.iter().filter(|m| m.boss_killed).count() as u32,
         done.iter().filter(|m| m.boss_appeared).count() as u32,
         |v| (60.0..=85.0).contains(v),
@@ -29,7 +29,7 @@ pub(super) fn rows(done: &[&MatchRecord]) -> Vec<TargetRow> {
         37,
         "巨兽出现到死亡",
         "soft",
-        "90–150 秒",
+        "90-150 秒",
         &mut done
             .iter()
             .filter(|m| m.boss_killed)
@@ -67,7 +67,7 @@ fn scrap_row(done: &[&MatchRecord]) -> TargetRow {
         33,
         "打怪废料占比",
         "soft",
-        "45–65%",
+        "45-65%",
         monster,
         earned,
         |v| (45.0..=65.0).contains(v),
@@ -100,7 +100,7 @@ fn ttk_monsters(done: &[&MatchRecord]) -> TargetRow {
                 35,
                 "普通怪击杀耗时",
                 "soft",
-                "2–5 秒（精英 ×2）",
+                "2-5 秒（精英 ×2）",
                 Some(serde_json::json!({"normal": n, "elite": e})),
                 Some(ok),
                 None,
@@ -110,7 +110,7 @@ fn ttk_monsters(done: &[&MatchRecord]) -> TargetRow {
             35,
             "普通怪击杀耗时",
             "soft",
-            "2–5 秒（精英 ×2）",
+            "2-5 秒（精英 ×2）",
             None,
             None,
             None,

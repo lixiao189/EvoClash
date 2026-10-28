@@ -6,7 +6,7 @@ pub(super) fn rows(done: &[&MatchRecord]) -> Vec<TargetRow> {
         7,
         "每条命开箱+保险柜",
         "soft",
-        "5–10",
+        "5-10",
         done,
         |m| m.lives.iter().map(|l| l.opens as f64).collect(),
         |v| (5.0..=10.0).contains(v),
@@ -48,7 +48,7 @@ pub(super) fn rows(done: &[&MatchRecord]) -> Vec<TargetRow> {
         11,
         "T4 持有时长",
         "hard",
-        "40–90 秒",
+        "40-90 秒",
         &mut done
             .iter()
             .flat_map(|m| m.t4_hold_ticks.iter().map(|t| secs(*t)))
@@ -60,7 +60,7 @@ pub(super) fn rows(done: &[&MatchRecord]) -> Vec<TargetRow> {
         12,
         "冠军拿到过 T4",
         "soft",
-        "50–80%",
+        "50-80%",
         done.iter()
             .filter(|m| {
                 m.winner_id
