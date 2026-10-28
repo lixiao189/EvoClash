@@ -399,6 +399,21 @@ impl RangedWeapon for Laser {
 
 pub struct Railgun;
 
+impl Railgun {
+    /// Against a player. Monsters, the behemoth, crates and barrels still take [`Weapon::damage`].
+    pub const PLAYER_DAMAGE: f32 = 50.0;
+}
+
+/// `stored` is [`Weapon::damage`] (72) times the shooter's multipliers.
+/// Players are scaled to 50; every other target keeps `stored`.
+pub fn railgun_hit_damage(stored: f32, vs_player: bool) -> f32 {
+    if vs_player {
+        stored * Railgun::PLAYER_DAMAGE / Railgun.damage()
+    } else {
+        stored
+    }
+}
+
 impl Weapon for Railgun {
     fn name(&self) -> &'static str {
         "轨道炮"
@@ -459,6 +474,16 @@ mod tests {
         assert!(!stick.strikes(-beside, 22.0, aim, 0.0));
         // Overlapping the wielder always counts.
         assert!(stick.strikes(Vec2::new(-10.0, 0.0), 22.0, aim, 0.0));
+    }
+
+    #[test]
+    fn railgun_hits_players_for_50_and_everything_else_for_72() {
+        assert_eq!(WeaponKind::Railgun.spec().damage(), 72.0);
+        assert_eq!(railgun_hit_damage(72.0, true), 50.0);
+        assert_eq!(railgun_hit_damage(72.0, false), 72.0);
+        // Perks and 狂暴 scale both numbers.
+        assert_eq!(railgun_hit_damage(72.0 * 1.5, true), 75.0);
+        assert_eq!(railgun_hit_damage(72.0 * 1.5, false), 108.0);
     }
 
     #[test]

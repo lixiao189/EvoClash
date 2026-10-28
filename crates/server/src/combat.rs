@@ -3,7 +3,7 @@
 
 use bevy::prelude::*;
 use evoclash_game::evolution::{Evolution, SkillState};
-use evoclash_game::items::{Arm, RangedWeapon, THROW_SLOT, WeaponKind};
+use evoclash_game::items::{Arm, RangedWeapon, THROW_SLOT, WeaponKind, railgun_hit_damage};
 use evoclash_game::map::segment_circle;
 use evoclash_game::protocol::*;
 use evoclash_game::sim::{Arena, DT, PLAYER_RADIUS};
@@ -428,10 +428,20 @@ pub(crate) fn step_projectiles(
                 }
                 for (_, target) in &hits {
                     flight.already_hit.push(*target);
+                    let vs_player =
+                        targets
+                            .get(*target)
+                            .is_ok_and(|(_, _, _, _, monster, prop, turret)| {
+                                monster.is_none() && prop.is_none() && turret.is_none()
+                            });
+                    let amount = match weapon {
+                        Some(WeaponKind::Railgun) => railgun_hit_damage(flight.damage, vs_player),
+                        _ => flight.damage,
+                    };
                     damage.0.push(Damage {
                         target: *target,
                         attacker: Some(flight.owner),
-                        amount: flight.damage,
+                        amount,
                         armor_mult: flight.armor_mult,
                         weapon,
                         emp: false,
@@ -452,5 +462,83 @@ pub(crate) fn step_projectiles(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use evoclash_game::map::PropKind;
+
+    use super::*;
+    use crate::gameplay::{DamageQueue, Outbox, PosHistory, SimTick};
+
+    #[test]
+    fn rail_shot_deals_50_to_a_player_and_72_to_a_monster_and_a_crate() {
+        let mut app = App::new();
+        app.init_resource::<Arena>()
+            .init_resource::<SimTick>()
+            .init_resource::<DamageQueue>()
+            .init_resource::<Outbox>();
+        app.add_systems(Update, step_projectiles);
+        let owner = app.world_mut().spawn_empty().id();
+        let player = app
+            .world_mut()
+            .spawn((
+                Pos(Vec2::new(80.0, 0.0)),
+                Vitals::default(),
+                PosHistory::default(),
+            ))
+            .id();
+        let monster = app
+            .world_mut()
+            .spawn((
+                Pos(Vec2::new(200.0, 0.0)),
+                Vitals::default(),
+                PosHistory::default(),
+                Monster {
+                    kind: MonsterKind::Roach,
+                    elite: true,
+                },
+            ))
+            .id();
+        let crate_e = app
+            .world_mut()
+            .spawn((
+                Pos(Vec2::new(320.0, 0.0)),
+                Vitals::default(),
+                PosHistory::default(),
+                Prop {
+                    kind: PropKind::Crate,
+                    tier: 1,
+                    progress: 0,
+                    open: false,
+                },
+            ))
+            .id();
+        app.world_mut().spawn((
+            Projectile {
+                kind: ProjectileKind::Shot(WeaponKind::Railgun),
+                vel: Vec2::new(400.0 * 64.0, 0.0),
+            },
+            Pos(Vec2::ZERO),
+            Flight {
+                owner,
+                rewind: 0,
+                ttl: 8,
+                damage: 72.0,
+                armor_mult: 1.5,
+                piercing: true,
+                already_hit: Vec::new(),
+                fauna: false,
+                cause: None,
+                radius: 0.0,
+            },
+        ));
+        app.update();
+        let queue = &app.world().resource::<DamageQueue>().0;
+        let amount = |id: Entity| queue.iter().find(|d| d.target == id).map(|d| d.amount);
+        assert_eq!(amount(player), Some(50.0));
+        assert_eq!(amount(monster), Some(72.0));
+        assert_eq!(amount(crate_e), Some(72.0));
     }
 }

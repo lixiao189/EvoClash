@@ -1,5 +1,7 @@
 //! Applying queued damage, death, respawn and dropped loot expiry.
 
+use evoclash_game::sim::PLAYER_RADIUS;
+
 use super::*;
 use crate::rng::SimRng;
 
@@ -47,6 +49,11 @@ pub fn resolve_damage(
         return;
     }
     let playing = state.phase == Phase::Playing;
+    let elapsed = if playing {
+        MATCH_TICKS.saturating_sub(state.ticks_left)
+    } else {
+        0
+    };
     // Snapshot first place before this tick's deaths change kills or deaths.
     let leader = if super::finale::finale_for_kills(&state) {
         super::finale::leader_client_id(
@@ -77,6 +84,16 @@ pub fn resolve_damage(
             Some(tier) if !dmg.emp => dmg.amount * underdog_mult(tier, target_tier),
             _ => dmg.amount,
         };
+        // Ordinary fauna and elites, not the behemoth, from 5:00 of Playing.
+        if playing
+            && dmg.attacker.is_some_and(|id| {
+                monsters
+                    .get(id)
+                    .is_ok_and(|monster| monster.kind != MonsterKind::Behemoth)
+            })
+        {
+            amount *= sim::fauna_player_mult(elapsed);
+        }
         if dmg.emp {
             vitals.armor_points = match vitals.armor {
                 ArmorKind::PowerArmor => 0.0,
@@ -317,12 +334,133 @@ pub(super) fn salvage_target(loadout: &Loadout) -> Option<WeaponKind> {
         })
 }
 
+/// First 3 minutes (more than 5:00 left): the old edge spawn, farthest from the living.
+const EARLY_UNTIL: u32 = 3 * 60 * TICKS_PER_SEC;
+/// 6:00 onward: street points inside this radius of the bunker.
+const LATE_FROM: u32 = 6 * 60 * TICKS_PER_SEC;
+/// 3:00 to 6:00: a spawn counts only when the nearest living player is at least this far.
+const MID_CLEAR: f32 = 480.0;
+const LATE_RADIUS: f32 = 480.0;
+const LATE_CLEAR: f32 = 300.0;
+/// Fixed grid. No RNG, so a replay that respawns on the same tick lands on the same cell.
+const LATE_STEP: i32 = 40;
+
+fn separation_sq(p: Vec2, alive: &[Vec2]) -> f32 {
+    alive
+        .iter()
+        .map(|q| p.distance_squared(*q))
+        .fold(f32::MAX, f32::min)
+}
+
+fn farther(a: Vec2, b: Vec2, alive: &[Vec2]) -> Vec2 {
+    match separation_sq(a, alive).total_cmp(&separation_sq(b, alive)) {
+        std::cmp::Ordering::Greater => a,
+        std::cmp::Ordering::Less => b,
+        std::cmp::Ordering::Equal => {
+            if (a.x.to_bits(), a.y.to_bits()) <= (b.x.to_bits(), b.y.to_bits()) {
+                a
+            } else {
+                b
+            }
+        }
+    }
+}
+
+fn farthest(points: &[Vec2], alive: &[Vec2]) -> Option<Vec2> {
+    points.iter().copied().reduce(|a, b| farther(a, b, alive))
+}
+
+fn closest_to_center(points: &[Vec2], n: usize) -> Vec<Vec2> {
+    let mut idx: Vec<usize> = (0..points.len()).collect();
+    idx.sort_by(|&a, &b| {
+        points[a]
+            .length_squared()
+            .total_cmp(&points[b].length_squared())
+            .then(a.cmp(&b))
+    });
+    idx.truncate(n.min(points.len()));
+    idx.into_iter().map(|i| points[i]).collect()
+}
+
+fn pick_cleared(points: &[Vec2], alive: &[Vec2], clear: f32) -> Option<Vec2> {
+    let clear_sq = clear * clear;
+    let far: Vec<Vec2> = points
+        .iter()
+        .copied()
+        .filter(|p| separation_sq(*p, alive) >= clear_sq)
+        .collect();
+    let pool: &[Vec2] = if far.is_empty() { points } else { &far };
+    farthest(pool, alive)
+}
+
+fn on_street(map: &ArenaMap, p: Vec2, obstacles: &[(Vec2, f32)]) -> bool {
+    if map.building_at(p).is_some() || map.in_hazard(p) {
+        return false;
+    }
+    if map.resolve_circle(p, PLAYER_RADIUS) != p {
+        return false;
+    }
+    obstacles.iter().all(|(c, r)| {
+        let min = r + PLAYER_RADIUS;
+        p.distance_squared(*c) >= min * min
+    })
+}
+
+fn disk_points() -> Vec<Vec2> {
+    let n = (LATE_RADIUS / LATE_STEP as f32) as i32;
+    let radius_sq = LATE_RADIUS * LATE_RADIUS;
+    let mut points = Vec::new();
+    for iy in -n..=n {
+        for ix in -n..=n {
+            let p = Vec2::new((ix * LATE_STEP) as f32, (iy * LATE_STEP) as f32);
+            if p.length_squared() <= radius_sq {
+                points.push(p);
+            }
+        }
+    }
+    points
+}
+
+/// Playing respawn spot. `elapsed_ticks` is time since Playing started.
+fn pick_spawn(
+    map: &ArenaMap,
+    alive: &[Vec2],
+    elapsed_ticks: u32,
+    obstacles: &[(Vec2, f32)],
+) -> Vec2 {
+    if elapsed_ticks >= LATE_FROM {
+        let disk = disk_points();
+        let street: Vec<Vec2> = disk
+            .iter()
+            .copied()
+            .filter(|p| on_street(map, *p, obstacles))
+            .collect();
+        let clear_sq = LATE_CLEAR * LATE_CLEAR;
+        let cleared: Vec<Vec2> = street
+            .iter()
+            .copied()
+            .filter(|p| separation_sq(*p, alive) >= clear_sq)
+            .collect();
+        if let Some(spot) = farthest(&cleared, alive) {
+            return spot;
+        }
+        // Nothing on the street is 300 clear: farthest grid point inside the disk.
+        return farthest(&disk, alive).unwrap_or(Vec2::ZERO);
+    }
+    if elapsed_ticks < EARLY_UNTIL {
+        return farthest(&map.spawn_points, alive).unwrap_or(Vec2::ZERO);
+    }
+    let inner = closest_to_center(&map.spawn_points, 4);
+    pick_cleared(&inner, alive, MID_CLEAR).unwrap_or(Vec2::ZERO)
+}
+
 /// Bring the dead back. Playing: only after Deploy / DeployLast (`deploy_asap`); an
 /// unconfirmed human sticks at `respawn_in == 1` until `deploy_in` hits 0, which sends
 /// them with DeployLast. Bots are unchanged (their `deploy_in` stays 0). Lobby: the 2s
 /// timer counts down to 0 on its own. Whatever was bought in the shop is equipped on the spot.
 pub fn respawn(
     arena: Res<Arena>,
+    obstacles: Option<Res<Obstacles>>,
     tick: Res<SimTick>,
     state: Query<&MatchState>,
     rng: Option<Res<SimRng>>,
@@ -408,7 +546,13 @@ pub fn respawn(
         if vitals.respawn_in > 0 {
             continue;
         }
-        // Lobby: a random spawn. A match: as far as possible from everyone else.
+        // Lobby: a random spawn. Playing: early edge, then the inner four, then the streets
+        // by the bunker. Anything else (Starting) keeps the old farthest edge spawn.
+        let living: Vec<Vec2> = alive
+            .iter()
+            .filter(|(e, _)| *e != entity)
+            .map(|(_, q)| *q)
+            .collect();
         let spot = if lobby && !arena.spawn_points.is_empty() {
             let index = rng.as_ref().map_or(0, |rng| {
                 rng.with(false, crate::rng::Stream::Loot, |rng| {
@@ -417,22 +561,15 @@ pub fn respawn(
                 })
             });
             arena.spawn_points[index]
-        } else {
-            arena
-                .spawn_points
+        } else if playing {
+            let elapsed = state
                 .iter()
-                .copied()
-                .max_by(|a, b| {
-                    let score = |p: &Vec2| {
-                        alive
-                            .iter()
-                            .filter(|(e, _)| *e != entity)
-                            .map(|(_, q)| p.distance(*q))
-                            .fold(f32::MAX, f32::min)
-                    };
-                    score(a).total_cmp(&score(b))
-                })
-                .unwrap_or(Vec2::ZERO)
+                .find(|s| s.phase == Phase::Playing)
+                .map_or(0, |s| MATCH_TICKS.saturating_sub(s.ticks_left));
+            let blocks = obstacles.as_ref().map(|o| o.0.as_slice()).unwrap_or(&[]);
+            pick_spawn(&arena, &living, elapsed, blocks)
+        } else {
+            farthest(&arena.spawn_points, &living).unwrap_or(Vec2::ZERO)
         };
         pos.0 = spot;
         alive.push((entity, spot));
@@ -466,5 +603,137 @@ pub(super) fn expire_drops(
         if expires.0 == 0 {
             commands.entity(entity).despawn();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inner4(map: &ArenaMap) -> Vec<Vec2> {
+        let mut idx: Vec<usize> = (0..map.spawn_points.len()).collect();
+        idx.sort_by(|&a, &b| {
+            map.spawn_points[a]
+                .length_squared()
+                .total_cmp(&map.spawn_points[b].length_squared())
+                .then(a.cmp(&b))
+        });
+        idx.truncate(4);
+        idx.into_iter().map(|i| map.spawn_points[i]).collect()
+    }
+
+    #[test]
+    fn playing_spawns_change_at_three_and_six_minutes() {
+        let map = ArenaMap::generate(1);
+        let inner = inner4(&map);
+        assert_eq!(inner.len(), 4);
+        let open = inner[0];
+        let campers = vec![inner[1], inner[2], inner[3]];
+
+        let early = pick_spawn(&map, &campers, EARLY_UNTIL - 1, &[]);
+        let mid = pick_spawn(&map, &campers, EARLY_UNTIL, &[]);
+        let still_mid = pick_spawn(&map, &campers, LATE_FROM - 1, &[]);
+        assert_eq!(mid, open, "3:00 picks the inner spawn clear of the living");
+        assert_eq!(still_mid, open);
+        assert!(
+            map.spawn_points.contains(&early),
+            "before 3:00 a respawn is still an edge spawn"
+        );
+        assert_ne!(early, open);
+
+        let crowded: Vec<Vec2> = inner.iter().map(|p| *p + Vec2::new(100.0, 0.0)).collect();
+        let fallback = pick_spawn(&map, &crowded, EARLY_UNTIL, &[]);
+        let expected = inner
+            .iter()
+            .copied()
+            .reduce(|a, b| farther(a, b, &crowded))
+            .unwrap();
+        assert_eq!(fallback, expected);
+        assert!(separation_sq(fallback, &crowded) < MID_CLEAR * MID_CLEAR);
+
+        let late_alive = [Vec2::new(2000.0, 1200.0)];
+        let late = pick_spawn(&map, &late_alive, LATE_FROM, &[]);
+        assert!(late.length_squared() <= LATE_RADIUS * LATE_RADIUS);
+        assert!(on_street(&map, late, &[]));
+        assert!(separation_sq(late, &late_alive) >= LATE_CLEAR * LATE_CLEAR);
+        assert_eq!(
+            late,
+            pick_spawn(&map, &late_alive, 8 * 60 * TICKS_PER_SEC, &[])
+        );
+        assert!(
+            !map.spawn_points.contains(&late),
+            "6:00 leaves the edge spawn list"
+        );
+
+        let blocked = pick_spawn(&map, &late_alive, LATE_FROM, &[(late, 30.0)]);
+        assert_ne!(blocked, late);
+        assert!(on_street(&map, blocked, &[(late, 30.0)]));
+        assert!(blocked.length_squared() <= LATE_RADIUS * LATE_RADIUS);
+    }
+
+    fn fauna_hp(elapsed: u32, kind: MonsterKind) -> f32 {
+        let mut app = App::new();
+        app.init_resource::<DamageQueue>()
+            .init_resource::<Outbox>()
+            .init_resource::<XpQueue>()
+            .init_resource::<Dealt>()
+            .init_resource::<SimTick>();
+        app.world_mut().spawn(MatchState {
+            phase: Phase::Playing,
+            ticks_left: MATCH_TICKS.saturating_sub(elapsed),
+            ..default()
+        });
+        app.add_systems(Update, resolve_damage);
+        let attacker = app
+            .world_mut()
+            .spawn(Monster {
+                kind,
+                elite: kind != MonsterKind::Behemoth,
+            })
+            .id();
+        let player = app
+            .world_mut()
+            .spawn((
+                Player {
+                    client_id: 1,
+                    name: "p".into(),
+                    color: [1.0; 3],
+                    bot: true,
+                },
+                Pos(Vec2::ZERO),
+                Vitals::default(),
+                Loadout::default(),
+                Stats::default(),
+                Evolution::default(),
+                SkillState::default(),
+                Recovery::default(),
+                Wallet::default(),
+                LifeLog::default(),
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<DamageQueue>()
+            .0
+            .push(Damage {
+                target: player,
+                attacker: Some(attacker),
+                amount: 40.0,
+                armor_mult: 1.0,
+                weapon: None,
+                emp: false,
+                cause: Some("撕咬"),
+            });
+        app.update();
+        app.world().get::<Vitals>(player).unwrap().hp
+    }
+
+    #[test]
+    fn fauna_damage_drops_after_five_minutes_except_the_behemoth() {
+        let before = 5 * 60 * TICKS_PER_SEC - 1;
+        let after = 5 * 60 * TICKS_PER_SEC;
+        assert_eq!(fauna_hp(before, MonsterKind::Roach), 60.0);
+        assert_eq!(fauna_hp(after, MonsterKind::Roach), 76.0);
+        assert_eq!(fauna_hp(after, MonsterKind::Crawler), 76.0);
+        assert_eq!(fauna_hp(after, MonsterKind::Behemoth), 60.0);
     }
 }
