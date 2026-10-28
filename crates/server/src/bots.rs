@@ -29,6 +29,53 @@ const THINK_EVERY: u16 = 4;
 const PROBE: f32 = PLAYER_SPEED * DT * (THINK_EVERY + 2) as f32;
 /// Think cycles a bot must keep a target before it opens fire (~0.3 s): a reaction time.
 const REACTION_THINKS: u16 = 3;
+
+/// Headless-only aim and reaction. Online matches never insert [`SkillMix`], so every bot stays
+/// [`BotSkill::Default`] and the aim roll is the raw `±0.12` it has always been.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BotSkill {
+    High,
+    #[default]
+    Default,
+    Novice,
+}
+
+impl BotSkill {
+    /// Multiplier on the `±0.12` aim roll. Default is 1, so the stored error is the roll itself.
+    fn aim_scale(self) -> f32 {
+        match self {
+            // About ±0.03 rad, and they shoot after one extra think.
+            Self::High => 0.25,
+            Self::Default => 1.0,
+            // About ±0.30 rad, and they wait roughly three times as long.
+            Self::Novice => 2.5,
+        }
+    }
+
+    fn reaction_thinks(self) -> u16 {
+        match self {
+            Self::High => 1,
+            Self::Default => REACTION_THINKS,
+            Self::Novice => 8,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::High => "high",
+            Self::Default => "default",
+            Self::Novice => "novice",
+        }
+    }
+}
+
+/// Per-bot skill for a headless batch, in ascending `client_id` order (the same order
+/// `seed_match_once` rolls personalities). Missing entries are [`BotSkill::Default`].
+#[derive(Resource, Clone, Debug)]
+pub struct SkillMix {
+    pub tiers: Vec<BotSkill>,
+}
 // Target choice is "closest, weighted": below 1 is more attractive, above 1 less.
 /// Monsters are easy loot, so bots go for them first.
 const MONSTER_WEIGHT: f32 = 0.75;
@@ -61,6 +108,10 @@ pub struct Bot {
     target: Option<Entity>,
     /// Think cycles spent on the current target.
     locked_for: u16,
+    /// Thinks on one target before this bot may fire. Default matches [`REACTION_THINKS`].
+    reaction_thinks: u16,
+    /// Set by [`SkillMix`] at match start. Online bots stay [`BotSkill::Default`].
+    pub skill: BotSkill,
     /// Evolution path whose build order this bot spends its points on.
     pub path: EvoPath,
 }
@@ -77,6 +128,8 @@ impl Bot {
             aim_error: 0.0,
             target: None,
             locked_for: 0,
+            reaction_thinks: REACTION_THINKS,
+            skill: BotSkill::Default,
             path: EvoPath::Mutant,
         }
     }
@@ -254,6 +307,8 @@ pub(crate) fn balance_bots(
                 aim_error,
                 target: None,
                 locked_for: 0,
+                reaction_thinks: REACTION_THINKS,
+                skill: BotSkill::Default,
                 path: EvoPath::ALL[path_i],
             },
             Aggressors::default(),
@@ -337,6 +392,7 @@ fn seed_match_once(
     mut armed: Local<bool>,
     state: Query<&MatchState>,
     rng: Res<SimRng>,
+    skills: Option<Res<SkillMix>>,
     mut bots: Query<(Entity, &Player, &mut Bot)>,
 ) {
     let playing = state.iter().any(|s| s.phase == Phase::Playing);
@@ -353,9 +409,14 @@ fn seed_match_once(
         .map(|(entity, player, _)| (player.client_id, entity))
         .collect();
     order.sort_unstable_by_key(|(id, _)| *id);
+    // Copied out so the RNG closure does not borrow the resource. Empty means online:
+    // the aim roll is stored unchanged and the reaction threshold stays [`REACTION_THINKS`].
+    let tiers = skills
+        .map(|skills| skills.tiers.clone())
+        .unwrap_or_default();
     rng.with(true, Stream::Bots, |rng| {
-        for (_, entity) in order {
-            let Ok((_, _, mut bot)) = bots.get_mut(entity) else {
+        for (i, (_, entity)) in order.iter().enumerate() {
+            let Ok((_, _, mut bot)) = bots.get_mut(*entity) else {
                 continue;
             };
             bot.goal = Vec2::ZERO;
@@ -365,8 +426,17 @@ fn seed_match_once(
             bot.think_in = 0;
             bot.target = None;
             bot.locked_for = 0;
-            bot.aim_error = rng.random_range(-0.12..0.12);
+            let rolled = rng.random_range(-0.12..0.12);
             let path_i = rng.random_range(0..EvoPath::ALL.len());
+            if let Some(tier) = tiers.get(i).copied() {
+                bot.aim_error = rolled * tier.aim_scale();
+                bot.reaction_thinks = tier.reaction_thinks();
+                bot.skill = tier;
+            } else {
+                bot.aim_error = rolled;
+                bot.reaction_thinks = REACTION_THINKS;
+                bot.skill = BotSkill::Default;
+            }
             bot.path = EvoPath::ALL[path_i];
         }
     });
@@ -619,7 +689,7 @@ fn think(
                 };
                 steer(&mut input, dir, &arena, &obstacles.0, pos.0);
                 input.fire =
-                    bot.locked_for > REACTION_THINKS && dist < range && rng.random_bool(0.85);
+                    bot.locked_for > bot.reaction_thinks && dist < range && rng.random_bool(0.85);
                 input.dash = dist < 260.0 && rng.random_bool(0.04);
                 input.throw =
                     loadout.emps > 0 && enemy_armor >= 50.0 && dist < 420.0 && rng.random_bool(0.1);

@@ -14,6 +14,7 @@ mod connections;
 mod environment;
 mod evolution;
 mod gameplay;
+mod headless;
 mod inbox;
 mod inventory;
 mod journal;
@@ -22,6 +23,7 @@ mod ops;
 mod rng;
 mod skills;
 mod spectate;
+mod stats;
 
 use std::time::Duration;
 
@@ -33,17 +35,25 @@ use evoclash_game::net::{REPLICATION_INTERVAL, tick_duration};
 use lightyear::prelude::server::ServerPlugins;
 use lightyear::prelude::*;
 
-use crate::config::ServerConfig;
+use crate::config::{Launch, ServerConfig};
 
 fn main() {
-    let mut config = ServerConfig::from_args();
+    let launch = ServerConfig::parse_launch();
+    let mut config = match launch {
+        Launch::Replay(path) => {
+            let code = journal::replay_cli(&path);
+            std::process::exit(code);
+        }
+        Launch::Headless(opts) => {
+            let code = headless::run(&opts);
+            std::process::exit(code);
+        }
+        Launch::Serve(config) => config,
+    };
+    // `--replay` is taken before this config exists; the field stays for the shared struct.
+    debug_assert!(config.replay.is_none());
     if config.recover {
         info!("recovering match {}", config.match_id);
-    }
-    if let Some(path) = config.replay.clone() {
-        // Offline: do not bind a port and do not talk to the matchmaker.
-        let code = journal::replay_cli(&path);
-        std::process::exit(code);
     }
     let agones = config.agones.then(|| {
         let sdk = agones::AgonesSdk::from_env();
