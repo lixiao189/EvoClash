@@ -12,7 +12,7 @@ pub use autopsy::{Autopsy, TraceSnap};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use bevy::prelude::*;
-use evoclash_game::items::WeaponKind;
+use evoclash_game::items::{BAG_SLOTS, GUN_SLOTS, WeaponKind};
 use evoclash_game::map::PropKind;
 use evoclash_game::protocol::*;
 use evoclash_game::sim::Arena;
@@ -33,14 +33,34 @@ const SNAP_5: u32 = 5 * 60 * TICKS_PER_SEC;
 const SRC_VAULT: u8 = 1;
 const SRC_BOSS: u8 = 2;
 const SRC_SAFE: u8 = 3;
+/// Guns, then the backpack, then the melee weapon. A source tag rides on the slot.
+const CARRY: usize = GUN_SLOTS + BAG_SLOTS + 1;
+const MELEE_AT: usize = GUN_SLOTS + BAG_SLOTS;
+
+/// Weapons a combatant is carrying, and where each one came from (0 = ordinary).
+#[derive(Clone, Copy)]
+struct Carry {
+    kind: [Option<WeaponKind>; CARRY],
+    src: [u8; CARRY],
+}
+
+impl Carry {
+    fn bare(kind: [Option<WeaponKind>; CARRY]) -> Self {
+        Self {
+            kind,
+            src: [0; CARRY],
+        }
+    }
+}
 
 struct Body {
     name: String,
     alive: bool,
     gear: u8,
     weapon: WeaponKind,
+    /// Hotbar slot actually selected (`Loadout::selected`).
+    selected: u8,
     holds_t4: bool,
-    sourced: bool,
     score: u32,
     kills: u32,
     deaths: u32,
@@ -67,11 +87,12 @@ struct Mon {
     first: Option<u32>,
 }
 
-#[derive(Clone, Copy)]
 struct Ground {
     source: u8,
     weapon: Option<WeaponKind>,
     pos: Vec2,
+    /// Weapons inside a death bag, each with its own source. Empty otherwise.
+    bag: Vec<(WeaponKind, u8)>,
 }
 
 struct PropSnap {
@@ -90,6 +111,7 @@ pub struct Fold {
     props: HashMap<Entity, PropSnap>,
     mons: HashMap<Entity, Mon>,
     picks: HashMap<Entity, Ground>,
+    carry: BTreeMap<u64, Carry>,
     holds: BTreeMap<u64, u32>,
     had_t4: BTreeMap<u64, bool>,
     bounty_at: BTreeMap<u64, u32>,
@@ -140,6 +162,7 @@ impl Fold {
             props: HashMap::new(),
             mons: HashMap::new(),
             picks: HashMap::new(),
+            carry: BTreeMap::new(),
             holds: BTreeMap::new(),
             had_t4: BTreeMap::new(),
             bounty_at: BTreeMap::new(),
@@ -350,9 +373,10 @@ impl Fold {
                     )
                 })
                 .collect();
-            self.picks = picks
-                .into_iter()
-                .map(|(e, g)| (e, Ground { source: 0, ..g }))
+            self.picks = picks;
+            self.carry = bodies
+                .iter()
+                .map(|b| (b.id, Carry::bare(b.slots)))
                 .collect();
             self.store_bodies(bodies);
             self.prev_stage = stage;
@@ -367,8 +391,30 @@ impl Fold {
         self.sample_bots(world, stamp);
         self.props = props;
         self.store_bodies(bodies);
+        self.seal_sourced(stamp);
         self.prev_stage = stage;
         self.boss_boom = None;
+    }
+}
+
+fn carried(loadout: &Loadout) -> [Option<WeaponKind>; CARRY] {
+    let mut slots = [None; CARRY];
+    slots[..GUN_SLOTS].copy_from_slice(&loadout.guns);
+    slots[GUN_SLOTS..MELEE_AT].copy_from_slice(&loadout.bag);
+    slots[MELEE_AT] = Some(loadout.melee);
+    slots
+}
+
+/// Source tag of the weapon in hand, 0 if that gun was not from the vault, a safe, or the behemoth.
+fn hand_source(body: &Body, carry: &Carry) -> u8 {
+    let gun = (body.selected as usize) < GUN_SLOTS
+        && carry.kind[body.selected as usize] == Some(body.weapon);
+    if gun {
+        carry.src[body.selected as usize]
+    } else if carry.kind[MELEE_AT] == Some(body.weapon) {
+        carry.src[MELEE_AT]
+    } else {
+        0
     }
 }
 
@@ -379,6 +425,8 @@ struct Sample {
     alive: bool,
     gear: u8,
     weapon: WeaponKind,
+    selected: u8,
+    slots: [Option<WeaponKind>; CARRY],
     holds_t4: bool,
     score: u32,
     kills: u32,

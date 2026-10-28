@@ -296,7 +296,7 @@ impl Weapon for PipeShotgun {
         1
     }
     fn cooldown(&self) -> u16 {
-        48
+        64
     }
     fn damage(&self) -> f32 {
         11.0
@@ -410,7 +410,7 @@ impl Weapon for Railgun {
         64
     }
     fn damage(&self) -> f32 {
-        95.0
+        72.0
     }
     fn armor_mult(&self) -> f32 {
         1.5

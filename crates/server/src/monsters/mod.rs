@@ -57,7 +57,7 @@ const RETRY_TICKS: u32 = 32;
 const ROACH_WANDER: f32 = 120.0;
 const ROACH_CHARGE: f32 = 235.0;
 const ROACH_NOTICE: f32 = 300.0;
-const ROACH_BITE: f32 = 13.0;
+const ROACH_BITE: f32 = 8.0;
 const ROACH_BITE_CD: u16 = 48;
 
 /// Pods only spray while someone is close enough to care; saves bandwidth too.
@@ -71,7 +71,7 @@ const SPORE_DAMAGE: f32 = 9.0;
 const DOG_WANDER: f32 = 150.0;
 const DOG_CHARGE: f32 = 290.0;
 const DOG_NOTICE: f32 = 420.0;
-const DOG_BITE: f32 = 10.0;
+const DOG_BITE: f32 = 6.0;
 const DOG_BITE_CD: u16 = 40;
 /// Pack members come at the prey from these angles off the leader's line.
 const DOG_FLANK: [f32; 3] = [0.0, PI / 3.0, -PI / 3.0];
@@ -92,7 +92,7 @@ const ACID_DAMAGE: f32 = 8.0;
 const ACID_SPEED: f32 = 300.0;
 const ACID_TTL: u16 = 90;
 pub const ACID_PUDDLE_RADIUS: f32 = 55.0;
-const ACID_PUDDLE_TTL: u16 = 6 * TICKS_PER_SEC as u16;
+const ACID_PUDDLE_TTL: u16 = 3 * TICKS_PER_SEC as u16;
 const ACID_DPS: f32 = 6.0;
 
 const CRAWLER_WANDER: f32 = 70.0;
@@ -105,7 +105,7 @@ const CRAWLER_TURN: f32 = 3.0;
 pub const CRAWLER_SHELL_MULT: f32 = 0.35;
 
 const RAIDER_SPEED: f32 = 170.0;
-const RAIDER_SIGHT: f32 = 700.0;
+const RAIDER_SIGHT: f32 = 480.0;
 /// Raiders fight anyone this close to their block, or anyone who shot them recently.
 const RAIDER_TURF: f32 = 200.0;
 const RAIDER_PROVOKED: u16 = 6 * TICKS_PER_SEC as u16;
