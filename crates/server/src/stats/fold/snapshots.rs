@@ -18,6 +18,10 @@ impl Fold {
             let prev_weapon = self.roster.get(&b.id).map(|p| p.weapon);
             if b.alive && prev_alive != Some(true) {
                 self.open_for(b.id, stamp);
+                self.births += 1;
+                if b.weapon != WeaponKind::Stick {
+                    self.births_armed += 1;
+                }
             }
             if let Some(life) = self.open_life.get_mut(&b.id) {
                 if b.gear >= 1 && life.first_t1.is_none() {

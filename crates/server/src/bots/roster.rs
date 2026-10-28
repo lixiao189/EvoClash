@@ -76,6 +76,14 @@ pub(crate) fn balance_bots(
                 reaction_thinks: REACTION_THINKS,
                 skill: BotSkill::Default,
                 path: EvoPath::ALL[path_i],
+                aggression: 1.0,
+                crack: None,
+                mind: 0,
+                mind_until: 0,
+                hide_since: 0,
+                focus: None,
+                last_gun: WeaponKind::Stick,
+                banked: false,
             },
             Aggressors::default(),
         ));
@@ -106,6 +114,7 @@ pub(super) fn seed_match_once(
     state: Query<&MatchState>,
     rng: Res<SimRng>,
     skills: Option<Res<SkillMix>>,
+    mut pulse: Option<ResMut<BotPulse>>,
     mut bots: Query<(Entity, &Player, &mut Bot)>,
 ) {
     let playing = state.iter().any(|s| s.phase == Phase::Playing);
@@ -117,6 +126,10 @@ pub(super) fn seed_match_once(
         return;
     }
     *armed = true;
+    if let Some(pulse) = pulse.as_mut() {
+        pulse.retreats = 0;
+        pulse.avoids = 0;
+    }
     let mut order: Vec<(u64, Entity)> = bots
         .iter()
         .map(|(entity, player, _)| (player.client_id, entity))
@@ -141,6 +154,8 @@ pub(super) fn seed_match_once(
             bot.locked_for = 0;
             let rolled = rng.random_range(-0.12..0.12);
             let path_i = rng.random_range(0..EvoPath::ALL.len());
+            // After the rolls a replay already depends on, so personalities stay aligned.
+            let aggression = rng.random_range(0.7..1.3);
             if let Some(tier) = tiers.get(i).copied() {
                 bot.aim_error = rolled * tier.aim_scale();
                 bot.reaction_thinks = tier.reaction_thinks();
@@ -151,6 +166,14 @@ pub(super) fn seed_match_once(
                 bot.skill = BotSkill::Default;
             }
             bot.path = EvoPath::ALL[path_i];
+            bot.aggression = aggression;
+            bot.crack = None;
+            bot.mind = 0;
+            bot.mind_until = 0;
+            bot.hide_since = 0;
+            bot.focus = None;
+            bot.last_gun = WeaponKind::Stick;
+            bot.banked = false;
         }
     });
 }

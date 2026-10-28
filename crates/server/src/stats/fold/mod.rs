@@ -1,12 +1,15 @@
 //! Fold one match's samples into a [`MatchRecord`](super::MatchRecord).
 
+mod autopsy;
 mod boss;
 mod kills;
 mod lives;
 mod loot;
 mod snapshots;
 
-use std::collections::{BTreeMap, HashMap};
+pub use autopsy::{Autopsy, TraceSnap};
+
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use bevy::prelude::*;
 use evoclash_game::items::WeaponKind;
@@ -106,6 +109,7 @@ pub struct Fold {
     scrap_earned: u32,
     scrap_player: u32,
     scrap_container: u32,
+    safes_cracked: u32,
     snap_2m: Option<Vec<SnapRow>>,
     snap_5m: Option<Vec<SnapRow>>,
     snap_6m: Option<Vec<SnapRow>>,
@@ -120,6 +124,10 @@ pub struct Fold {
     boss_end_tick: Option<u32>,
     boss_top_not_leader: Option<bool>,
     max_streak: u32,
+    trace: HashMap<u64, VecDeque<TraceSnap>>,
+    autopsies: Vec<Autopsy>,
+    births: u32,
+    births_armed: u32,
 }
 
 impl Fold {
@@ -151,6 +159,7 @@ impl Fold {
             scrap_earned: 0,
             scrap_player: 0,
             scrap_container: 0,
+            safes_cracked: 0,
             snap_2m: None,
             snap_5m: None,
             snap_6m: None,
@@ -165,6 +174,10 @@ impl Fold {
             boss_end_tick: None,
             boss_top_not_leader: None,
             max_streak: 0,
+            trace: HashMap::new(),
+            autopsies: Vec::new(),
+            births: 0,
+            births_armed: 0,
         }
     }
 
@@ -270,6 +283,15 @@ impl Fold {
             scrap_earned: self.scrap_earned,
             scrap_player: self.scrap_player,
             scrap_container: self.scrap_container,
+            safes_cracked: self.safes_cracked,
+            bot_retreats: world
+                .get_resource::<crate::bots::BotPulse>()
+                .map(|p| p.retreats)
+                .unwrap_or(0),
+            bot_avoids: world
+                .get_resource::<crate::bots::BotPulse>()
+                .map(|p| p.avoids)
+                .unwrap_or(0),
             snap_2m: self.snap_2m,
             snap_5m: self.snap_5m,
             snap_6m: self.snap_6m,
@@ -287,6 +309,9 @@ impl Fold {
             boss_end_tick: self.boss_end_tick,
             boss_top_not_leader: self.boss_top_not_leader,
             max_streak: self.max_streak,
+            autopsies: self.autopsies,
+            births: self.births,
+            births_armed: self.births_armed,
             monster_ttk_ticks: self.monster_ttk,
             elite_ttk_ticks: self.elite_ttk,
             fight_ticks: self.fight_ticks,
@@ -339,6 +364,7 @@ impl Fold {
         self.diff_bodies(stamp, &bodies, inner);
         self.diff_picks(stamp, picks, &bodies);
         self.note_boss(stamp, stage);
+        self.sample_bots(world, stamp);
         self.props = props;
         self.store_bodies(bodies);
         self.prev_stage = stage;

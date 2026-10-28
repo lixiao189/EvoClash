@@ -112,6 +112,7 @@ impl Fold {
                 }
             }
             self.close_life(id, stamp);
+            self.take_autopsy(id, stamp, how);
         }
         self.kills.push(KillRec {
             tick: stamp,

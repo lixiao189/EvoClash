@@ -1,11 +1,16 @@
 use evoclash_game::evolution::{MAX_RANK, SKILL_A_RANK, SKILL_B_RANK, xp_to_reach};
 use evoclash_game::items::{AmmoKind, MELEE_SLOT};
+use evoclash_game::map::PropKind;
+use evoclash_game::nav::NavGrid;
 use evoclash_game::shop::RESPAWN_MAX_TICKS;
+use evoclash_game::sim::PLAYER_RADIUS;
 use lightyear::prelude::PeerId;
 
 use super::build::{arrange, build_order, prep_bot};
-use super::think::interest;
+use super::engage::{self, Side, Stance, stance};
+use super::think::{interest, think};
 use super::*;
+use crate::gameplay::{MATCH_TICKS, SimTick};
 
 #[test]
 fn bots_bring_their_best_gun_with_ammo_to_the_hotbar() {
@@ -50,12 +55,15 @@ fn build_orders_reach_both_skills_on_time() {
         let mut vitals = Vitals::default();
         for level in 2..=10 {
             evo.add_xp(xp_to_reach(level) - evo.xp);
+            let mut banked = false;
             assert!(prep_bot(
                 path,
                 &mut evo,
                 &mut wallet,
                 &mut vitals,
-                &mut life
+                &mut life,
+                WeaponKind::Stick,
+                &mut banked,
             ));
             let spent = level - 1;
             assert_eq!((evo.points, evo.path_rank(path)), (0, spent), "{path:?}");
@@ -204,6 +212,25 @@ fn a_playing_seat_is_refilled_by_a_fresh_bot() {
 }
 
 #[test]
+fn bots_hold_scrap_until_a_gun_is_worth_buying() {
+    let (none, banked) = super::build::shop_list(20, WeaponKind::Stick, false);
+    assert!(none.is_empty() && !banked);
+    let (wait, banked) = super::build::shop_list(40, WeaponKind::Stick, false);
+    assert!(
+        wait.is_empty() && banked,
+        "first short life keeps the scrap"
+    );
+    let (gun, banked) = super::build::shop_list(40, WeaponKind::Stick, true);
+    assert_eq!(gun, vec![ShopItem::PipeShotgun]);
+    assert!(!banked);
+    let (again, _) = super::build::shop_list(40, WeaponKind::Bow, false);
+    assert_eq!(again, vec![ShopItem::PipeShotgun]);
+    let (rich, banked) = super::build::shop_list(130, WeaponKind::Stick, false);
+    assert_eq!(rich, vec![ShopItem::Rifle, ShopItem::Kevlar]);
+    assert!(!banked);
+}
+
+#[test]
 fn dead_bots_shop_then_deploy() {
     let mut evo = Evolution::default();
     let mut wallet = Wallet {
@@ -216,12 +243,15 @@ fn dead_bots_shop_then_deploy() {
         respawn_in: RESPAWN_MAX_TICKS,
         ..default()
     };
+    let mut banked = false;
     prep_bot(
         EvoPath::Cyborg,
         &mut evo,
         &mut wallet,
         &mut vitals,
         &mut life,
+        WeaponKind::Stick,
+        &mut banked,
     );
     assert!(wallet.cart.is_empty(), "waits until it may deploy");
     vitals.respawn_in = RESPAWN_MAX_TICKS / 2;
@@ -231,19 +261,280 @@ fn dead_bots_shop_then_deploy() {
         &mut wallet,
         &mut vitals,
         &mut life,
+        WeaponKind::Stick,
+        &mut banked,
     );
     assert_eq!(
         wallet.cart,
-        vec![
-            ShopItem::Rifle,
-            ShopItem::Kevlar,
-            ShopItem::Emp,
-            ShopItem::Emp
-        ]
+        vec![ShopItem::Rifle, ShopItem::Kevlar, ShopItem::Emp]
     );
-    assert_eq!((wallet.scrap, vitals.respawn_in), (5, 1));
+    assert_eq!((wallet.scrap, vitals.respawn_in), (20, 1));
     assert!(
         life.deploy_asap,
         "a bot that may deploy confirms, so the next respawn tick revives it"
     );
+}
+
+fn side(tier: u8, hp: f32, armor: f32) -> Side {
+    Side { tier, hp, armor }
+}
+
+fn mind(me: Side, them: Side, dist: f32, aggressor: bool, hp_frac: f32) -> Stance {
+    stance(&engage::StanceInput {
+        me,
+        them,
+        player: true,
+        dist,
+        aggressor,
+        dangerous: false,
+        stick: me.tier == 0,
+        armed: false,
+        aggression: 1.0,
+        scavenging: false,
+        cornered: false,
+        hp_frac,
+        melee: false,
+        ghoul: false,
+        crawler: false,
+    })
+}
+
+#[test]
+fn a_worse_loadout_does_not_pick_the_fight() {
+    let me = side(0, 100.0, 0.0);
+    let them = side(1, 100.0, 0.0);
+    assert!(engage::clearly_worse(me, them, 1.0));
+    assert!(engage::power_ratio(me, them) < 1.0);
+    assert_eq!(mind(me, them, 400.0, false, 1.0), Stance::Avoid);
+}
+
+#[test]
+fn a_better_loadout_does_pick_the_fight() {
+    let me = side(2, 100.0, 0.0);
+    let them = side(0, 100.0, 0.0);
+    assert!(engage::has_advantage(me, them));
+    assert_eq!(mind(me, them, 400.0, false, 1.0), Stance::Fight);
+}
+
+#[test]
+fn being_hit_is_reason_enough_to_hit_back() {
+    let me = side(0, 100.0, 0.0);
+    let them = side(1, 100.0, 40.0);
+    assert_eq!(mind(me, them, 400.0, true, 1.0), Stance::Fight);
+}
+
+#[test]
+fn low_health_without_an_edge_retreats() {
+    let me = side(1, 30.0, 0.0);
+    let them = side(1, 100.0, 0.0);
+    assert!(!engage::has_advantage(me, them));
+    assert_eq!(mind(me, them, 220.0, true, 0.30), Stance::Retreat);
+}
+
+#[test]
+fn a_stance_sticks_for_two_seconds_and_avoid_needs_a_real_edge() {
+    use super::engage::{
+        AVOID_EXIT_RATIO, HOLD_TICKS, MIND_AVOID, MIND_FIGHT, MIND_RETREAT, commit,
+    };
+    assert_eq!(
+        commit(MIND_AVOID, MIND_FIGHT, HOLD_TICKS, 10, false, 2.0),
+        MIND_AVOID,
+        "still inside the hold"
+    );
+    assert_eq!(
+        commit(MIND_RETREAT, MIND_AVOID, 10, 10, true, 0.5),
+        MIND_FIGHT,
+        "cornered or shot up close cuts the hold"
+    );
+    assert_eq!(
+        commit(
+            MIND_AVOID,
+            MIND_FIGHT,
+            0,
+            10,
+            false,
+            AVOID_EXIT_RATIO - 0.05
+        ),
+        MIND_AVOID
+    );
+    assert_eq!(
+        commit(MIND_AVOID, MIND_FIGHT, 0, 10, false, AVOID_EXIT_RATIO),
+        MIND_FIGHT
+    );
+}
+
+#[test]
+fn melee_fauna_is_fought_and_a_stick_steps_back_from_a_ghoul() {
+    let mut s = engage::StanceInput {
+        me: side(0, 30.0, 0.0),
+        them: side(0, 45.0, 0.0),
+        player: false,
+        dist: 80.0,
+        aggressor: true,
+        dangerous: true,
+        armed: false,
+        stick: true,
+        aggression: 1.0,
+        scavenging: false,
+        cornered: false,
+        hp_frac: 0.3,
+        melee: true,
+        ghoul: false,
+        crawler: false,
+    };
+    assert_eq!(
+        stance(&s),
+        Stance::Fight,
+        "a roach on you is not a footrace"
+    );
+    s.ghoul = true;
+    s.dist = 220.0;
+    assert_eq!(stance(&s), Stance::Avoid, "stick keeps clear of the blast");
+    s.stick = false;
+    s.me.tier = 2;
+    assert_eq!(stance(&s), Stance::Fight);
+}
+
+#[test]
+fn a_crawler_is_fought_from_behind_its_shell() {
+    let face = 0.0;
+    assert!(super::fight::on_shell(face, Vec2::X));
+    assert!(!super::fight::on_rear(face, Vec2::X));
+    assert!(super::fight::on_rear(face, -Vec2::X));
+    assert!(!super::fight::on_shell(face, -Vec2::X));
+}
+
+#[test]
+fn a_stick_avoids_a_raider_and_a_weaker_gun_does_too() {
+    assert!(engage::dangerous_monster(MonsterKind::Raider, false));
+    let stick = side(0, 100.0, 0.0);
+    let raider = side(engage::RAIDER_TIER, 100.0, 0.0);
+    let mut shy = engage::StanceInput {
+        me: stick,
+        them: raider,
+        player: false,
+        dist: 400.0,
+        aggressor: false,
+        dangerous: true,
+        armed: false,
+        stick: true,
+        aggression: 1.0,
+        scavenging: false,
+        cornered: false,
+        hp_frac: 1.0,
+        melee: false,
+        ghoul: false,
+        crawler: false,
+    };
+    assert_eq!(stance(&shy), Stance::Avoid);
+    shy.me = side(1, 100.0, 0.0);
+    shy.stick = false;
+    shy.dangerous = false;
+    shy.armed = true;
+    assert_eq!(stance(&shy), Stance::Avoid, "a bow is a tier down");
+    shy.me = side(2, 100.0, 0.0);
+    assert_eq!(stance(&shy), Stance::Fight);
+}
+
+#[test]
+fn low_health_walks_out_of_radiation() {
+    let zone = Rect::from_center_size(Vec2::ZERO, Vec2::splat(200.0));
+    let exit = super::scavenge::hazard_exit(&[zone], Vec2::new(10.0, 0.0)).unwrap();
+    assert!(!zone.contains(exit));
+    assert!(super::scavenge::near_barrel(
+        Vec2::ZERO,
+        &[Vec2::new(100.0, 0.0)]
+    ));
+    assert!(!super::scavenge::near_barrel(
+        Vec2::ZERO,
+        &[Vec2::new(200.0, 0.0)]
+    ));
+}
+
+#[test]
+fn a_bot_with_nobody_around_swings_at_a_nearby_crate() {
+    let arena = Arena::default();
+    let (bot_pos, crate_pos) = open_pair(&arena);
+    let nav = Nav(NavGrid::new(&arena.0, PLAYER_RADIUS + 2.0));
+    let mut app = App::new();
+    app.insert_resource(arena);
+    app.insert_resource(nav);
+    app.insert_resource(Obstacles::default())
+        .insert_resource(SimRng::from_match_seed(1))
+        .insert_resource(SimTick(0));
+    app.world_mut().spawn(MatchState {
+        phase: Phase::Playing,
+        ticks_left: MATCH_TICKS,
+        ..default()
+    });
+    let bot = app
+        .world_mut()
+        .spawn((
+            Player {
+                client_id: 9,
+                name: "b".into(),
+                color: [0.7; 3],
+                bot: true,
+            },
+            Pos(bot_pos),
+            Vitals {
+                alive: true,
+                ..default()
+            },
+            Loadout::default(),
+            Evolution::default(),
+            SkillState::default(),
+            CurrentInput::default(),
+            LifeLog::default(),
+            Aggressors::default(),
+            Bot::fresh(),
+        ))
+        .id();
+    app.world_mut().spawn((
+        Prop {
+            kind: PropKind::Crate,
+            tier: 1,
+            progress: 0,
+            open: false,
+        },
+        Pos(crate_pos),
+        Vitals {
+            hp: PropKind::Crate.max_hp(),
+            alive: true,
+            ..default()
+        },
+    ));
+    app.add_systems(Update, think);
+    app.update();
+    let input = app.world().get::<CurrentInput>(bot).unwrap().0.clone();
+    assert!(input.fire, "stands on the crate and swings");
+    let club = WeaponKind::Stick.melee().unwrap();
+    assert!(
+        club.strikes(
+            crate_pos - bot_pos,
+            PropKind::Crate.radius(),
+            input.aim,
+            0.0,
+        ),
+        "the swing reaches the crate"
+    );
+    assert!(
+        PropKind::Crate.max_hp() <= club.damage() * 2.0,
+        "two sticks break a crate"
+    );
+}
+
+fn open_pair(arena: &Arena) -> (Vec2, Vec2) {
+    for origin in &arena.0.spawn_points {
+        for step in [50.0_f32, 40.0, -50.0, 36.0] {
+            let crate_pos = *origin + Vec2::new(step, step * 0.2);
+            if arena.0.line_of_sight(*origin, crate_pos)
+                && !arena.0.in_hazard(*origin)
+                && !arena.0.in_hazard(crate_pos)
+            {
+                return (*origin, crate_pos);
+            }
+        }
+    }
+    panic!("no clear ground beside a spawn");
 }

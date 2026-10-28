@@ -21,6 +21,7 @@ impl Fold {
             }
             if prev.kind == PropKind::Safe {
                 opened_safes.push(prev.pos);
+                self.safes_cracked += 1;
             }
             self.scrap_container += match prev.kind {
                 PropKind::Crate => crate_scrap(prev.tier),
