@@ -39,7 +39,10 @@ impl Fold {
             match note {
                 Note::Announce(text) if text.contains("地堡开启") => {
                     self.vaults.push(stamp);
-                    self.last_vault = Some(stamp);
+                    // The 10s warning contains the same words; loot spawns on the later line.
+                    if text.starts_with("地堡开启") {
+                        self.last_vault = Some(stamp);
+                    }
                 }
                 Note::Boom { pos, radius, fire } if !fire && *radius >= 250.0 => {
                     self.boss_boom = Some(*pos);
@@ -91,9 +94,8 @@ impl Fold {
         );
         let underdog = killer_id.is_some()
             && killer_tier.is_some_and(|t| victim_gear >= t.saturating_add(GAP));
-        let sourced = killer_id
-            .and_then(|id| self.roster.get(&id))
-            .is_some_and(|b| b.sourced);
+        // Filled in `seal_sourced` once this tick's loadout has been diffed.
+        let sourced = false;
         let cause = classify(killer, how, killer_id.is_some());
         if killer_id.is_some() {
             self.scrap_player += player_kill_scrap(bounty);
@@ -127,6 +129,23 @@ impl Fold {
             bounty,
             sourced,
         });
+    }
+
+    pub(super) fn seal_sourced(&mut self, stamp: u32) {
+        for kill in self.kills.iter_mut().rev() {
+            if kill.tick != stamp {
+                break;
+            }
+            kill.sourced = kill.killer_id.is_some_and(|id| {
+                let Some(body) = self.roster.get(&id) else {
+                    return false;
+                };
+                let Some(carry) = self.carry.get(&id) else {
+                    return false;
+                };
+                hand_source(body, carry) != 0
+            });
+        }
     }
 
     fn id_named(&self, name: &str) -> Option<u64> {

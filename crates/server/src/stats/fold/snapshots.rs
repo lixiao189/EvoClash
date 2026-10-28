@@ -15,7 +15,6 @@ impl Fold {
                 .roster
                 .get(&b.id)
                 .is_some_and(|p| p.streak >= evoclash_game::sim::BOUNTY_STREAK);
-            let prev_weapon = self.roster.get(&b.id).map(|p| p.weapon);
             if b.alive && prev_alive != Some(true) {
                 self.open_for(b.id, stamp);
                 self.births += 1;
@@ -57,14 +56,6 @@ impl Fold {
                 self.finale_alive += 1;
                 if inner(b.pos) {
                     self.finale_inner += 1;
-                }
-            }
-            if prev_weapon.is_some_and(|w| w != b.weapon) {
-                // sourced flag is refreshed by diff_picks; default to false on a swap
-                // until a tagged pickup claims it.
-                if let Some(body) = self.roster.get_mut(&b.id) {
-                    body.sourced = false;
-                    body.weapon = b.weapon;
                 }
             }
             snap.push(SnapRow {
