@@ -26,6 +26,7 @@ use crate::rng::SimRng;
 use crate::skills::HiddenFrom;
 
 mod board;
+mod bounty;
 mod damage;
 mod finale;
 mod flow;
@@ -38,6 +39,7 @@ mod spawning;
 mod tests;
 
 pub(crate) use board::sync_present;
+pub use bounty::{BunkerBounty, BunkerDrop, grant_bunker_bounty};
 pub use damage::*;
 pub use flow::*;
 pub(crate) use idle::Idle;
@@ -138,7 +140,12 @@ impl Plugin for GameplayPlugin {
                 )
                     .chain()
                     .in_set(SimSet::Simulate),
-                (resolve_damage, respawn, expire_drops)
+                (
+                    resolve_damage,
+                    bounty::expire_bunker_bounties,
+                    respawn,
+                    expire_drops,
+                )
                     .chain()
                     .in_set(SimSet::Resolve),
                 (

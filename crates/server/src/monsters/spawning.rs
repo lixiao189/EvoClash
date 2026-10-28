@@ -58,6 +58,21 @@ pub fn pick_spot(
     None
 }
 
+/// Whether a death of `kind` is replaced. Roaches, dogs and pods stop coming back once
+/// Playing has run 2:00 (elapsed). `ticks_left` is the clock `populate` sees, before this
+/// tick's decrement. Other kinds always refill. The opening fill (cap not yet reached)
+/// is the caller's concern.
+pub(crate) fn replenishes(kind: MonsterKind, ticks_left: u32) -> bool {
+    if !matches!(
+        kind,
+        MonsterKind::Roach | MonsterKind::Dog | MonsterKind::SporePod
+    ) {
+        return true;
+    }
+    let elapsed = MATCH_TICKS.saturating_sub(ticks_left.saturating_sub(1));
+    elapsed < 2 * 60 * TICKS_PER_SEC
+}
+
 /// Spawn one monster. `max_hp` overrides the kind's (elite) default.
 pub fn spawn_monster(
     commands: &mut Commands,
@@ -116,6 +131,11 @@ pub(super) fn populate(
         }
         let s = spec(kind);
         let timer = &mut spawner.timers[kind_index(kind)];
+        // Past 2:00 a fodder kind that already hit its cap is not replaced. Kinds that
+        // never filled keep trickling in; that is the opening fill, not a respawn.
+        if timer.filled && !replenishes(kind, state.ticks_left) {
+            continue;
+        }
         if !live.wants(kind) {
             // At the cap: the respawn clock only starts once one dies.
             timer.filled = true;

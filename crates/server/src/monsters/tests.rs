@@ -29,14 +29,40 @@ fn caps_hold_while_filling() {
         assert!(c.live[i] <= s.cap * s.group, "{kind:?}");
     }
     let live = |k| c.live[kind_index(k)];
-    assert_eq!(live(MonsterKind::Roach), 10);
-    assert_eq!(live(MonsterKind::SporePod), 5);
-    assert_eq!(live(MonsterKind::Dog), 12);
+    assert_eq!(live(MonsterKind::Roach), 8);
+    assert_eq!(live(MonsterKind::SporePod), 4);
+    assert_eq!(live(MonsterKind::Dog), 9);
+    assert_eq!(live(MonsterKind::Ghoul), 5);
+    assert_eq!(live(MonsterKind::Spitter), 3);
+    assert_eq!(live(MonsterKind::Crawler), 2);
     assert_eq!(live(MonsterKind::Raider), 4);
-    assert_eq!(live(MonsterKind::Crawler), 3);
+    assert_eq!(live(MonsterKind::Drone), 3);
+    assert_eq!(c.groups[kind_index(MonsterKind::Dog)], 3);
     assert_eq!(c.groups[kind_index(MonsterKind::Raider)], 2);
     // Room left for the boss and its summons.
     assert!(c.total + 4 <= MAX_LIVE);
+}
+
+#[test]
+fn roaches_dogs_and_pods_do_not_replenish_after_two_minutes() {
+    let two = 2 * 60 * TICKS_PER_SEC;
+    // `populate` reads `ticks_left` before `match_flow` decrements it. Elapsed 2:00 is the
+    // first tick whose clock will show 2:00 after that decrement.
+    let edge = MATCH_TICKS - two + 1;
+    assert!(replenishes(MonsterKind::Roach, edge + 1));
+    assert!(!replenishes(MonsterKind::Roach, edge));
+    assert!(!replenishes(MonsterKind::Roach, 1));
+    assert!(!replenishes(MonsterKind::Dog, edge));
+    assert!(!replenishes(MonsterKind::SporePod, edge));
+    for kind in [
+        MonsterKind::Ghoul,
+        MonsterKind::Spitter,
+        MonsterKind::Crawler,
+        MonsterKind::Raider,
+        MonsterKind::Drone,
+    ] {
+        assert!(replenishes(kind, 1), "{kind:?} still refills in the finale");
+    }
 }
 
 #[test]

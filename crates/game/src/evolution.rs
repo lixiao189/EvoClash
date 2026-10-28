@@ -15,13 +15,13 @@ const SEC: u16 = 64;
 
 pub const MAX_LEVEL: u8 = 15;
 pub const MAX_RANK: u8 = 3;
-/// Cumulative XP needed to reach levels 2..=15. Paced so most players end a match around
-/// level 12 and only the leader gets near the cap.
+/// Cumulative XP needed to reach levels 2..=15. Late levels (10-15) are a little easier so a
+/// match can still climb into the low teens; only the leader should near the cap.
 pub const LEVEL_XP: [u32; 14] = [
-    100, 250, 450, 700, 1000, 1360, 1780, 2260, 2800, 3410, 4090, 4840, 5660, 6560,
+    100, 250, 450, 700, 1000, 1360, 1780, 2260, 2500, 3050, 3650, 4440, 5260, 6160,
 ];
-pub const CATCH_UP_PER_LEVEL: f32 = 0.1;
-pub const CATCH_UP_MAX: f32 = 1.5;
+pub const CATCH_UP_PER_LEVEL: f32 = 0.12;
+pub const CATCH_UP_MAX: f32 = 1.7;
 /// Cap on the combined perk/skill movement multiplier (armor and EMP stack on top).
 pub const MOVE_MULT_CAP: f32 = 1.3;
 /// Path rank at which the leading path grants its first and second skill.
@@ -58,7 +58,7 @@ pub fn level_for_xp(xp: u32) -> u8 {
     1 + LEVEL_XP.iter().filter(|t| xp >= **t).count() as u8
 }
 
-/// Whoever trails the top level earns more, up to ×1.5.
+/// Whoever trails the top level earns more, up to ×1.7.
 pub fn catch_up_mult(top_level: u8, own_level: u8) -> f32 {
     let gap = top_level.saturating_sub(own_level) as f32;
     (1.0 + CATCH_UP_PER_LEVEL * gap).min(CATCH_UP_MAX)
@@ -244,7 +244,7 @@ impl Skill {
             Skill::AcidBreath => "向前喷吐酸液 1.5 秒，大量损耗护甲",
             Skill::Berserk => "8 秒内伤害、速度与吸血提升，之后短暂乏力",
             Skill::EnergyShield => "4 秒内先于护甲吸收 60 点伤害",
-            Skill::AutoTurret => "部署一座炮塔，自动射击 12 秒",
+            Skill::AutoTurret => "部署一座炮塔，自动射击 8 秒",
             Skill::Stealth => "5 秒内远处的敌人看不见你，开火或受伤即现形",
             Skill::Trap => "布置隐形陷阱，触发后造成伤害、减速并暴露目标",
         }
@@ -268,7 +268,7 @@ impl Skill {
             Skill::AcidBreath => SEC * 3 / 2,
             Skill::Berserk => 8 * SEC + BERSERK_AFTERMATH_TICKS,
             Skill::EnergyShield => 4 * SEC,
-            Skill::AutoTurret => 12 * SEC,
+            Skill::AutoTurret => 8 * SEC,
             Skill::Stealth => 5 * SEC,
             Skill::Trap => 0,
         }
@@ -583,8 +583,8 @@ mod tests {
         assert_eq!(level_for_xp(100), 2);
         assert_eq!(level_for_xp(249), 2);
         assert_eq!(level_for_xp(250), 3);
-        assert_eq!(level_for_xp(6559), 14);
-        assert_eq!(level_for_xp(6560), 15);
+        assert_eq!(level_for_xp(6159), 14);
+        assert_eq!(level_for_xp(6160), 15);
         assert_eq!(level_for_xp(u32::MAX), MAX_LEVEL);
         for level in 2..=MAX_LEVEL {
             assert_eq!(level_for_xp(xp_to_reach(level)), level);
@@ -600,16 +600,32 @@ mod tests {
         assert_eq!(evo.add_xp(200), 2);
         assert_eq!((evo.level, evo.points, evo.xp_next), (3, 2, 450));
         evo.add_xp(100_000);
-        assert_eq!((evo.level, evo.points, evo.xp_next), (15, 14, 6560));
+        assert_eq!((evo.level, evo.points, evo.xp_next), (15, 14, 6160));
+    }
+
+    #[test]
+    fn late_levels_are_cheaper_and_catch_up_caps_at_1_7() {
+        assert_eq!(
+            (xp_to_reach(10), xp_to_reach(11), xp_to_reach(12)),
+            (2500, 3050, 3650)
+        );
+        assert_eq!(
+            (xp_to_reach(13), xp_to_reach(14), xp_to_reach(15)),
+            (4440, 5260, 6160)
+        );
+        assert!((CATCH_UP_PER_LEVEL - 0.12).abs() < 1e-6);
+        assert_eq!(CATCH_UP_MAX, 1.7);
+        assert_eq!(catch_up_mult(15, 1), CATCH_UP_MAX);
+        assert_eq!(Skill::AutoTurret.duration(), 8 * SEC);
     }
 
     #[test]
     fn catch_up_is_capped() {
         assert_eq!(catch_up_mult(3, 3), 1.0);
         assert_eq!(catch_up_mult(1, 5), 1.0);
-        assert!((catch_up_mult(5, 2) - 1.3).abs() < 1e-6);
+        assert!((catch_up_mult(5, 2) - 1.36).abs() < 1e-5);
         assert_eq!(catch_up_mult(10, 1), CATCH_UP_MAX);
-        assert_eq!(scaled_xp(100, catch_up_mult(10, 1)), 150);
+        assert_eq!(scaled_xp(100, catch_up_mult(10, 1)), 170);
     }
 
     #[test]

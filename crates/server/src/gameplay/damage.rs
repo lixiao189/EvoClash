@@ -172,6 +172,7 @@ pub fn resolve_damage(
         let was_leader = leader == Some(victim_id);
         stats.deaths += 1;
         stats.streak = 0;
+        commands.entity(victim).remove::<BunkerBounty>();
 
         // Everything you carried is up for grabs, in one bag: killing the strong is how the
         // weak catch up. Lobby and Starting deaths leave no bag.

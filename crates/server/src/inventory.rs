@@ -10,7 +10,9 @@ use evoclash_game::protocol::*;
 use lightyear::prelude::server::ClientOf;
 use lightyear::prelude::*;
 
-use crate::gameplay::{Cooldowns, CurrentInput, Expires, SimSet, spawn_pickup};
+use crate::gameplay::{
+    BunkerDrop, Cooldowns, CurrentInput, Expires, Outbox, SimSet, grant_bunker_bounty, spawn_pickup,
+};
 use crate::inbox::Inbox;
 use crate::journal::{Injected, Trace};
 
@@ -186,18 +188,30 @@ pub fn spawn_bag(commands: &mut Commands, mut items: Vec<Item>, pos: Vec2, ttl: 
 /// on contact, and E takes its next item.
 fn pickups(
     mut commands: Commands,
+    state: Query<&MatchState>,
+    mut outbox: ResMut<Outbox>,
     mut players: Query<(
+        Entity,
+        &Player,
         &Pos,
         &CurrentInput,
         &mut Vitals,
         &mut Loadout,
         &mut Cooldowns,
         &Evolution,
+        &mut Stats,
     )>,
-    mut items: Query<(Entity, &Pos, &Pickup, Option<&mut BagContents>)>,
+    mut items: Query<(
+        Entity,
+        &Pos,
+        &Pickup,
+        Option<&mut BagContents>,
+        Option<&BunkerDrop>,
+    )>,
 ) {
+    let playing = state.iter().any(|s| s.phase == Phase::Playing);
     let mut taken = HashSet::new();
-    for (pos, input, mut vitals, mut loadout, mut cd, evo) in &mut players {
+    for (who, player, pos, input, mut vitals, mut loadout, mut cd, evo, mut stats) in &mut players {
         if !vitals.alive {
             continue;
         }
@@ -214,7 +228,7 @@ fn pickups(
         let mut forced = input.0.interact && cd.interact == 0;
         let mut put_down = Vec::new();
         for (_, entity) in near {
-            let Ok((_, _, pickup, bag)) = items.get_mut(entity) else {
+            let Ok((_, _, pickup, bag, bunker)) = items.get_mut(entity) else {
                 continue;
             };
             if let Some(mut bag) = bag {
@@ -245,9 +259,20 @@ fn pickups(
             if !wanted && !forced {
                 continue;
             }
+            let from_bunker = bunker.is_some() && item.tier() >= 4;
             taken.insert(entity);
             commands.entity(entity).despawn();
             put_down.extend(take(item, &mut vitals, &mut loadout, evo));
+            if from_bunker {
+                grant_bunker_bounty(
+                    &mut commands,
+                    who,
+                    &player.name,
+                    &mut stats,
+                    playing,
+                    &mut outbox,
+                );
+            }
             if !wanted {
                 // One deliberate swap per press.
                 forced = false;
@@ -281,7 +306,7 @@ pub fn spawn_loot(commands: &mut Commands, item: Item, pos: Vec2, ttl: Option<u3
 #[cfg(test)]
 mod tests {
     use evoclash_game::evolution::SkillState;
-    use evoclash_game::items::{AmmoKind, BAG_SLOTS, GUN_SLOTS, WeaponKind};
+    use evoclash_game::items::{AmmoKind, ArmorKind, BAG_SLOTS, GUN_SLOTS, Item, WeaponKind};
     use evoclash_game::sim::Arena;
 
     use super::*;
@@ -518,5 +543,48 @@ mod tests {
             pickups_on_ground(&mut app2).is_empty(),
             "the bag is emptied"
         );
+    }
+
+    #[test]
+    fn walking_over_bunker_t4_forces_a_bounty_and_a_loose_t4_does_not() {
+        use crate::gameplay::BunkerBounty;
+
+        let mut app = app();
+        app.add_systems(Update, pickups);
+        let who = spawn_player(&mut app, 1, Vec2::ZERO, Loadout::default());
+        {
+            let mut commands = app.world_mut().commands();
+            let dropped = spawn_pickup(
+                &mut commands,
+                Item::armor(ArmorKind::PowerArmor),
+                Vec2::ZERO,
+                None,
+            );
+            commands.entity(dropped).insert(BunkerDrop);
+        }
+        app.update();
+        let stats = app.world().get::<Stats>(who).unwrap();
+        assert_eq!(stats.streak, 3);
+        assert!(app.world().get::<BunkerBounty>(who).is_some());
+        assert_eq!(
+            app.world().get::<Vitals>(who).unwrap().armor,
+            ArmorKind::PowerArmor
+        );
+
+        let mut plain = self::app();
+        plain.add_systems(Update, pickups);
+        let who = spawn_player(&mut plain, 1, Vec2::ZERO, Loadout::default());
+        {
+            let mut commands = plain.world_mut().commands();
+            spawn_pickup(
+                &mut commands,
+                Item::armor(ArmorKind::PowerArmor),
+                Vec2::ZERO,
+                None,
+            );
+        }
+        plain.update();
+        assert_eq!(plain.world().get::<Stats>(who).unwrap().streak, 0);
+        assert!(plain.world().get::<BunkerBounty>(who).is_none());
     }
 }
