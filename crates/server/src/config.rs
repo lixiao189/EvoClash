@@ -46,6 +46,22 @@ pub struct ServerConfig {
     pub logging: bool,
 }
 
+/// `evoclash-server --headless` batch. Not a live room.
+pub struct HeadlessOpts {
+    pub seeds: Vec<u64>,
+    pub report: std::path::PathBuf,
+    pub jobs: usize,
+    pub monsters: bool,
+    /// Empty means eight `default` bots. Otherwise `high:1,default:7`.
+    pub skills: String,
+}
+
+pub enum Launch {
+    Serve(ServerConfig),
+    Replay(std::path::PathBuf),
+    Headless(HeadlessOpts),
+}
+
 /// The one OS random draw: the startup seed when `--room-seed` is omitted.
 #[allow(clippy::disallowed_methods)]
 fn startup_seed() -> u64 {
@@ -53,7 +69,7 @@ fn startup_seed() -> u64 {
 }
 
 impl ServerConfig {
-    pub fn from_args() -> Self {
+    pub fn parse_launch() -> Launch {
         let mut port = DEFAULT_GAME_PORT;
         let mut public_addr: Option<SocketAddr> = None;
         let mut match_id = "local".to_string();
@@ -70,6 +86,11 @@ impl ServerConfig {
         let mut log_dir = PathBuf::from("logs");
         let mut replay = None;
         let mut recover = false;
+        let mut headless = false;
+        let mut seeds = None;
+        let mut report = None;
+        let mut jobs = None;
+        let mut skills = String::new();
 
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -121,12 +142,25 @@ impl ServerConfig {
                 "--log-dir" => log_dir = PathBuf::from(value("--log-dir")),
                 "--replay" => replay = Some(PathBuf::from(value("--replay"))),
                 "--recover" => recover = true,
+                "--headless" => headless = true,
+                "--seeds" => seeds = Some(crate::headless::parse_seeds(&value("--seeds"))),
+                "--report" => report = Some(PathBuf::from(value("--report"))),
+                "--jobs" => {
+                    jobs = Some(
+                        value("--jobs")
+                            .parse::<usize>()
+                            .expect("invalid --jobs")
+                            .max(1),
+                    )
+                }
+                "--skills" => skills = value("--skills"),
                 "-h" | "--help" => {
                     println!(
                         "evoclash-server [--port 7000] [--public-addr 127.0.0.1:7000] [--match-id ID]\n\
                          \x20               [--max-players 8] [--bots 8] [--matchmaker URL[,URL...]] [--single-match]\n\
                          \x20               [--no-monsters] [--threads 1] [--agones] [--room-seed U64]\n\
-                         \x20               [--private] [--room-code CODE] [--log-dir logs] [--replay FILE] [--recover]\n\n\
+                         \x20               [--private] [--room-code CODE] [--log-dir logs] [--replay FILE] [--recover]\n\
+                         \x20               [--headless --seeds 0..200 --report out.json] [--jobs N] [--skills high:1,default:7]\n\n\
                          --bots N          keep at least N combatants in the arena by adding bots (0 disables)\n\
                          --room-seed       fixed seed for this room; omitted once, from the OS\n\
                          --private         friends-only room; the host starts the match\n\
@@ -134,6 +168,11 @@ impl ServerConfig {
                          --log-dir         room and match logs (default logs/)\n\
                          --replay FILE     offline match log: no port, no matchmaker; exit 1 on digest mismatch\n\
                          --recover         rebuild this match id from logs/, then wait for humans\n\
+                         --headless        bot-only matches, no port and no matchmaker; one seed is one match\n\
+                         --seeds           0..200 (half-open), 0..=7, or 1,2,5\n\
+                         --report          JSON path for --headless\n\
+                         --jobs            parallel seeds (default: one per core)\n\
+                         --skills          aim/reaction mix, assigned by ascending client id; default is all default\n\
                          --matchmaker      heartbeat to every listed matchmaker, and to every address\n\
                          \x20                 a hostname resolves to (a headless Service reaches all pods)\n\
                          --agones          run as an Agones GameServer (implies --single-match)\n\
@@ -145,7 +184,29 @@ impl ServerConfig {
             }
         }
 
-        Self {
+        if headless {
+            if replay.is_some() {
+                panic!("--headless and --replay cannot be combined");
+            }
+            let seeds = seeds.expect("--headless needs --seeds");
+            let report = report.expect("--headless needs --report");
+            let jobs = jobs.unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(1)
+            });
+            return Launch::Headless(HeadlessOpts {
+                seeds,
+                report,
+                jobs,
+                monsters,
+                skills,
+            });
+        }
+        if let Some(path) = replay {
+            return Launch::Replay(path);
+        }
+        Launch::Serve(Self {
             port,
             public_addr: public_addr.unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], port))),
             match_id,
@@ -160,9 +221,9 @@ impl ServerConfig {
             private,
             room_code,
             log_dir,
-            replay,
+            replay: None,
             recover,
             logging: true,
-        }
+        })
     }
 }

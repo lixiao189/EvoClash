@@ -411,11 +411,10 @@ pub(super) fn add_sim_plugins(app: &mut App) {
     app.add_plugins(evoclash_game::SharedPlugin);
 }
 
-fn sim_app(config: ServerConfig) -> App {
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
-    app.insert_resource(config);
-    add_sim_plugins(&mut app);
+/// Gameplay plugins shared by replay, journal tests and the headless runner.
+/// Does not finish the app, so callers can add systems first. No socket and no matchmaker.
+pub fn install_sim(app: &mut App) {
+    add_sim_plugins(app);
     app.add_plugins((
         crate::gameplay::GameplayPlugin,
         crate::spectate::SpectatePlugin,
@@ -429,6 +428,13 @@ fn sim_app(config: ServerConfig) -> App {
         crate::skills::SkillsPlugin,
         JournalPlugin,
     ));
+}
+
+fn sim_app(config: ServerConfig) -> App {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
+    app.insert_resource(config);
+    install_sim(&mut app);
     app.finish();
     app.world_mut().run_schedule(Startup);
     app

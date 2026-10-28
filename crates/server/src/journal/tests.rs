@@ -59,21 +59,8 @@ fn recording_app(config: ServerConfig, need: usize) -> App {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
     app.insert_resource(config);
-    add_sim_plugins(&mut app);
+    install_sim(&mut app);
     app.insert_resource(Arm { need });
-    app.add_plugins((
-        crate::gameplay::GameplayPlugin,
-        crate::spectate::SpectatePlugin,
-        crate::combat::CombatPlugin,
-        crate::inventory::InventoryPlugin,
-        crate::environment::EnvironmentPlugin,
-        crate::bots::BotsPlugin,
-        crate::monsters::MonstersPlugin,
-        crate::boss::BossPlugin,
-        crate::evolution::EvolutionPlugin,
-        crate::skills::SkillsPlugin,
-        JournalPlugin,
-    ));
     app.add_systems(
         FixedUpdate,
         arm_playing.before(match_flow).in_set(SimSet::Flow),

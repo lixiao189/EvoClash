@@ -502,7 +502,7 @@ pub(super) fn empty_close(
     }
 }
 
-pub(super) fn flush_outbox(
+pub fn flush_outbox(
     mut outbox: ResMut<Outbox>,
     mut sender: If<ServerMultiMessageSender>,
     server: Query<&Endpoint, With<Server>>,
