@@ -130,10 +130,39 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # `trunk build --release` uses the `wasm` profile (index.html
+      # `data-cargo-profile-release`). That profile used to be named `web`, which is
+      # also trunk's dist dir, so trunk deleted the host build artifacts before
+      # rust-cache saved. An exact hit is never rewritten ("Cache up-to-date"), and
+      # the key does not cover the virtual manifest, so renaming the profile did not
+      # bust it: every image run still compiles the wasm dependencies from scratch.
+      # Keep the hot dev-profile cache above for the server binaries. Cache the wasm
+      # profile in its own target dir, and only save it from main, same as rust-cache.
+      - name: Restore wasm profile cache
+        id: wasm-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target-wasm
+          key: wasm-profile-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.cargo/config.toml', 'crates/client/Cargo.toml', 'crates/game/Cargo.toml', 'crates/server/Cargo.toml', 'crates/matchmaker/Cargo.toml') }}
+          restore-keys: |
+            wasm-profile-${{ runner.os }}-${{ runner.arch }}-
       # Dev profile (dependencies are still optimized): this checks packaging, not performance.
       - run: cargo build --locked -p evoclash-server -p evoclash-matchmaker
       - run: trunk build --release --locked
         working-directory: crates/client
+        env:
+          # Absolute: a relative target dir would be resolved from crates/client.
+          # Trunk's dist stays ../../target/web (Trunk.toml), outside this directory.
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target-wasm
+      - name: Save wasm profile cache
+        if: github.ref == 'refs/heads/main' && steps.wasm-cache.outputs.cache-hit != 'true'
+        # A concurrent main push can lose the save race once the key exists. The build
+        # already succeeded; failing the job on that would not be a failed check.
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target-wasm
+          key: ${{ steps.wasm-cache.outputs.cache-primary-key }}
       - name: Stage binaries and the browser client like release.yml does
         run: |
           mkdir -p dist/amd64
