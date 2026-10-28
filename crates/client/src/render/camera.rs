@@ -4,6 +4,7 @@ use super::*;
 
 use crate::evo_panel::EvoPanelOpen;
 use crate::input::{BackpackOpen, panel_open};
+use crate::input_mode::InputMode;
 use crate::menu::MenuOpen;
 
 pub(super) fn follow_camera(
@@ -13,6 +14,7 @@ pub(super) fn follow_camera(
     backpack: Res<BackpackOpen>,
     menu: Res<MenuOpen>,
     evo: Res<EvoPanelOpen>,
+    mode: Res<InputMode>,
     mut shake: ResMut<CameraShake>,
     mut held_lean: Local<Vec2>,
     me: Query<(&Pos, Option<&TickSamples>), With<LocalPlayer>>,
@@ -48,13 +50,13 @@ pub(super) fn follow_camera(
     let Some((anchor, lean_ok)) = subject else {
         return;
     };
-    // Lean toward the cursor. While a panel is open keep the last offset: don't recenter and
-    // don't chase the pointer. Closing the panel feeds a new target into the lerp below.
+    // Lean toward the cursor. In Ui (a panel, or any other hold) keep the last offset: don't
+    // recenter and don't chase the pointer. Leaving Ui feeds a new target into the lerp below.
     // A spectator never leans: the view stays on the followed body.
     let lean = if !lean_ok {
         *held_lean = Vec2::ZERO;
         Vec2::ZERO
-    } else if panel_open(backpack.0, menu.0, evo.0) {
+    } else if panel_open(backpack.0, menu.0, evo.0) || *mode == InputMode::Ui {
         *held_lean
     } else {
         let live = cursor

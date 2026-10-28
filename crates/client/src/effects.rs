@@ -18,6 +18,7 @@ use rand::Rng;
 
 use crate::hud::path_color;
 use crate::input::{GUN_HEIGHT, LocalPlayer, Selection};
+use crate::input_mode::{InputMode, SyncInputMode};
 use crate::render::{CameraShake, Strike, UiFont, swing_side, tracer_size};
 use crate::textures::Textures;
 
@@ -43,7 +44,7 @@ impl Plugin for EffectsPlugin {
                 receive_events,
                 shake_on_damage,
                 age_effects,
-                update_reticle,
+                update_reticle.after(SyncInputMode),
             )
                 .chain(),
         );
@@ -719,6 +720,7 @@ fn update_reticle(
     textures: Res<Textures>,
     marker: Res<HitMarker>,
     cursor: Res<crate::input::CursorWorld>,
+    mode: Res<InputMode>,
     specs: Query<(), With<Spectator>>,
     me: Query<(), With<LocalPlayer>>,
     mut reticle: Query<(&mut Sprite, &mut Transform, &mut Visibility), With<Reticle>>,
@@ -732,8 +734,9 @@ fn update_reticle(
         ));
         return;
     };
-    // No aim point while watching: the crosshair would read as a shot you cannot fire.
-    if me.is_empty() && !specs.is_empty() {
+    // Ui (and a spectator, before the mode resource has caught up) has no aim point: the
+    // crosshair would read as a shot you cannot fire. The system cursor is the pointer there.
+    if *mode == InputMode::Ui || (me.is_empty() && !specs.is_empty()) {
         visibility.set_if_neq(Visibility::Hidden);
         return;
     }

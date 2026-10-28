@@ -17,6 +17,7 @@ mod evo_panel;
 mod finale_ui;
 mod hud;
 mod input;
+mod input_mode;
 mod loading_ui;
 mod lobby_ui;
 mod lpc;
@@ -110,6 +111,7 @@ fn main() {
         loading_ui::LoadingUiPlugin,
         menu::MenuPlugin,
         input::InputPlugin,
+        input_mode::InputModePlugin,
         predict::PredictPlugin,
         render::RenderPlugin,
     ));

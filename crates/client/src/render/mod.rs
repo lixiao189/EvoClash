@@ -22,6 +22,7 @@ use rand::Rng;
 
 use crate::assets::PendingAssets;
 use crate::input::{CursorWorld, GUN_HEIGHT, LocalPlayer, Selection};
+use crate::input_mode::SyncInputMode;
 use crate::lpc;
 use crate::predict::TickSamples;
 use crate::textures::{self, Facing, PIXEL, Textures};
@@ -309,7 +310,9 @@ impl Plugin for RenderPlugin {
                 adopt_layout,
                 build_scenery,
                 update_roofs,
-                (sync_players, strike_on_shot, pose_players, tint_players).chain(),
+                (sync_players, strike_on_shot, pose_players, tint_players)
+                    .chain()
+                    .after(SyncInputMode),
                 sync_props,
                 sync_turrets,
                 sync_traps,
@@ -320,7 +323,7 @@ impl Plugin for RenderPlugin {
                 sync_projectiles,
                 fade_splats,
                 age_puddles,
-                follow_camera,
+                follow_camera.after(SyncInputMode),
                 boss_arrow,
                 update_cursor,
                 draw_overlays,
