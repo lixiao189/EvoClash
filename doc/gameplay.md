@@ -4,7 +4,7 @@
 
 操作：WASD 移动 · 鼠标瞄准、左键射击 · 空格冲刺 · E 拾取或替换（按住撬保险柜） · Q/右键 投掷电磁脉冲雷 · R/T 技能 · Tab 进化面板 · B 背包。
 
-本文是规则说明。数值以代码为准：`crates/game/src/items/`、`sim.rs`、`map/`。
+本文是规则说明。数值以代码为准：`crates/game/src/items/`、`sim.rs`、`map/`。规则应该打出什么样的对局，见 [设计目标](design-targets.md)。
 
 ## 装备层级
 
