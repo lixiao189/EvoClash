@@ -38,6 +38,17 @@ pub fn underdog_mult(attacker_weapon_tier: u8, target_gear_tier: u8) -> f32 {
     (1.0 + UNDERDOG_BONUS_PER_TIER * gap).min(UNDERDOG_BONUS_MAX)
 }
 
+const HZ: u32 = TICK_HZ as u32;
+
+/// Ordinary fauna (elites included) hurt players less from 5:00. The behemoth is not this.
+pub fn fauna_player_mult(elapsed_ticks: u32) -> f32 {
+    if elapsed_ticks >= 5 * 60 * HZ {
+        0.6
+    } else {
+        1.0
+    }
+}
+
 /// The current match's layout. Replaced whenever `MatchState::map_seed` changes.
 #[derive(Resource, Deref, Default)]
 pub struct Arena(pub ArenaMap);
@@ -156,5 +167,13 @@ mod tests {
             "{} vs {expected}",
             pos.0.x
         );
+    }
+
+    #[test]
+    fn fauna_hurt_players_less_from_five_minutes() {
+        let at = |m: u32, s: u32| (m * 60 + s) * HZ;
+        assert_eq!(fauna_player_mult(at(5, 0) - 1), 1.0);
+        assert_eq!(fauna_player_mult(at(5, 0)), 0.6);
+        assert_eq!(fauna_player_mult(at(8, 0)), 0.6);
     }
 }
