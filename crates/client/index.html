@@ -19,15 +19,27 @@
       gap: 10px; background: #1b1712; text-align: center; }
     #boot .title { font-size: 44px; letter-spacing: 6px; color: #e0a45a; }
     #boot .sub { font-size: 15px; opacity: .7; }
-    #join { position: fixed; inset: 0; z-index: 3; display: none; place-content: center; justify-items: center; gap: 12px; text-align: center; }
+    #join { position: fixed; inset: 0; z-index: 3; display: none; place-content: center; justify-items: center; gap: 12px; text-align: center; overflow: auto; padding: 28px 16px; }
     #join h1 { margin: 0 0 8px; font-size: 40px; letter-spacing: 4px; color: #e0a45a; }
     #join input, #join button { font: inherit; padding: 10px 14px; border-radius: 6px; border: 1px solid #6b5a43; }
-    #join input, #join button { box-sizing: border-box; width: 260px; }
+    #join input, #join > button, .create-row > button { box-sizing: border-box; width: 260px; }
     #join input { background: #2a241c; color: inherit; }
     #join button { background: #e0a45a; color: #1b1712; border-color: #e0a45a; cursor: pointer; }
     #join button.secondary { background: transparent; color: #e0a45a; }
+    #join button:disabled { opacity: .45; cursor: default; }
     #join p { margin: 8px 0 0; opacity: .7; font-size: 14px; }
     #join a { color: inherit; font-size: 13px; opacity: .55; }
+    #notice { margin: 0; color: #e07a5a; opacity: 1; max-width: 560px; }
+    #empty { margin: 0; color: #e0a45a; opacity: 1; }
+    #rooms { width: min(560px, 92vw); display: flex; flex-direction: column; gap: 8px; text-align: left; }
+    .room { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; padding: 8px 10px; border: 1px solid #6b5a43; border-radius: 6px; background: #2a241c; }
+    .room-info { display: flex; flex-direction: column; gap: 2px; font-size: 14px; }
+    .room-info strong { color: #e0a45a; font-weight: 600; }
+    #rooms button { width: auto; min-width: 72px; padding: 8px 12px; }
+    .create-row { display: flex; align-items: center; gap: 12px; }
+    .create-row > button { width: 180px; }
+    .check { display: flex; align-items: center; gap: 6px; color: #e0a45a; cursor: pointer; font-size: 15px; }
+    #join input[type="checkbox"] { width: auto; padding: 0; }
     #nojs { position: fixed; inset: 0; z-index: 4; display: grid; place-content: center; justify-items: center;
       gap: 8px; background: #1b1712; text-align: center; line-height: 1.7; }
   </style>
@@ -48,8 +60,14 @@
     <h1>EVOCLASH</h1>
     <input name="name" maxlength="16" placeholder="你的名字" required autofocus>
     <input name="room" maxlength="4" placeholder="房间码（可选）" autocomplete="off" autocapitalize="characters" spellcheck="false">
-    <button type="submit">进入废土</button>
-    <button type="button" id="create" class="secondary">创建房间</button>
+    <div id="rooms"></div>
+    <p id="empty" hidden>还没有房间，先创建一个</p>
+    <p id="notice" hidden></p>
+    <button type="submit" id="enter">进入废土</button>
+    <div class="create-row">
+      <button type="button" id="create" class="secondary">创建房间</button>
+      <label class="check"><input type="checkbox" id="private">私人</label>
+    </div>
     <p>WASD 移动 · 鼠标瞄准射击 · 空格冲刺 · E 拾取 · Q / 右键投掷<br>1-4 / 滚轮切换 · B 背包 · Tab 进化 · R / T 技能</p>
     <a href="credits.html" target="_blank">美术素材致谢 / Art credits</a>
   </form>
@@ -65,29 +83,97 @@
     canvas.addEventListener("keydown", (event) => {
       if (event.key === "Tab") event.preventDefault();
     });
+    const PHASES = { lobby: "等待中", starting: "开局中", playing: "对局中", results: "结算中" };
     // Quick start is the name alone. A room code joins that room. 创建房间 ignores the code.
-    function enter(create) {
+    function remember(name) {
+      try { localStorage.setItem("evoclash-name", name); } catch {}
+    }
+    function named() {
       const name = form.name.value.trim();
       if (!name) {
         form.name.reportValidity();
-        return;
+        return "";
       }
-      try { localStorage.setItem("evoclash-name", name); } catch {}
+      remember(name);
+      return name;
+    }
+    function enter(create) {
+      const name = named();
+      if (!name) return;
       params.set("name", name);
       params.delete("room");
       params.delete("create");
+      params.delete("private");
+      params.delete("match");
+      params.delete("notice");
       if (create) {
         params.set("create", "1");
+        if (document.getElementById("private").checked) params.set("private", "1");
       } else {
         const room = form.room.value.trim().toUpperCase();
         if (room) params.set("room", room);
       }
       location.search = params.toString();
     }
+    function enterMatch(id) {
+      const name = named();
+      if (!name || !id) return;
+      params.set("name", name);
+      params.delete("room");
+      params.delete("create");
+      params.delete("private");
+      params.delete("notice");
+      params.set("match", id);
+      location.search = params.toString();
+    }
+    function timeLeft(secs) {
+      if (secs === undefined || secs === null || secs === "") return "剩余 —";
+      return "剩余 " + secs + " 秒";
+    }
+    function renderRooms(rooms) {
+      const root = document.getElementById("rooms");
+      root.replaceChildren();
+      for (const room of rooms) {
+        const row = document.createElement("div");
+        row.className = "room";
+        const info = document.createElement("div");
+        info.className = "room-info";
+        const title = document.createElement("strong");
+        title.textContent = (PHASES[room.phase] || room.phase || "未知") + " · " + timeLeft(room.phase_left_secs);
+        const meta = document.createElement("span");
+        const humans = room.humans ?? 0;
+        const maxPlayers = room.max_players ?? 8;
+        const bots = room.bots ?? 0;
+        const specs = room.spectators ?? 0;
+        const maxSpecs = room.max_spectators ?? 4;
+        meta.textContent = "真人 " + humans + "/" + maxPlayers + " · 机器人 " + bots + " · 旁观 " + specs + "/" + maxSpecs;
+        info.append(title, meta);
+        const button = document.createElement("button");
+        button.type = "button";
+        if (room.entry === "play") button.textContent = "加入";
+        else if (room.entry === "spectate") button.textContent = "观战";
+        else {
+          button.textContent = "已满";
+          button.disabled = true;
+        }
+        if (!button.disabled) button.addEventListener("click", () => enterMatch(room.match_id));
+        row.append(info, button);
+        root.append(row);
+      }
+    }
     if (!params.get("name")?.trim()) {
       form.style.display = "grid";
       // The form has its own title; the loading splash only covers the wasm boot.
       boot.style.display = "none";
+      const notice = params.get("notice");
+      if (notice) {
+        const el = document.getElementById("notice");
+        el.hidden = false;
+        el.textContent = notice;
+        params.delete("notice");
+        const rest = params.toString();
+        history.replaceState(null, "", location.pathname + (rest ? "?" + rest : "") + location.hash);
+      }
       form.name.value = localStorage.getItem("evoclash-name") ?? "";
       form.room.value = (params.get("room") ?? "").toUpperCase();
       form.addEventListener("submit", (event) => {
@@ -95,6 +181,31 @@
         enter(false);
       });
       document.getElementById("create").addEventListener("click", () => enter(true));
+      const enterBtn = document.getElementById("enter");
+      const emptyEl = document.getElementById("empty");
+      let listed = "";
+      // A failed fetch must not disable 进入废土. An empty list does.
+      async function refreshRooms() {
+        try {
+          const res = await fetch("/v1/rooms", { cache: "no-store" });
+          if (!res.ok) throw new Error(String(res.status));
+          const data = await res.json();
+          const rooms = Array.isArray(data.rooms) ? data.rooms : [];
+          const key = JSON.stringify(rooms);
+          if (key !== listed) {
+            listed = key;
+            renderRooms(rooms);
+          }
+          const empty = rooms.length === 0;
+          enterBtn.disabled = empty;
+          emptyEl.hidden = !empty;
+        } catch {
+          enterBtn.disabled = false;
+          emptyEl.hidden = true;
+        }
+      }
+      refreshRooms();
+      setInterval(refreshRooms, 3000);
     } else {
       canvas.focus();
     }

@@ -48,6 +48,10 @@ pub struct ClientArgs {
     pub room: Option<String>,
     /// `?create=1` posts `/v1/rooms` instead of joining.
     pub create_room: bool,
+    /// `?match=` joins that room. Absent for a quick start.
+    pub match_id: Option<String>,
+    /// `?private=1` with `?create=1`: `CreateRoomRequest::private`.
+    pub private_room: bool,
 }
 
 /// Read the page URL. `None` until the player has picked a name (index.html asks for one).
@@ -60,6 +64,10 @@ fn page_args() -> Option<ClientArgs> {
         .get("room")
         .map(|code| code.trim().to_uppercase())
         .filter(|code| !code.is_empty());
+    let match_id = params
+        .get("match")
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty());
     Some(ClientArgs {
         name,
         matchmaker: location.origin().ok()?,
@@ -69,6 +77,8 @@ fn page_args() -> Option<ClientArgs> {
             .unwrap_or(0),
         room,
         create_room: params.get("create").as_deref() == Some("1"),
+        match_id,
+        private_room: params.get("private").as_deref() == Some("1"),
     })
 }
 

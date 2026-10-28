@@ -62,11 +62,13 @@ Rust · Bevy 0.20（客户端只在浏览器里跑，目标 `wasm32`）· lighty
 
 心跳每 2 秒一次，带人数、`max_players`（固定 8）、`tick_us`、证书哈希、阶段、`phase_left_secs`、真人 / 机器人数量、是否私人、房间码、`room_seed`、`match_index`、`join_mode`（`none`、`lobby` 或 `spectate`：Playing / Results 中旁观者少于 4 且没在排空）、`spectators`（旁观人数，不算在 `players` 里）、`exiting`。`players` 仍是真人数。匹配服务只信 `join_mode`，不自己重算阶段。主机名会展开成全部解析到的地址（headless Service 的每个副本）。大约 6 秒没有心跳就摘掉。`exiting: true` 表示正常退出前的最后一次心跳，用来和崩溃区分，崩溃会触发恢复（见「崩溃恢复」）。快进期间心跳报 `recovering` 且 `phase_left_secs` 为空，等人时带冻结的对局剩余秒数。
 
-快速开始：跳过私人房。先在 `join_mode == lobby` 的局里按真人数从多到少、再按 `phase_left_secs` 从多到少（`None` 在最后）挑；没有的话，在 `join_mode == spectate` 的局里挑「本局剩余 + 结算」最短的进旁观；都没有就拉起新局。旁观席有单独的预留，上限 4。私人房在对局中且 `join_mode == spectate` 时，房间码加入直接进旁观。
+快速开始：跳过私人房。先在 `join_mode == lobby` 的局里按真人数从多到少、再按 `phase_left_secs` 从多到少（`None` 在最后）挑；没有的话，在 `join_mode == spectate` 且「本局剩余 + 结算」不超过 120 秒（`QUICK_SPECTATE_MAX_SECS`）的局里挑最短的进旁观；还没有就拉起新局；拉不起（舰队满或 `--no-launch`）时退回不限时的最短旁观，再没有才 503。旁观席有单独的预留，上限 4。私人房在对局中且 `join_mode == spectate` 时，房间码加入直接进旁观。
+
+房间列表：`GET /v1/rooms` 返回 `api::RoomList`，只列公开、健康、不在恢复中，且真人 + 旁观 + 未过期预留至少为 1 的局（所以空的预热服务器不出现，刚创建的房立刻可见），排序同快速开始，`entry` 为 `play` / `spectate` / `full`。带 `match_id` 的 `/v1/join` 是从列表选房：能上场就上场，Playing / Results 有旁观席就旁观，`starting` 返回 409 `starting`，其余（满、私人、恢复中、不存在）返回 409 `full`，不再落到快速开始。
 
 旁观者是一条连接，不生成角色，带一个只复制给本人的 `Spectator { following, queue_pos }`。服务器用被跟随者的位置做可见性（`HiddenFrom`、陷阱受众），忽略旁观者的 `PlayerInput` / `PlayerCommand` / `InventoryMove`。席位只在 Lobby 的 `Input` 里升格（留下的真人 → 旁观者按到达顺序 → 机器人）。
 
-`POST /v1/rooms` 的请求体是 `{name}`，返回带 `room_code` 的加入响应。拉起参数是 `--private --room-code CODE --room-seed N --bots 8`，`--max-players` 固定 8，房间始终补满 8 人；不带 `--single-match`。
+`POST /v1/rooms` 的请求体是 `{name, private}`。`private: false`（默认）建公开房：有舰队就拉起一个普通公开局并给创建者预留席位，`--no-launch` 时占一个空的公开 Lobby；响应不带 `room_code`。`private: true` 建私人房，返回带 `room_code` 的加入响应。拉起参数是 `--private --room-code CODE --room-seed N --bots 8`，`--max-players` 固定 8，房间始终补满 8 人；不带 `--single-match`。
 
 ## 客户端
 
@@ -94,7 +96,7 @@ Rust · Bevy 0.20（客户端只在浏览器里跑，目标 `wasm32`）· lighty
 
 状态每 2 个 tick 复制一次（`REPLICATION_INTERVAL`）。
 
-- **协议**：WebTransport 不可靠数据报（QUIC，没有 TCP 队头阻塞）。输入每个 tick 冗余发送。对局进程启动时生成 14 天自签证书，SHA-256 随心跳到匹配服务，再放进 `JoinResponse.cert_digest`。刚拉起的局要等第一次心跳才能被加入。跑满 12 天会自己排空。浏览器只允许安全页面使用 WebTransport，除了 localhost 以外都要在匹配服务前面加 HTTPS。
+- **协议**：WebTransport 不可靠数据报（QUIC，没有 TCP 队头阻塞）。输入每个 tick 冗余发送。对局进程启动时生成 14 天自签证书，SHA-256 随心跳到匹配服务，再放进 `JoinResponse.cert_digest`。刚拉起的局要等第一次心跳才能被加入；对局进程在 WebTransport 端点绑定（`Linked`）之后才开始发心跳，所以拿到证书哈希时端口一定已在监听。跑满 12 天会自己排空。浏览器只允许安全页面使用 WebTransport，除了 localhost 以外都要在匹配服务前面加 HTTPS。
 - **预测**：本地移动和冲刺没有人为输入延迟。误差靠回滚和平滑修正。预测位置在固定步之间插值。
 - **射击**：自己的弹道本地立刻画。命中由服务器决定。
 - **延迟补偿**：服务器按每个客户端上报的插值延迟，把目标回溯到「你屏幕上看到的那一刻」再判命中。上限约 220 毫秒（`MAX_REWIND_TICKS` = 14）。
@@ -107,7 +109,7 @@ Rust · Bevy 0.20（客户端只在浏览器里跑，目标 `wasm32`）· lighty
 - 容量等于进程数。匹配服务优先把人放进最满的局。满员（8/8）或正在排空的局不再分配。席位预留防止同时加入时超卖。
 - 局与局不共享状态。
 - `--threads` 默认 1。
-- 预热池：`--warm-matches`（默认 1）个空局。Kubernetes 上由 Agones FleetAutoscaler 的 buffer 负责。
+- 预热池：`--warm-matches`（默认 0：本地不常备空房，房间由玩家创建或快速开始拉起）个空局。Kubernetes 上由 Agones FleetAutoscaler 的 buffer 负责。
 - tick 平均超过约 9.4 毫秒（预算的 60%）的局不再接收新人。
 
 ## 高可用

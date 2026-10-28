@@ -10,7 +10,7 @@ use bevy::ui::RelativeCursorPosition;
 use evoclash_game::api::{CreateRoomRequest, JoinRequest, JoinResponse, RejoinRequest};
 use evoclash_game::net::{CONNECTION_TIMEOUT_SECS, TOKEN_EXPIRE_SECS};
 use evoclash_game::protocol::{MatchState, Monster, Pickup, Player, Projectile};
-use lightyear::connection::client::{Connected, Disconnected};
+use lightyear::connection::client::{Connected, Connecting, Disconnected, DisconnectedReason};
 use lightyear::link::prelude::{LinkConditionerConfig, RecvLinkConditioner};
 use lightyear::netcode::client_plugin::NetcodeConfig;
 use lightyear::netcode::{ConnectToken, NetcodeClient};
@@ -20,7 +20,7 @@ use lightyear::webtransport::prelude::client::WebTransportClientIo;
 use serde::{Deserialize, Serialize};
 
 use crate::ClientArgs;
-use crate::assets::assets_ready;
+use crate::assets::{Loading, PendingAssets, assets_ready};
 use crate::connect_ui::{ConnectionStatus, LinkStatus};
 
 const MAX_RECONNECT_ATTEMPTS: u32 = 12;
@@ -47,8 +47,9 @@ struct ApiError {
 }
 
 enum CallError {
-    /// The matchmaker answered that the match is over or unknown: find a new one.
-    Gone,
+    /// The matchmaker answered that the match is over or unknown.
+    /// The string is the server `message`, if it sent one.
+    Gone(String),
     Api(ApiError),
     Failed(String),
 }
@@ -245,7 +246,7 @@ fn post<T: Serialize>(matchmaker: &str, path: &str, request: &T) -> PendingCall 
                 // `closed` and `abandoned` stay here so the player chooses.
                 Ok(body) => {
                     if error_is_gone(response.status, Some(body.error.as_str())) {
-                        Err(CallError::Gone)
+                        Err(CallError::Gone(body.message))
                     } else {
                         Err(CallError::Api(ApiError {
                             status: response.status,
@@ -255,7 +256,9 @@ fn post<T: Serialize>(matchmaker: &str, path: &str, request: &T) -> PendingCall 
                         }))
                     }
                 }
-                Err(_) if error_is_gone(response.status, None) => Err(CallError::Gone),
+                Err(_) if error_is_gone(response.status, None) => {
+                    Err(CallError::Gone(String::new()))
+                }
                 Err(_) => Err(CallError::Failed(format!(
                     "{url}: {} {}",
                     response.status,
@@ -371,6 +374,13 @@ pub struct Session {
     wait: NoticeWait,
     /// `?create=1` already minted a room. Don't mint another on a later fallback.
     create_used: bool,
+    /// Set once a listed `?match=` join has taken a seat. Until then every FromArgs
+    /// join keeps that id, including a dispatch that did not go through `connect`.
+    listed_closed: bool,
+    /// The call in flight is that listed-room join (not a rejoin or a quick start).
+    listed_join: bool,
+    /// Listed-room join failed: leave for `/play/?notice=`.
+    home_notice: Option<String>,
 }
 
 impl Session {
@@ -382,27 +392,18 @@ impl Session {
         }
     }
 
-    fn room_code(&self, args: &ClientArgs) -> Option<String> {
-        match self.intent {
-            JoinIntent::Quick | JoinIntent::Create => None,
-            JoinIntent::FromArgs => args.room.clone(),
-        }
-    }
-
-    /// Create a room, or join (quick start when `room` is absent).
+    /// Create a room, or join (quick start when `room` and `match` are absent).
     fn dispatch(&mut self, args: &ClientArgs, now: f32) {
         if self.creating(args) {
+            self.listed_join = false;
             let request = CreateRoomRequest {
                 name: args.name.clone(),
+                private: create_is_private(self.intent, args.private_room),
             };
             self.pending = Some(post(&args.matchmaker, "/v1/rooms", &request));
         } else {
-            let request = JoinRequest {
-                name: args.name.clone(),
-                region: None,
-                match_id: None,
-                room: self.room_code(args),
-            };
+            let (request, listed) = build_join(self.intent, self.listed_closed, args);
+            self.listed_join = listed;
             self.pending = Some(post(&args.matchmaker, "/v1/join", &request));
         }
         self.pending_since = Some(now);
@@ -413,6 +414,7 @@ impl Session {
     fn refresh(&mut self, args: &ClientArgs, new_match: bool, now: f32) {
         match &self.seat {
             Some(seat) if !new_match => {
+                self.listed_join = false;
                 let request = RejoinRequest {
                     match_id: seat.match_id.clone(),
                     client_id: seat.client_id,
@@ -442,11 +444,16 @@ struct LinkState {
     /// The in-flight reconnect already incremented `attempts`.
     counted: bool,
     ever_connected: bool,
+    /// Consecutive frames of the required `Disconnected` marker before `Connecting` lands.
+    initial_frames: u32,
 }
 
 /// Failed handshakes on a match we never got into (full, or died while starting) before
 /// asking for a different match instead.
 const NEW_MATCH_AFTER_ATTEMPTS: u32 = 2;
+/// `NetcodeClient` is `#[require(Disconnected)]` with reason `Unknown` until `Connect`
+/// inserts `Connecting` on a later flush. One slow frame must not spend a reconnect.
+const INITIAL_MARKER_FRAMES: u32 = 8;
 
 pub struct SessionPlugin;
 
@@ -464,6 +471,7 @@ impl Plugin for SessionPlugin {
             attempts: 0,
             counted: false,
             ever_connected: false,
+            initial_frames: 0,
         });
         app.add_systems(Startup, |world: &mut World| {
             // Predict ourselves with no artificial input delay: lowest perceived latency.
@@ -475,7 +483,7 @@ impl Plugin for SessionPlugin {
         // Join only once the files the match needs have loaded.
         app.add_systems(
             Update,
-            (connect.run_if(run_once), watch_connection, depart)
+            (connect.run_if(connect_when_ready), watch_connection, depart)
                 .chain()
                 .run_if(assets_ready),
         );
@@ -525,6 +533,204 @@ fn spawn_client(commands: &mut Commands, seat: &Seat, args: &ClientArgs) -> Resu
 
 fn connect(mut session: ResMut<Session>, args: Res<ClientArgs>, time: Res<Time>) {
     session.dispatch(&args, time.elapsed_secs());
+}
+
+/// `run_once` is checked even on frames where `assets_ready` is false, and that burns it.
+/// Only arm once the files are loaded, so the first `/v1/join` is this system and not the
+/// later "no client entity" retry (which used to send `match_id: null`).
+fn connect_when_ready(mut started: Local<bool>, pending: Res<PendingAssets>) -> bool {
+    if pending.state != Loading::Ready {
+        return false;
+    }
+    if *started {
+        return false;
+    }
+    *started = true;
+    true
+}
+
+/// `?private=1` only applies to the page's create, not a later in-game 创建房间 button.
+fn create_is_private(intent: JoinIntent, private_room: bool) -> bool {
+    private_room && intent == JoinIntent::FromArgs
+}
+
+/// `?match=` on a FromArgs join until that attempt has taken a seat.
+/// `listed_closed` stays false until then, so a dispatch that skipped `connect` still sends it.
+fn page_match_id(intent: JoinIntent, listed_closed: bool, match_id: Option<&str>) -> Option<&str> {
+    if listed_closed || intent != JoinIntent::FromArgs {
+        None
+    } else {
+        match_id.filter(|id| !id.is_empty())
+    }
+}
+
+/// Body of `/v1/join`, and whether that call is a listed-room join (`listed_join`).
+fn build_join(intent: JoinIntent, listed_closed: bool, args: &ClientArgs) -> (JoinRequest, bool) {
+    let match_id =
+        page_match_id(intent, listed_closed, args.match_id.as_deref()).map(str::to_string);
+    let listed = match_id.is_some();
+    let room = match intent {
+        JoinIntent::Quick | JoinIntent::Create => None,
+        JoinIntent::FromArgs => args.room.clone(),
+    };
+    (
+        JoinRequest {
+            name: args.name.clone(),
+            region: None,
+            match_id,
+            room,
+        },
+        listed,
+    )
+}
+
+/// A listed-room join never falls through to quick start. Other joins keep the old actions.
+fn room_join_failure(
+    listed: bool,
+    error: &str,
+    status: u16,
+    message: &str,
+    retry_after: Option<u32>,
+    started_retried: bool,
+) -> RoomJoinFailure {
+    if listed {
+        RoomJoinFailure::Home(server_text(error, message))
+    } else {
+        RoomJoinFailure::Here(classify_join_error(
+            error,
+            status,
+            message,
+            retry_after,
+            started_retried,
+        ))
+    }
+}
+
+fn gone_home_text(message: &str) -> String {
+    if message.is_empty() {
+        "这个房间已经结束，请换一个房间。".to_string()
+    } else {
+        message.to_string()
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum RoomJoinFailure {
+    /// Reload `/play/?notice=` with the server copy. Do not quick-start.
+    Home(String),
+    Here(JoinAction),
+}
+
+/// What is on the client entity this frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SeenLink {
+    Absent,
+    Live,
+    /// `Connecting`, or spawned without a disconnect marker yet.
+    Handshake,
+    /// Required `Disconnected` (reason unknown) before `Connecting` is applied.
+    Initial,
+    /// A real failure reason, and not mid-handshake.
+    Down,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DisconnectKind {
+    Initial,
+    Failed,
+}
+
+fn disconnect_kind(disc: &Disconnected) -> DisconnectKind {
+    match disc.reason {
+        DisconnectedReason::Unknown => DisconnectKind::Initial,
+        _ => DisconnectKind::Failed,
+    }
+}
+
+fn seen_link(
+    exists: bool,
+    connected: bool,
+    connecting: bool,
+    kind: Option<DisconnectKind>,
+) -> SeenLink {
+    if !exists {
+        SeenLink::Absent
+    } else if connected {
+        SeenLink::Live
+    } else if connecting || kind.is_none() {
+        SeenLink::Handshake
+    } else if kind == Some(DisconnectKind::Initial) {
+        SeenLink::Initial
+    } else {
+        SeenLink::Down
+    }
+}
+
+fn link_is_down(seen: SeenLink, initial_frames: u32) -> bool {
+    match seen {
+        SeenLink::Absent | SeenLink::Down => true,
+        SeenLink::Initial => initial_frames >= INITIAL_MARKER_FRAMES,
+        SeenLink::Live | SeenLink::Handshake => false,
+    }
+}
+
+/// First entry stays [`LinkStatus::Connecting`]. A dropped link we already had is a reconnect,
+/// and that card stays up through the retry handshake.
+fn show_link_status(
+    ever_connected: bool,
+    down: bool,
+    live: bool,
+    previous: LinkStatus,
+) -> LinkStatus {
+    if live {
+        return LinkStatus::Connected;
+    }
+    if previous == LinkStatus::Failed {
+        return LinkStatus::Failed;
+    }
+    if !ever_connected {
+        return LinkStatus::Connecting;
+    }
+    if down || previous == LinkStatus::Reconnecting {
+        LinkStatus::Reconnecting
+    } else {
+        LinkStatus::Connecting
+    }
+}
+
+fn home_href(notice: &str) -> String {
+    format!("/play/?notice={}", encode_query_component(notice))
+}
+
+fn encode_query_component(text: &str) -> String {
+    let mut out = String::new();
+    for b in text.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn send_home(
+    session: &mut Session,
+    notice: &mut JoinNotice,
+    offers: &mut JoinOffers,
+    status: &mut ConnectionStatus,
+    text: String,
+) {
+    session.home_notice = Some(text.clone());
+    session.wait = NoticeWait::Hold;
+    session.pending = None;
+    session.pending_since = None;
+    session.listed_join = false;
+    notice.0 = text.clone();
+    offers.buttons.clear();
+    status.status = LinkStatus::Connecting;
+    leave_with_notice(&text);
 }
 
 fn apply_join_action(
@@ -635,6 +841,19 @@ fn leave_page() {
 #[cfg(not(target_family = "wasm"))]
 fn leave_page() {}
 
+#[cfg(target_family = "wasm")]
+fn leave_with_notice(notice: &str) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let _ = window.location().set_href(&home_href(notice));
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn leave_with_notice(notice: &str) {
+    let _ = notice;
+}
+
 fn watch_connection(
     mut commands: Commands,
     time: Res<Time>,
@@ -654,7 +873,7 @@ fn watch_connection(
         &RelativeCursorPosition,
         &InheritedVisibility,
     )>,
-    clients: Query<(Has<Connected>, Has<Disconnected>), With<Client>>,
+    clients: Query<(Has<Connected>, Has<Connecting>, Option<&Disconnected>), With<Client>>,
     replicated: Query<
         Entity,
         Or<(
@@ -672,6 +891,10 @@ fn watch_connection(
     if depart.pending() {
         return;
     }
+    if let Some(text) = session.home_notice.clone() {
+        leave_with_notice(&text);
+        return;
+    }
     let now = time.elapsed_secs();
     if call_timed_out(session.pending_since, now) {
         warn!("matchmaker call timed out");
@@ -679,7 +902,18 @@ fn watch_connection(
         session.pending_since = None;
         session.started_retried = false;
         link.counted = false;
+        link.initial_frames = 0;
         status.status = LinkStatus::Connecting;
+        if session.listed_join {
+            send_home(
+                &mut session,
+                &mut notice,
+                &mut offers,
+                &mut status,
+                "连接超时，请重试。".to_string(),
+            );
+            return;
+        }
         if recover.0 {
             // The fast-forward reply never arrived. Same seat again, not a new match.
             session.wait = NoticeWait::Rejoin(1.0);
@@ -708,7 +942,17 @@ fn watch_connection(
                 spectating.0 = joined.spectate;
                 Seat::from_response(joined.response)
             }
-            Err(CallError::Gone) => {
+            Err(CallError::Gone(message)) => {
+                if session.listed_join {
+                    send_home(
+                        &mut session,
+                        &mut notice,
+                        &mut offers,
+                        &mut status,
+                        gone_home_text(&message),
+                    );
+                    return;
+                }
                 warn!("match is gone, joining another one");
                 session.seat = None;
                 spectating.0 = false;
@@ -720,13 +964,20 @@ fn watch_connection(
                 return;
             }
             Err(CallError::Api(err)) => {
-                let action = classify_join_error(
+                let action = match room_join_failure(
+                    session.listed_join,
                     &err.error,
                     err.status,
                     &err.message,
                     err.retry_after,
                     session.started_retried,
-                );
+                ) {
+                    RoomJoinFailure::Home(text) => {
+                        send_home(&mut session, &mut notice, &mut offers, &mut status, text);
+                        return;
+                    }
+                    RoomJoinFailure::Here(action) => action,
+                };
                 link.attempts = attempts_after_reply(link.attempts, link.counted, &action);
                 link.counted = false;
                 status.attempts = link.attempts;
@@ -747,6 +998,7 @@ fn watch_connection(
                 // Buttons (or the recover shade) must not sit under the reconnect card.
                 status.status = LinkStatus::Connecting;
                 link.since_change = 0.0;
+                link.initial_frames = 0;
                 return;
             }
             Err(CallError::Failed(e)) => {
@@ -761,7 +1013,12 @@ fn watch_connection(
             Ok(entity)
         });
         match failed {
-            Ok(entity) => link.entity = Some(entity),
+            Ok(entity) => {
+                link.entity = Some(entity);
+                // Later drops rejoin this seat; they must not target the list row again.
+                session.listed_closed = true;
+                session.listed_join = false;
+            }
             Err(e) => {
                 warn!("could not get into a match: {e}");
                 apply_join_action(
@@ -777,6 +1034,7 @@ fn watch_connection(
             }
         }
         link.since_change = 0.0;
+        link.initial_frames = 0;
         return;
     }
     if session.pending.is_some() {
@@ -852,12 +1110,23 @@ fn watch_connection(
         NoticeWait::Idle => {}
     }
 
-    // No live client entity (a previous attempt failed half-way) counts as disconnected.
-    let (connected, disconnected) = link
-        .entity
-        .and_then(|e| clients.get(e).ok())
-        .unwrap_or((false, true));
-    if connected {
+    // `NetcodeClient` requires `Disconnected` (reason Unknown) until `Connecting` removes it.
+    // That marker is the first handshake, not a drop. Only a link we already had shows 断线重连.
+    let (exists, connected, connecting, kind) =
+        match link.entity.and_then(|entity| clients.get(entity).ok()) {
+            Some((connected, connecting, disc)) => {
+                (true, connected, connecting, disc.map(disconnect_kind))
+            }
+            None => (false, false, false, None),
+        };
+    let seen = seen_link(exists, connected, connecting, kind);
+    if seen == SeenLink::Initial {
+        link.initial_frames = link.initial_frames.saturating_add(1);
+    } else {
+        link.initial_frames = 0;
+    }
+    let down = link_is_down(seen, link.initial_frames);
+    if seen == SeenLink::Live {
         if link.attempts > 0 {
             info!("connection restored");
         }
@@ -875,15 +1144,15 @@ fn watch_connection(
         status.attempts = 0;
         return;
     }
-    if disconnected {
-        status.status = LinkStatus::Reconnecting;
+    status.status = show_link_status(link.ever_connected, down, false, status.status);
+    if status.status == LinkStatus::Reconnecting {
         // Show the attempt that is about to start, not the number that already failed.
         status.attempts = (link.attempts + 1).min(MAX_RECONNECT_ATTEMPTS);
     }
     link.since_change += time.delta_secs();
     // Give each attempt time to complete the handshake before retrying, backing off a little.
     let wait = 1.0 + link.attempts.min(4) as f32;
-    if !disconnected || link.since_change < wait {
+    if !down || link.since_change < wait {
         return;
     }
     if link.attempts >= MAX_RECONNECT_ATTEMPTS {
@@ -898,10 +1167,21 @@ fn watch_connection(
     link.attempts += 1;
     link.counted = true;
     link.since_change = 0.0;
+    link.initial_frames = 0;
     recover.0 = false;
-    status.status = LinkStatus::Reconnecting;
-    status.attempts = link.attempts;
-    warn!("disconnected, reconnecting (attempt {})", link.attempts);
+    if link.ever_connected {
+        status.status = LinkStatus::Reconnecting;
+        status.attempts = link.attempts;
+        warn!("disconnected, reconnecting (attempt {})", link.attempts);
+    } else {
+        // Still the first entry. Retrying is not a dropped match.
+        status.status = LinkStatus::Connecting;
+        status.attempts = link.attempts;
+        warn!(
+            "first connection not up yet, retrying (attempt {})",
+            link.attempts
+        );
+    }
 
     // Start from a clean slate; the server resends the full world after the handshake.
     if let Some(entity) = link.entity.take() {
@@ -1198,5 +1478,148 @@ mod tests {
                 offers: vec![JoinOffer::CreateRoom, JoinOffer::ChangeRoom],
             }
         );
+    }
+
+    #[test]
+    fn listed_room_failures_go_home_and_do_not_quick_start() {
+        let started = room_join_failure(
+            true,
+            "started",
+            409,
+            "这局已经开始，正在为你寻找新的房间…",
+            None,
+            false,
+        );
+        assert_eq!(
+            started,
+            RoomJoinFailure::Home("这局已经开始，正在为你寻找新的房间…".into())
+        );
+        let full = room_join_failure(
+            true,
+            "full",
+            409,
+            "这个房间已满，请换一个房间。",
+            None,
+            false,
+        );
+        assert_eq!(
+            full,
+            RoomJoinFailure::Home("这个房间已满，请换一个房间。".into())
+        );
+        let quick = room_join_failure(false, "started", 409, "这局已经开始", None, false);
+        assert_eq!(
+            quick,
+            RoomJoinFailure::Here(JoinAction::QuickStartAgain {
+                notice: "这局已经开始".into(),
+            })
+        );
+        assert_eq!(gone_home_text(""), "这个房间已经结束，请换一个房间。");
+        assert_eq!(gone_home_text("房间没了"), "房间没了");
+    }
+
+    #[test]
+    fn listed_match_and_private_flag_follow_the_page_intent() {
+        assert_eq!(
+            page_match_id(JoinIntent::FromArgs, false, Some("abc")),
+            Some("abc")
+        );
+        assert_eq!(page_match_id(JoinIntent::Quick, false, Some("abc")), None);
+        assert_eq!(page_match_id(JoinIntent::FromArgs, true, Some("abc")), None);
+        assert_eq!(page_match_id(JoinIntent::Create, false, Some("abc")), None);
+        assert_eq!(page_match_id(JoinIntent::FromArgs, false, Some("")), None);
+        assert!(create_is_private(JoinIntent::FromArgs, true));
+        assert!(!create_is_private(JoinIntent::FromArgs, false));
+        assert!(!create_is_private(JoinIntent::Create, true));
+        assert_eq!(home_href("full"), "/play/?notice=full");
+        assert!(home_href("a b").contains("a%20b"));
+    }
+
+    #[test]
+    fn first_join_request_keeps_the_page_match_id() {
+        // Fresh session: `connect`'s old `run_once` was spent while assets loaded, so the
+        // first POST was the no-entity retry and never saw `prefer_listed`.
+        let session = Session::default();
+        assert!(!session.listed_closed);
+        assert_eq!(session.intent, JoinIntent::FromArgs);
+        let args = ClientArgs {
+            name: "Drew".into(),
+            matchmaker: "http://127.0.0.1:8080".into(),
+            fake_latency_ms: 0,
+            room: None,
+            create_room: false,
+            match_id: Some("m17000-4cab39".into()),
+            private_room: false,
+        };
+        let (request, listed) = build_join(session.intent, session.listed_closed, &args);
+        assert_eq!(request.name, "Drew");
+        assert_eq!(request.match_id.as_deref(), Some("m17000-4cab39"));
+        assert!(request.room.is_none());
+        assert!(listed);
+    }
+
+    #[test]
+    fn first_handshake_is_not_a_disconnect() {
+        let (seen, down) = classify_frames(true, false, false, Some(DisconnectKind::Initial), 1);
+        assert_eq!(seen, SeenLink::Initial);
+        assert!(!down);
+        assert_eq!(
+            show_link_status(false, down, false, LinkStatus::Connecting),
+            LinkStatus::Connecting
+        );
+        let (_, down) = classify_frames(
+            true,
+            false,
+            false,
+            Some(DisconnectKind::Initial),
+            INITIAL_MARKER_FRAMES - 1,
+        );
+        assert!(!down);
+        let (_, down) = classify_frames(
+            true,
+            false,
+            false,
+            Some(DisconnectKind::Initial),
+            INITIAL_MARKER_FRAMES,
+        );
+        assert!(down);
+        // A slow first failure still reads as connecting, not 断线重连.
+        assert_eq!(
+            show_link_status(false, true, false, LinkStatus::Connecting),
+            LinkStatus::Connecting
+        );
+        // `Connecting` wins over the required marker, even after the grace.
+        let (seen, down) = classify_frames(true, false, true, Some(DisconnectKind::Initial), 100);
+        assert_eq!(seen, SeenLink::Handshake);
+        assert!(!down);
+        let (seen, down) = classify_frames(true, false, false, Some(DisconnectKind::Failed), 0);
+        assert_eq!(seen, SeenLink::Down);
+        assert!(down);
+        assert_eq!(
+            show_link_status(true, true, false, LinkStatus::Connected),
+            LinkStatus::Reconnecting
+        );
+        assert_eq!(
+            show_link_status(true, false, false, LinkStatus::Reconnecting),
+            LinkStatus::Reconnecting
+        );
+        assert_eq!(
+            show_link_status(true, false, true, LinkStatus::Reconnecting),
+            LinkStatus::Connected
+        );
+        assert_eq!(
+            show_link_status(false, true, false, LinkStatus::Failed),
+            LinkStatus::Failed
+        );
+    }
+
+    fn classify_frames(
+        exists: bool,
+        connected: bool,
+        connecting: bool,
+        kind: Option<DisconnectKind>,
+        frames: u32,
+    ) -> (SeenLink, bool) {
+        let seen = seen_link(exists, connected, connecting, kind);
+        (seen, link_is_down(seen, frames))
     }
 }

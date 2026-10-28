@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 use bevy::prelude::*;
 use evoclash_game::api::Heartbeat;
 use evoclash_game::protocol::{MatchState, Player, RoomSettings};
+use lightyear::prelude::Linked;
+use lightyear::webtransport::prelude::endpoint::WebTransportEndpoint;
 
 use crate::config::ServerConfig;
 use crate::connections::{Human, TlsIdentity};
@@ -22,6 +24,8 @@ const RETIRE_AFTER: Duration = Duration::from_secs(12 * 24 * 3600);
 pub struct OpsState {
     draining: Arc<AtomicBool>,
     snapshot: Arc<Mutex<Heartbeat>>,
+    /// First `true` wins. Heartbeat threads are spawned only after that.
+    heartbeats_started: Arc<AtomicBool>,
 }
 
 impl OpsState {
@@ -58,6 +62,7 @@ impl OpsState {
     pub(crate) fn for_test() -> Self {
         Self {
             draining: Arc::default(),
+            heartbeats_started: Arc::default(),
             snapshot: Arc::new(Mutex::new(Heartbeat {
                 match_id: "t".into(),
                 public_addr: "127.0.0.1:1".into(),
@@ -96,6 +101,7 @@ impl Plugin for OpsPlugin {
         let cert_digest = app.world().resource::<TlsIdentity>().digest.clone();
         let ops = OpsState {
             draining: Arc::default(),
+            heartbeats_started: Arc::default(),
             snapshot: Arc::new(Mutex::new(Heartbeat {
                 match_id: config.match_id.clone(),
                 public_addr: config.public_addr.to_string(),
@@ -121,17 +127,37 @@ impl Plugin for OpsPlugin {
         if config.recover {
             ops.publish_phase("recovering", None, "none");
         }
-        for url in &config.matchmakers {
-            spawn_heartbeat_thread(url.clone(), ops.clone());
-        }
+        // The socket binds on a later frame. A heartbeat before that hands the browser a
+        // cert for a port that is not listening yet.
         install_signal_handler(ops.clone());
         app.insert_resource(ops);
+        app.add_observer(begin_heartbeats);
         app.init_resource::<TickTimer>();
         app.add_systems(FixedFirst, |mut timer: ResMut<TickTimer>| {
             timer.started = Some(Instant::now());
         });
         app.add_systems(FixedLast, finish_tick_timer);
         app.add_systems(Update, (update_snapshot, retire_old_certificate));
+    }
+}
+
+/// `Linked` on the WebTransport endpoint means `Endpoint::server` has bound. Client links
+/// also become `Linked`; those must not start the matchmaker beats.
+fn begin_heartbeats(
+    trigger: On<Add<Linked>>,
+    endpoints: Query<(), With<WebTransportEndpoint>>,
+    config: Res<ServerConfig>,
+    ops: Res<OpsState>,
+) {
+    if endpoints.get(trigger.entity).is_err() {
+        return;
+    }
+    if ops.heartbeats_started.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    info!("WebTransport listening; starting heartbeats");
+    for url in &config.matchmakers {
+        spawn_heartbeat_thread(url.clone(), ops.clone());
     }
 }
 
@@ -285,6 +311,56 @@ fn spawn_heartbeat_thread(base_url: String, ops: OpsState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heartbeats_start_only_after_the_webtransport_endpoint_links() {
+        use lightyear::webtransport::prelude::Identity;
+
+        let config = ServerConfig {
+            port: 0,
+            public_addr: "127.0.0.1:0".parse().unwrap(),
+            match_id: "test".into(),
+            max_players: 8,
+            min_combatants: 8,
+            matchmakers: Vec::new(),
+            single_match: false,
+            monsters: false,
+            threads: 1,
+            agones: false,
+            room_seed: 1,
+            private: false,
+            room_code: String::new(),
+            log_dir: std::env::temp_dir(),
+            replay: None,
+            recover: false,
+            logging: false,
+        };
+        let mut app = App::new();
+        app.insert_resource(crate::connections::TlsIdentity::self_signed(&config));
+        app.insert_resource(config);
+        app.add_plugins(OpsPlugin);
+        let armed = |app: &App| {
+            app.world()
+                .resource::<OpsState>()
+                .heartbeats_started
+                .load(Ordering::Relaxed)
+        };
+        assert!(!armed(&app), "plugin build must not send a cert yet");
+
+        app.world_mut().spawn(Linked);
+        assert!(!armed(&app), "a client link is not the listening socket");
+
+        app.world_mut().spawn((
+            WebTransportEndpoint {
+                certificate: Identity::self_signed(["localhost"]).expect("cert"),
+            },
+            Linked,
+        ));
+        assert!(
+            armed(&app),
+            "the endpoint is bound; heartbeats may carry the cert"
+        );
+    }
 
     #[test]
     fn heartbeat_targets_expand_hostnames_to_every_address() {

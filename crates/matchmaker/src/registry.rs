@@ -59,14 +59,20 @@ pub struct MatchInfo {
     spec_reservations: Vec<Instant>,
 }
 
+/// Quick start will not spectate a round whose wait (time left plus results) exceeds this.
+pub const QUICK_SPECTATE_MAX_SECS: u32 = 120;
+
 /// What `POST /v1/join` should do with an optional `match_id`.
+#[derive(Debug)]
 pub enum JoinPlan {
-    Seat(String, SocketAddr),
-    Started,
+    /// Combat seat when `bool` is false, watcher seat when true.
+    Seat(String, SocketAddr, bool),
     Starting {
         retry_after: u32,
     },
-    /// Unknown id, or a lobby that is simply full: quick start.
+    /// Named room cannot be entered. Never falls through to quick start.
+    Full,
+    /// No match id: pick a lobby, a short spectate, or launch.
     Quick,
 }
 
@@ -204,8 +210,8 @@ pub struct Registry {
 
 impl Registry {
     /// Quick start. Open lobbies first (more humans, then more time left). If none are
-    /// taking combatants, a public `spectate` room with the shortest wait until the next
-    /// lobby (time left in the round, plus the results screen when the round is still on).
+    /// taking combatants, a public `spectate` room whose wait is at most two minutes,
+    /// shortest wait first (time left, plus the results screen while the round is still on).
     /// `bool` is true when the seat is a watcher. `None` means launch a new room.
     pub fn reserve_seat(&mut self) -> Option<(String, SocketAddr, bool)> {
         let now = Instant::now();
@@ -214,7 +220,20 @@ impl Registry {
             m.reservations.push(now);
             return Some((m.id.clone(), m.addr, false));
         }
-        let id = self.pick_spectate(now)?;
+        self.take_spectate(now, Some(QUICK_SPECTATE_MAX_SECS))
+    }
+
+    /// Shortest public spectate seat, ignoring the two-minute cap. Used when a launch fails.
+    pub fn reserve_any_spectate(&mut self) -> Option<(String, SocketAddr, bool)> {
+        self.take_spectate(Instant::now(), None)
+    }
+
+    fn take_spectate(
+        &mut self,
+        now: Instant,
+        max_wait: Option<u32>,
+    ) -> Option<(String, SocketAddr, bool)> {
+        let id = self.pick_spectate(now, max_wait)?;
         let m = self.matches.get_mut(&id)?;
         m.spec_reservations.push(now);
         Some((m.id.clone(), m.addr, true))
@@ -240,38 +259,133 @@ impl Registry {
             .find(|id| self.matches.get_mut(id).is_some_and(|m| m.joinable(now)))
     }
 
-    fn pick_spectate(&mut self, now: Instant) -> Option<String> {
+    fn pick_spectate(&mut self, now: Instant, max_wait: Option<u32>) -> Option<String> {
         let mut ids: Vec<String> = self.matches.keys().cloned().collect();
         ids.sort_by(|a, b| {
             let wait = |id: &String| spectate_wait(&self.matches[id]);
             wait(a).cmp(&wait(b)).then_with(|| a.cmp(b))
         });
-        ids.into_iter()
-            .find(|id| self.matches.get_mut(id).is_some_and(|m| m.spectatable(now)))
+        ids.into_iter().find(|id| {
+            let within = max_wait.is_none_or(|cap| spectate_wait(&self.matches[id]) <= cap);
+            within && self.matches.get_mut(id).is_some_and(|m| m.spectatable(now))
+        })
     }
 
-    /// A named public match. `started` / `starting` only when that match exists and is not a quick start.
-    /// A private match id falls through to quick start, which never reserves private rooms.
+    /// A named room from the list. An empty id is quick start. Anything that is not a
+    /// joinable public lobby, a free spectate seat, or the starting countdown is [`JoinPlan::Full`].
     pub fn plan_join(&mut self, match_id: Option<&str>) -> JoinPlan {
         let now = Instant::now();
-        if let Some(id) = match_id.map(str::trim).filter(|id| !id.is_empty())
-            && let Some(m) = self.matches.get_mut(id)
-            && !m.is_private
-        {
-            if m.joinable(now) {
-                let addr = m.addr;
-                m.reservations.push(now);
-                return JoinPlan::Seat(id.to_string(), addr);
-            }
-            let retry_after = m.phase_left_secs.unwrap_or(0);
-            if m.phase == "starting" || (m.phase == "lobby" && m.join_mode != "lobby") {
-                return JoinPlan::Starting { retry_after };
-            }
-            if matches!(m.phase.as_str(), "playing" | "results" | "recovering") {
-                return JoinPlan::Started;
-            }
+        let Some(id) = match_id.map(str::trim).filter(|id| !id.is_empty()) else {
+            return JoinPlan::Quick;
+        };
+        let Some(m) = self.matches.get_mut(id) else {
+            return JoinPlan::Full;
+        };
+        if m.is_private {
+            return JoinPlan::Full;
         }
-        JoinPlan::Quick
+        if m.joinable(now) {
+            let addr = m.addr;
+            m.reservations.push(now);
+            return JoinPlan::Seat(id.to_string(), addr, false);
+        }
+        let retry_after = m.phase_left_secs.unwrap_or(0);
+        // Starting, or a lobby the countdown has closed (under 8s) that still has a seat.
+        // A full lobby has no free seat and is `Full`, not this.
+        let late_lobby = m.phase == "lobby" && m.join_mode != "lobby" && m.free_seats(now) > 0;
+        if m.phase == "starting" || late_lobby {
+            return JoinPlan::Starting { retry_after };
+        }
+        if m.spectatable(now) {
+            let addr = m.addr;
+            m.spec_reservations.push(now);
+            return JoinPlan::Seat(id.to_string(), addr, true);
+        }
+        JoinPlan::Full
+    }
+
+    /// Public rooms a human is in or about to be in. Empty warm servers are left out.
+    /// Order matches [`Self::pick_lobby`]: more humans, then more time left, then id.
+    pub fn room_list(&mut self) -> evoclash_game::api::RoomList {
+        let now = Instant::now();
+        let mut ids: Vec<String> = self.matches.keys().cloned().collect();
+        ids.sort_by(|a, b| {
+            let (left_a, humans_a) = {
+                let m = &self.matches[a];
+                (m.phase_left_secs, m.humans)
+            };
+            let (left_b, humans_b) = {
+                let m = &self.matches[b];
+                (m.phase_left_secs, m.humans)
+            };
+            humans_b
+                .cmp(&humans_a)
+                .then_with(|| cmp_time_left(left_a, left_b))
+                .then_with(|| a.cmp(b))
+        });
+        let mut rooms = Vec::new();
+        for id in ids {
+            let Some(summary) = self.room_summary(&id, now) else {
+                continue;
+            };
+            rooms.push(summary);
+        }
+        evoclash_game::api::RoomList { rooms }
+    }
+
+    fn room_summary(&mut self, id: &str, now: Instant) -> Option<evoclash_game::api::RoomSummary> {
+        let m = self.matches.get_mut(id)?;
+        if m.is_private
+            || !m.healthy(now)
+            || m.abandoned
+            || m.catching_up
+            || m.phase == "recovering"
+        {
+            return None;
+        }
+        m.free_seats(now);
+        m.free_spec_seats(now);
+        let reserved = (m.reservations.len() + m.spec_reservations.len()) as u32;
+        if m.humans + m.spectators + reserved == 0 {
+            return None;
+        }
+        let entry = if m.joinable(now) {
+            "play"
+        } else if m.spectatable(now) {
+            "spectate"
+        } else {
+            "full"
+        };
+        Some(evoclash_game::api::RoomSummary {
+            match_id: m.id.clone(),
+            phase: m.phase.clone(),
+            phase_left_secs: m.phase_left_secs,
+            humans: m.humans,
+            bots: m.bots,
+            spectators: m.spectators,
+            max_players: m.max_players,
+            max_spectators: u32::from(MAX_SPECTATORS),
+            entry: entry.into(),
+        })
+    }
+
+    /// Take one public lobby with nobody in it and no live reservation. Reserves a combat seat.
+    /// Used when this replica cannot launch (`--no-launch`).
+    pub fn claim_idle_public(&mut self) -> Option<(String, SocketAddr)> {
+        let now = Instant::now();
+        let mut ids: Vec<String> = self.matches.keys().cloned().collect();
+        ids.sort();
+        let id = ids.into_iter().find(|id| {
+            self.matches.get_mut(id).is_some_and(|m| {
+                m.spectators == 0
+                    && m.free_spec_seats(now) == u32::from(MAX_SPECTATORS)
+                    && m.idle(now)
+            })
+        })?;
+        let m = self.matches.get_mut(&id)?;
+        let addr = m.addr;
+        m.reservations.push(now);
+        Some((id, addr))
     }
 
     pub fn reserve_in(&mut self, id: &str) -> Option<SocketAddr> {
@@ -806,7 +920,7 @@ mod tests {
     }
 
     #[test]
-    fn named_match_reports_started_or_starting_and_unknown_is_quick() {
+    fn named_match_starting_stays_starting_and_a_closed_room_is_full() {
         let mut reg = Registry::default();
         let mut playing = beat("play", 2);
         playing.phase = "playing".into();
@@ -818,13 +932,14 @@ mod tests {
         starting.phase_left_secs = Some(2);
         reg.heartbeat(&playing);
         reg.heartbeat(&starting);
-        assert!(matches!(reg.plan_join(Some("play")), JoinPlan::Started));
+        assert!(matches!(reg.plan_join(Some("play")), JoinPlan::Full));
         assert!(matches!(
             reg.plan_join(Some("go")),
             JoinPlan::Starting { retry_after: 2 }
         ));
-        assert!(matches!(reg.plan_join(Some("missing")), JoinPlan::Quick));
+        assert!(matches!(reg.plan_join(Some("missing")), JoinPlan::Full));
         assert!(matches!(reg.plan_join(None), JoinPlan::Quick));
+        assert!(matches!(reg.plan_join(Some("  ")), JoinPlan::Quick));
     }
 
     #[test]
@@ -879,7 +994,7 @@ mod tests {
         let mut reg = Registry::default();
         reg.heartbeat(&private_room("priv", "ABCD", 3));
         assert!(reg.reserve_seat().is_none());
-        assert!(matches!(reg.plan_join(Some("priv")), JoinPlan::Quick));
+        assert!(matches!(reg.plan_join(Some("priv")), JoinPlan::Full));
         reg.heartbeat(&beat("pub", 0));
         assert_eq!(reg.reserve_seat().unwrap().0, "pub");
     }
@@ -1081,5 +1196,201 @@ mod tests {
         assert_eq!(err.error, "results");
         assert_eq!(err.retry_after, Some(8));
         assert_eq!(err.message, rooms::RESULTS);
+    }
+
+    #[test]
+    fn quick_start_spectates_only_within_two_minutes_and_fallback_has_no_cap() {
+        let mut reg = Registry::default();
+        // 105s left + 15s results = 120s, still a quick spectate.
+        reg.heartbeat(&spectate_room("edge", "playing", 105, 0));
+        // 106s + 15s = 121s, over the cap: launch instead.
+        reg.heartbeat(&spectate_room("long", "playing", 106, 0));
+        reg.heartbeat(&spectate_room("soon", "results", 4, 0));
+        for _ in 0..MAX_SPECTATORS {
+            assert_eq!(
+                reg.reserve_seat().unwrap().0,
+                "soon",
+                "shortest wait inside the cap"
+            );
+        }
+        for _ in 0..MAX_SPECTATORS {
+            assert_eq!(reg.reserve_seat().unwrap().0, "edge");
+        }
+        assert!(
+            reg.reserve_seat().is_none(),
+            "a wait over 120s is not a quick spectate"
+        );
+        let (id, _, spectate) = reg.reserve_any_spectate().unwrap();
+        assert_eq!(id, "long");
+        assert!(spectate);
+    }
+
+    #[test]
+    fn named_lobby_plays_and_a_long_round_spectates() {
+        let mut reg = Registry::default();
+        let mut lobby = beat("lobby", 1);
+        lobby.max_players = 8;
+        reg.heartbeat(&lobby);
+        reg.heartbeat(&spectate_room("late", "playing", 400, 0));
+        match reg.plan_join(Some("lobby")) {
+            JoinPlan::Seat(id, _, spectate) => {
+                assert_eq!(id, "lobby");
+                assert!(!spectate);
+            }
+            other => panic!("expected a combat seat, got {other:?}"),
+        }
+        match reg.plan_join(Some("late")) {
+            JoinPlan::Seat(id, _, spectate) => {
+                assert_eq!(id, "late");
+                assert!(spectate, "named join ignores the two-minute cap");
+            }
+            other => panic!("expected a watcher seat, got {other:?}"),
+        }
+        let mut late = spectate_room("late", "playing", 400, 0);
+        late.spectators = u32::from(MAX_SPECTATORS);
+        reg.heartbeat(&late);
+        assert!(
+            matches!(reg.plan_join(Some("late")), JoinPlan::Full),
+            "a full watcher bench is full, not a quick start"
+        );
+    }
+
+    #[test]
+    fn named_late_lobby_is_starting_and_a_full_lobby_is_full() {
+        let mut reg = Registry::default();
+        let mut late = beat("late", 3);
+        late.max_players = 8;
+        late.join_mode = "none".into();
+        late.phase_left_secs = Some(5);
+        let mut full = beat("full", 8);
+        full.max_players = 8;
+        full.humans = 8;
+        full.join_mode = "none".into();
+        full.phase_left_secs = Some(12);
+        let mut recovering = beat("rec", 2);
+        recovering.phase = "recovering".into();
+        recovering.join_mode = "none".into();
+        reg.heartbeat(&late);
+        reg.heartbeat(&full);
+        reg.heartbeat(&recovering);
+        assert!(matches!(
+            reg.plan_join(Some("late")),
+            JoinPlan::Starting { retry_after: 5 }
+        ));
+        assert!(matches!(reg.plan_join(Some("full")), JoinPlan::Full));
+        assert!(matches!(reg.plan_join(Some("rec")), JoinPlan::Full));
+    }
+
+    #[test]
+    fn room_list_hides_empty_warm_servers_and_orders_like_the_lobby_pick() {
+        let mut reg = Registry::default();
+        reg.heartbeat(&beat("warm", 0));
+        let mut few = beat("few", 1);
+        few.max_players = 8;
+        few.phase_left_secs = Some(20);
+        few.bots = 7;
+        let mut many = beat("many", 3);
+        many.max_players = 8;
+        many.humans = 3;
+        many.phase_left_secs = Some(4);
+        many.bots = 5;
+        reg.heartbeat(&few);
+        reg.heartbeat(&many);
+        reg.heartbeat(&spectate_room("watch", "playing", 30, 1));
+        reg.heartbeat(&private_room("priv", "ABCD", 2));
+        let mut dead = beat("dead", 2);
+        dead.max_players = 8;
+        reg.heartbeat(&dead);
+        reg.matches.get_mut("dead").unwrap().launched_at = Instant::now() - STARTUP_GRACE;
+        reg.matches.get_mut("dead").unwrap().last_heartbeat =
+            Some(Instant::now() - HEARTBEAT_TIMEOUT);
+        let mut catching = beat("catch", 2);
+        catching.max_players = 8;
+        reg.heartbeat(&catching);
+        reg.matches.get_mut("catch").unwrap().catching_up = true;
+        let mut abandoned = beat("gone", 2);
+        abandoned.max_players = 8;
+        reg.heartbeat(&abandoned);
+        reg.matches.get_mut("gone").unwrap().abandoned = true;
+        let mut recovering = beat("rec", 2);
+        recovering.phase = "recovering".into();
+        recovering.max_players = 8;
+        reg.heartbeat(&recovering);
+
+        let mut fresh = MatchInfo::new("fresh".into(), "127.0.0.1:7001".parse().unwrap(), 8);
+        fresh.phase = "lobby".into();
+        fresh.join_mode = "lobby".into();
+        reg.matches.insert("fresh".into(), fresh);
+        reg.reserve_in("fresh");
+
+        let list = reg.room_list();
+        let ids: Vec<&str> = list
+            .rooms
+            .iter()
+            .map(|room| room.match_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            ["watch", "many", "few", "fresh"],
+            "more humans first; empty, private, dead, catching up, abandoned, recovering stay out"
+        );
+        let watch = &list.rooms[0];
+        assert_eq!(watch.entry, "spectate");
+        assert_eq!(watch.phase, "playing");
+        assert_eq!(watch.spectators, 1);
+        assert_eq!(watch.humans, 8);
+        assert_eq!(watch.max_spectators, u32::from(MAX_SPECTATORS));
+        assert_eq!(list.rooms[1].entry, "play");
+        assert_eq!(list.rooms[1].bots, 5);
+        assert_eq!(list.rooms[1].phase_left_secs, Some(4));
+        let created = list
+            .rooms
+            .iter()
+            .find(|room| room.match_id == "fresh")
+            .unwrap();
+        assert_eq!(created.entry, "play");
+        assert_eq!(created.humans, 0, "the creator is still only a reservation");
+        assert_eq!(created.phase, "lobby");
+    }
+
+    #[test]
+    fn claim_idle_public_takes_only_an_empty_joinable_lobby() {
+        let mut reg = Registry::default();
+        reg.heartbeat(&beat("warm", 0));
+        reg.heartbeat(&beat("busy", 1));
+        reg.heartbeat(&private_room("priv", "WXYZ", 0));
+        reg.heartbeat(&beat("held", 0));
+        reg.reserve_in("held");
+        let (id, _) = reg.claim_idle_public().unwrap();
+        assert_eq!(id, "warm");
+        assert!(
+            reg.claim_idle_public().is_none(),
+            "the claimed lobby now has a reservation, and the others are not empty"
+        );
+        let list = reg.room_list();
+        assert!(
+            list.rooms
+                .iter()
+                .any(|room| room.match_id == "warm" && room.entry == "play"),
+            "a claimed empty lobby shows up immediately"
+        );
+    }
+
+    #[test]
+    fn create_and_lookup_share_one_ip_budget() {
+        let mut reg = Registry::default();
+        let now = Instant::now();
+        for _ in 0..rooms::RATE_MAX {
+            assert!(reg.allow_ip("4.4.4.4", now));
+        }
+        assert!(
+            !reg.allow_ip("4.4.4.4", now),
+            "a create spends the same budget"
+        );
+        assert_eq!(
+            reg.lookup_room("ZZZZ", "4.4.4.4", now).unwrap_err().status,
+            429
+        );
+        assert!(reg.allow_ip("5.5.5.5", now));
     }
 }

@@ -40,10 +40,37 @@ pub mod api {
         pub room: Option<String>,
     }
 
-    /// `POST /v1/rooms` body. The creator becomes the host.
+    /// `POST /v1/rooms` body. A public room is an ordinary listed room the creator joins
+    /// first. A private room has a code and a host, and is never listed.
     #[derive(Serialize, Deserialize, Debug, Clone)]
     pub struct CreateRoomRequest {
         pub name: String,
+        #[serde(default)]
+        pub private: bool,
+    }
+
+    /// `GET /v1/rooms`: public rooms with at least one human (combatant or spectator).
+    /// Empty warm servers are not listed. An empty list means 进入废土 is off.
+    #[derive(Serialize, Deserialize, Debug, Clone, Default)]
+    pub struct RoomList {
+        pub rooms: Vec<RoomSummary>,
+    }
+
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct RoomSummary {
+        /// Pass back as `JoinRequest::match_id` to join this room.
+        pub match_id: String,
+        /// `lobby` | `starting` | `playing` | `results`.
+        pub phase: String,
+        pub phase_left_secs: Option<u32>,
+        pub humans: u32,
+        pub bots: u32,
+        pub spectators: u32,
+        pub max_players: u32,
+        pub max_spectators: u32,
+        /// `play`: a combat seat is free now. `spectate`: watch until the next round.
+        /// `full`: neither.
+        pub entry: String,
     }
 
     #[derive(Serialize, Deserialize, Debug, Clone)]
