@@ -318,16 +318,16 @@ fn combatant(app: &mut App, id: u64, name: &str) -> Entity {
 }
 
 #[test]
-fn public_join_stays_open_twelve_seconds_in_and_closes_at_seven() {
-    // 20s clock = 17s Lobby + 3s Starting. Twelve seconds in, 8s remain: still offered.
+fn public_join_stays_open_until_eight_seconds() {
+    // 15s clock = 12s Lobby + 3s Starting. Seven seconds in, 8s remain: still offered.
     let mut state = MatchState {
         phase: Phase::Lobby,
         countdown_active: true,
-        ticks_left: LOBBY_COUNTDOWN_TICKS - 12 * TICKS_PER_SEC,
+        ticks_left: LOBBY_COUNTDOWN_TICKS - 7 * TICKS_PER_SEC,
         ..default()
     };
     assert!(lobby_open(&state), "8s until Playing still accepts");
-    state.ticks_left = LOBBY_COUNTDOWN_TICKS - 13 * TICKS_PER_SEC;
+    state.ticks_left = LOBBY_COUNTDOWN_TICKS - 8 * TICKS_PER_SEC;
     assert!(!lobby_open(&state), "7s until Playing is join_mode none");
     state.countdown_active = false;
     state.ticks_left = 0;
@@ -763,15 +763,15 @@ fn results_last_fifteen_seconds_and_later_lobbies_are_fifteen() {
     assert_eq!(first.ticks_left, LOBBY_COUNTDOWN_TICKS);
     assert_eq!(
         first.ticks_left + STARTING_TICKS,
-        20 * TICKS_PER_SEC,
-        "the first public countdown is still 20s"
+        15 * TICKS_PER_SEC,
+        "the first public countdown is 15s, same as later rounds"
     );
 
     let next = run_public_tick(Phase::Results, 1, 0);
     assert_eq!(next.phase, Phase::Lobby);
     assert_eq!(next.match_index, 1);
     assert!(next.countdown_active);
-    assert_eq!(next.ticks_left, NEXT_LOBBY_COUNTDOWN_TICKS);
+    assert_eq!(next.ticks_left, LOBBY_COUNTDOWN_TICKS);
     assert_eq!(
         next.ticks_left + STARTING_TICKS,
         15 * TICKS_PER_SEC,
@@ -779,7 +779,115 @@ fn results_last_fifteen_seconds_and_later_lobbies_are_fifteen() {
     );
 
     let resumed = run_public_tick(Phase::Lobby, 0, 3);
-    assert_eq!(resumed.ticks_left, NEXT_LOBBY_COUNTDOWN_TICKS);
+    assert_eq!(resumed.ticks_left, LOBBY_COUNTDOWN_TICKS);
+}
+
+fn run_public_humans(humans: u64, countdown_active: bool, ticks_left: u32) -> MatchState {
+    let mut app = App::new();
+    app.init_resource::<Arena>()
+        .init_resource::<Outbox>()
+        .init_resource::<ResetRequested>()
+        .init_resource::<PendingStart>()
+        .init_resource::<SimTick>()
+        .insert_resource(server_config())
+        .insert_resource(SimRng::from_match_seed(1));
+    app.world_mut().spawn((
+        MatchState {
+            phase: Phase::Lobby,
+            ticks_left,
+            countdown_active,
+            ..default()
+        },
+        RoomSettings {
+            bots: Some(ROOM_COMBATANTS),
+            ..default()
+        },
+    ));
+    for id in 1..=humans {
+        app.world_mut().spawn((
+            Player {
+                client_id: id,
+                name: format!("p{id}"),
+                color: [1.0; 3],
+                bot: false,
+            },
+            Stats::default(),
+            Human {
+                peer: PeerId::Netcode(id),
+                disconnected_ticks: 0,
+                joined_at: 0,
+                left: false,
+            },
+        ));
+    }
+    app.add_systems(Update, match_flow);
+    app.update();
+    let world = app.world_mut();
+    let mut query = world.query::<&MatchState>();
+    query.single(world).expect("match state").clone()
+}
+
+#[test]
+fn eight_humans_skip_the_public_lobby_countdown() {
+    let full = run_public_humans(u64::from(ROOM_COMBATANTS), true, LOBBY_COUNTDOWN_TICKS);
+    assert_eq!(full.phase, Phase::Starting);
+    assert_eq!(full.ticks_left, STARTING_TICKS);
+    assert!(!full.countdown_active);
+
+    let early = run_public_humans(u64::from(ROOM_COMBATANTS), false, 0);
+    assert_eq!(
+        early.phase,
+        Phase::Starting,
+        "a full roster skips the lobby even before the clock starts"
+    );
+    assert_eq!(early.ticks_left, STARTING_TICKS);
+
+    let seven = run_public_humans(u64::from(ROOM_COMBATANTS) - 1, true, LOBBY_COUNTDOWN_TICKS);
+    assert_eq!(seven.phase, Phase::Lobby);
+    assert!(seven.countdown_active);
+    assert_eq!(seven.ticks_left, LOBBY_COUNTDOWN_TICKS - 1);
+}
+
+#[test]
+fn a_full_private_lobby_still_waits_for_the_host() {
+    let mut app = App::new();
+    app.init_resource::<Arena>()
+        .init_resource::<Outbox>()
+        .init_resource::<ResetRequested>()
+        .init_resource::<PendingStart>()
+        .init_resource::<SimTick>()
+        .insert_resource(server_config())
+        .insert_resource(SimRng::from_match_seed(1));
+    app.world_mut().spawn((
+        MatchState {
+            phase: Phase::Lobby,
+            ..default()
+        },
+        private_settings(1),
+    ));
+    for id in 1..=u64::from(ROOM_COMBATANTS) {
+        app.world_mut().spawn((
+            Player {
+                client_id: id,
+                name: format!("p{id}"),
+                color: [1.0; 3],
+                bot: false,
+            },
+            Stats::default(),
+            Human {
+                peer: PeerId::Netcode(id),
+                disconnected_ticks: 0,
+                joined_at: 0,
+                left: false,
+            },
+        ));
+    }
+    app.add_systems(Update, match_flow);
+    app.update();
+    let world = app.world_mut();
+    let state = world.query::<&MatchState>().single(world).unwrap();
+    assert_eq!(state.phase, Phase::Lobby);
+    assert!(!state.countdown_active);
 }
 
 #[test]
@@ -787,12 +895,12 @@ fn later_lobby_still_closes_inside_eight_seconds() {
     let mut state = MatchState {
         phase: Phase::Lobby,
         countdown_active: true,
-        ticks_left: NEXT_LOBBY_COUNTDOWN_TICKS - 7 * TICKS_PER_SEC,
+        ticks_left: LOBBY_COUNTDOWN_TICKS - 7 * TICKS_PER_SEC,
         match_index: 1,
         ..default()
     };
     assert!(lobby_open(&state), "8s until Playing still accepts");
-    state.ticks_left = NEXT_LOBBY_COUNTDOWN_TICKS - 8 * TICKS_PER_SEC;
+    state.ticks_left = LOBBY_COUNTDOWN_TICKS - 8 * TICKS_PER_SEC;
     assert!(!lobby_open(&state), "7s until Playing is closed");
 }
 
@@ -1181,7 +1289,7 @@ fn private_room_auto_continues_after_the_first_match_unless_paused() {
     assert_eq!(next.phase, Phase::Lobby);
     assert_eq!(next.match_index, 1);
     assert!(next.countdown_active);
-    assert_eq!(next.ticks_left, NEXT_LOBBY_COUNTDOWN_TICKS);
+    assert_eq!(next.ticks_left, LOBBY_COUNTDOWN_TICKS);
     assert_eq!(next.ticks_left + STARTING_TICKS, 15 * TICKS_PER_SEC);
     assert!(!paused);
 
@@ -1229,7 +1337,7 @@ fn pause_auto_start_is_host_only_and_ignored_once_the_countdown_runs() {
     assert_eq!(state.ticks_left, PRIVATE_LOBBY_COUNTDOWN_TICKS);
     // Put the 15s clock up, then show Pause no longer applies.
     state.countdown_active = true;
-    state.ticks_left = NEXT_LOBBY_COUNTDOWN_TICKS;
+    state.ticks_left = LOBBY_COUNTDOWN_TICKS;
 
     assert_eq!(
         room::apply_room_command(&RoomCommand::PauseAutoStart, 1, &mut state, &mut settings),

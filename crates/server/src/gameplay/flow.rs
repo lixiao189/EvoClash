@@ -86,6 +86,15 @@ fn connected_humans(presence: &Presence) -> usize {
         .count()
 }
 
+/// Human combatants still holding a seat, including reconnect grace. Spectators are not
+/// `Human`. A full public lobby uses this to skip straight into Starting.
+fn seated_humans(presence: &Presence) -> usize {
+    presence
+        .iter()
+        .filter(|(human, _)| human.is_some_and(|human| !human.left))
+        .count()
+}
+
 fn connected_watchers(presence: &Presence) -> usize {
     presence
         .iter()
@@ -123,11 +132,14 @@ pub fn match_flow(
                     state.countdown_active = false;
                     state.ticks_left = 0;
                 }
+            } else if !private_room && seated_humans(&presence) >= usize::from(ROOM_COMBATANTS) {
+                // Eight human combatants: skip whatever lobby time is left.
+                begin_starting(&mut state, &mut reset, &mut place);
             } else if !private_room && !state.countdown_active && players.iter().count() >= 2 {
                 // Public rooms start on the first human. Later joins do not reset it.
-                // A private room waits for the host's Start.
+                // A private room waits for the host's Start. Every round is 12s + 3s.
                 state.countdown_active = true;
-                state.ticks_left = public_lobby_countdown_ticks(state.match_index);
+                state.ticks_left = LOBBY_COUNTDOWN_TICKS;
             } else if private_room
                 && state.match_index > 0
                 && !auto_paused
@@ -138,7 +150,7 @@ pub fn match_flow(
                 // Watchers promoted this tick (Input) should not sit in a private lobby forever.
                 // The first private round still waits for the host.
                 state.countdown_active = true;
-                state.ticks_left = public_lobby_countdown_ticks(state.match_index);
+                state.ticks_left = LOBBY_COUNTDOWN_TICKS;
             } else if state.countdown_active {
                 state.ticks_left = state.ticks_left.saturating_sub(1);
                 if state.ticks_left == 0 {
@@ -321,7 +333,7 @@ fn begin_lobby(
     let private_auto = private_room && state.match_index > 0 && !auto_paused;
     if (private_auto || !private_room) && humans_n > 0 && players.iter().count() >= 2 {
         state.countdown_active = true;
-        state.ticks_left = public_lobby_countdown_ticks(state.match_index);
+        state.ticks_left = LOBBY_COUNTDOWN_TICKS;
     } else {
         state.countdown_active = false;
         state.ticks_left = 0;

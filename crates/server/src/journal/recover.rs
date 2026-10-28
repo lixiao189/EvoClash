@@ -69,7 +69,7 @@ fn apply_lobby(world: &mut World, snap: &RoomFile, next_index: bool) -> Result<(
         state.boss_eta = 0;
         state.vault_in = FIRST_VAULT_TICKS;
         state.recover = RecoverWait::default();
-        // A public room restarts the full 20s (17s here, then 3s Starting).
+        // A public room restarts the 15s countdown (12s here, then 3s Starting).
         // A private room waits for the host again.
         if public_room {
             state.countdown_active = true;

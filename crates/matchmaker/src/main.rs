@@ -1,6 +1,8 @@
 //! EvoClash matchmaker.
 //!
 //! - `POST /v1/join`               → pick (or launch) a match, return a signed connect token
+//! - `GET  /v1/rooms`              → public rooms with at least one human or a live reservation
+//! - `POST /v1/rooms`              → create a public room, or a private one when `private` is set
 //! - `POST /v1/rejoin`             → fresh token for the same match after a disconnect
 //! - `POST /v1/servers/heartbeat`  → match servers report load; reply may ask them to drain
 //! - `GET  /v1/matches`            → fleet overview
@@ -82,8 +84,8 @@ fn error_retry(
 }
 
 const BUSY: &str = "服务器繁忙，请稍后再试。";
-const STARTED: &str = "这局已经开始，正在为你寻找新的房间…";
 const STARTING: &str = "房间正在开局，请稍候。";
+const ROOM_FULL: &str = "这个房间已满，请换一个房间。";
 
 /// A freshly launched server has no certificate hash until its first heartbeat (well under a
 /// second after start); browsers can't connect without it, so hold the reply until it arrives.
@@ -198,26 +200,35 @@ async fn join(
     let seat = {
         let mut registry = state.registry.lock().expect("registry lock");
         match registry.plan_join(request.match_id.as_deref()) {
-            JoinPlan::Seat(id, addr) => Seat::Ready(id, addr, false),
-            JoinPlan::Started => Seat::Deny(error(StatusCode::CONFLICT, "started", STARTED)),
+            JoinPlan::Seat(id, addr, spectate) => Seat::Ready(id, addr, spectate),
             JoinPlan::Starting { retry_after } => Seat::Deny(error_retry(
                 StatusCode::CONFLICT,
                 "starting",
                 STARTING,
                 retry_after,
             )),
+            JoinPlan::Full => Seat::Deny(error(StatusCode::CONFLICT, "full", ROOM_FULL)),
             JoinPlan::Quick => match registry.reserve_seat() {
                 Some((id, addr, spectate)) => Seat::Ready(id, addr, spectate),
-                None => match &state.fleet {
-                    Some(fleet) => match launch(&mut registry, fleet) {
-                        Ok((id, addr)) => {
-                            registry.reserve_in(&id);
-                            Seat::Ready(id, addr, false)
-                        }
-                        Err(_) => Seat::Busy,
-                    },
-                    None => Seat::Busy,
-                },
+                None => {
+                    let launched = match &state.fleet {
+                        Some(fleet) => match launch(&mut registry, fleet) {
+                            Ok((id, addr)) => {
+                                registry.reserve_in(&id);
+                                Some((id, addr))
+                            }
+                            Err(_) => None,
+                        },
+                        None => None,
+                    };
+                    match launched {
+                        Some((id, addr)) => Seat::Ready(id, addr, false),
+                        None => match registry.reserve_any_spectate() {
+                            Some((id, addr, spectate)) => Seat::Ready(id, addr, spectate),
+                            None => Seat::Busy,
+                        },
+                    }
+                }
             },
         }
     };
@@ -275,9 +286,17 @@ async fn create_room(
 ) -> Response {
     let name = sanitize_name(&request.name);
     let client_id = new_client_id();
+    if request.private {
+        create_private_room(state, ip.0, name, client_id).await
+    } else {
+        create_public_room(state, ip.0, name, client_id).await
+    }
+}
+
+async fn create_private_room(state: Shared, ip: String, name: String, client_id: u64) -> Response {
     let launched = {
         let mut registry = state.registry.lock().expect("registry lock");
-        if !registry.allow_ip(&ip.0, Instant::now()) {
+        if !registry.allow_ip(&ip, Instant::now()) {
             return room_error(rooms::RoomFailure::rate());
         }
         let Some(fleet) = &state.fleet else {
@@ -312,6 +331,45 @@ async fn create_room(
             error(StatusCode::SERVICE_UNAVAILABLE, "busy", BUSY)
         }
     }
+}
+
+/// Public room. A fleet launches a fresh match and reserves the creator. Adopt-only
+/// (`--no-launch`) claims an empty public lobby instead. Same IP budget as a private create.
+async fn create_public_room(state: Shared, ip: String, name: String, client_id: u64) -> Response {
+    let launched = {
+        let mut registry = state.registry.lock().expect("registry lock");
+        if !registry.allow_ip(&ip, Instant::now()) {
+            return room_error(rooms::RoomFailure::rate());
+        }
+        if let Some(fleet) = &state.fleet {
+            match launch(&mut registry, fleet) {
+                Ok((id, addr)) => {
+                    println!("launched public room {id} at {addr}");
+                    registry.reserve_in(&id);
+                    Some((id, addr))
+                }
+                Err(_) => None,
+            }
+        } else {
+            registry.claim_idle_public()
+        }
+    };
+    match launched {
+        Some((id, addr)) => {
+            println!("{name} ({client_id}) creates {id}");
+            state.joins.fetch_add(1, Ordering::Relaxed);
+            issue(&state, id, addr, client_id, &name, None, false).await
+        }
+        None => {
+            state.join_failures.fetch_add(1, Ordering::Relaxed);
+            error(StatusCode::SERVICE_UNAVAILABLE, "busy", BUSY)
+        }
+    }
+}
+
+async fn list_rooms(State(state): State<Shared>) -> Response {
+    let mut registry = state.registry.lock().expect("registry lock");
+    Json(registry.room_list()).into_response()
 }
 
 async fn rejoin(State(state): State<Shared>, Json(request): Json<RejoinRequest>) -> Response {
@@ -605,7 +663,7 @@ fn parse_args() -> Args {
         server_bin: None,
         log_dir: PathBuf::from("logs"),
         launch: true,
-        warm_matches: 1,
+        warm_matches: 0,
         peers: Vec::new(),
         web_dir: None,
     };
@@ -654,7 +712,7 @@ fn parse_args() -> Args {
                     "evoclash-matchmaker [--listen 127.0.0.1:8080] [--public-host 127.0.0.1] [--ports 7000-7099]\n\
                      \x20                   [--max-matches 16] [--max-players 8] [--bots 8]\n\
                      \x20                   [--server-bin PATH] [--log-dir logs] [--no-launch]\n\
-                     \x20                   [--warm-matches 1] [--peer URL[,URL...]] [--web-dir DIR]\n\n\
+                     \x20                   [--warm-matches 0] [--peer URL[,URL...]] [--web-dir DIR]\n\n\
                      --no-launch     only adopt servers that heartbeat in (external orchestrator)\n\
                      --warm-matches  empty matches kept running so joins never wait on a launch\n\
                      --peer          other matchmaker replicas; launched servers heartbeat to all\n\
@@ -714,7 +772,7 @@ async fn main() {
     let mut app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/v1/join", post(join))
-        .route("/v1/rooms", post(create_room))
+        .route("/v1/rooms", get(list_rooms).post(create_room))
         .route("/v1/rejoin", post(rejoin))
         .route("/v1/servers/heartbeat", post(heartbeat))
         .route("/metrics", get(metrics))
