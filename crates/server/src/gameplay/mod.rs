@@ -33,6 +33,7 @@ mod flow;
 mod idle;
 mod movement;
 mod recovering;
+mod respawn;
 mod room;
 mod spawning;
 #[cfg(test)]
@@ -46,6 +47,7 @@ pub(crate) use idle::Idle;
 use idle::watch_idle;
 pub use movement::*;
 pub use recovering::{begin_wait, resume_playing};
+pub use respawn::*;
 pub(crate) use room::read_room_commands;
 use room::{maintain_host, private_idle_cap};
 pub use spawning::*;
