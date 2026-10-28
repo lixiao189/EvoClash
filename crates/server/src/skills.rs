@@ -24,12 +24,12 @@ const TURRET_HP: f32 = 60.0;
 const TURRET_RADIUS: f32 = 18.0;
 const TURRET_RANGE: f32 = 420.0;
 const TURRET_EVERY: u16 = 12;
-const TURRET_DAMAGE: f32 = 9.0;
+const TURRET_DAMAGE: f32 = 6.0;
 const TURRET_SHOT_SPEED: f32 = 1600.0;
 const MAX_TRAPS: usize = 3;
 const TRAP_TICKS: u32 = 60 * TICKS_PER_SEC;
 const TRAP_RADIUS: f32 = 40.0;
-const TRAP_DAMAGE: f32 = 25.0;
+const TRAP_DAMAGE: f32 = 40.0;
 const TRAP_SLOW_TICKS: u16 = 3 * TICKS_PER_SEC as u16;
 const TRAP_REVEAL_TICKS: u16 = 3 * TICKS_PER_SEC as u16;
 /// Stealth must have lasted this long before far viewers stop getting updates, so their

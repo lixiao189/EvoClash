@@ -24,8 +24,8 @@ use crate::combat::{Flight, projectile_replication};
 use crate::config::ServerConfig;
 use crate::evolution::{Dealt, Hit, XpAward, XpQueue};
 use crate::gameplay::{
-    Damage, DamageQueue, Outbox, PosHistory, ResetRequested, SimSet, SimTick, TICKS_PER_SEC,
-    match_flow, reset_match, resolve_damage,
+    Damage, DamageQueue, MATCH_TICKS, Outbox, PosHistory, ResetRequested, SimSet, SimTick,
+    TICKS_PER_SEC, match_flow, reset_match, resolve_damage,
 };
 use crate::inventory::spawn_loot;
 
@@ -125,7 +125,8 @@ const RAD_DPS: f32 = 8.0;
 /// Puddles bite four times a second.
 const PUDDLE_EVERY: u32 = TICKS_PER_SEC / 4;
 
-/// Spawning rules per kind.
+/// Spawning rules per kind. `cap` is for the whole map, not per block: individuals, or
+/// groups when `group > 1` (a dog pack is 3, a raider team is 2).
 pub struct Spec {
     /// Live individuals, or live groups when `group > 1`.
     pub cap: usize,
@@ -143,14 +144,14 @@ pub fn spec(kind: MonsterKind) -> Spec {
         loot_tier,
     };
     match kind {
-        MonsterKind::Roach => s(10, 1, 5, 1),
-        MonsterKind::SporePod => s(5, 1, 5, 2),
-        MonsterKind::Dog => s(4, 3, 20, 1),
-        MonsterKind::Ghoul => s(6, 1, 15, 1),
-        MonsterKind::Spitter => s(4, 1, 30, 2),
-        MonsterKind::Crawler => s(3, 1, 45, 3),
+        MonsterKind::Roach => s(8, 1, 5, 1),
+        MonsterKind::SporePod => s(4, 1, 5, 2),
+        MonsterKind::Dog => s(3, 3, 20, 1),
+        MonsterKind::Ghoul => s(5, 1, 15, 1),
+        MonsterKind::Spitter => s(3, 1, 30, 2),
+        MonsterKind::Crawler => s(2, 1, 45, 3),
         MonsterKind::Raider => s(2, 2, 60, 2),
-        MonsterKind::Drone => s(4, 1, 30, 1),
+        MonsterKind::Drone => s(3, 1, 30, 1),
         MonsterKind::Behemoth => s(0, 1, 0, 4),
     }
 }

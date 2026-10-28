@@ -191,12 +191,13 @@ pub fn match_flow(
                 rng.with(true, Stream::Loot, |rng| {
                     for offset in [Vec2::new(-45.0, 0.0), Vec2::new(45.0, 0.0)] {
                         let item = roll_loot(4, rng);
-                        spawn_loot(
+                        let dropped = spawn_loot(
                             &mut commands,
                             item,
                             VAULT_CENTER + offset,
                             Some(DROP_TTL_TICKS * 2),
                         );
+                        commands.entity(dropped).insert(BunkerDrop);
                     }
                 });
                 outbox.announce("地堡开启：尖端科技已出土！");
@@ -375,9 +376,13 @@ pub fn reset_match(
     mut props: ResMut<PropSlots>,
     mut blasts: ResMut<Blasts>,
     mut departed: Query<&mut Departed>,
+    bunker: Query<Entity, With<BunkerBounty>>,
 ) {
     if !std::mem::take(&mut reset.0) {
         return;
+    }
+    for entity in &bunker {
+        commands.entity(entity).remove::<BunkerBounty>();
     }
     for mut departed in &mut departed {
         departed.0.clear();

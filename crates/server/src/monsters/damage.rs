@@ -17,6 +17,22 @@ pub fn crawler_mult(facing: f32, toward_attacker: Vec2) -> f32 {
 
 /// One `roll_ammo` (so the rolls after it stay in order), replaced by a full box of every
 /// family the zone stocks.
+/// Normal fauna (not elites, not the behemoth) pay ×1.5 XP and scrap. Halves round away
+/// from zero, matching `scaled_xp` (45 × 1.5 → 68).
+fn normal_payout(base: u32) -> u32 {
+    (base as f32 * 1.5).round() as u32
+}
+
+pub(super) fn fauna_pay(monster: &Monster) -> (u32, u32) {
+    let xp = monster.kind.xp();
+    let scrap = monster_scrap(monster.kind);
+    if monster.elite {
+        (xp * ELITE_XP_MULT, scrap * ELITE_XP_MULT)
+    } else {
+        (normal_payout(xp), normal_payout(scrap))
+    }
+}
+
 fn ammo_drop(tier: u8, rng: &mut impl Rng) -> Vec<Item> {
     let _rolled = roll_ammo(tier, rng);
     zone_ammo(tier).iter().copied().map(Item::ammo).collect()
@@ -168,13 +184,13 @@ pub(super) fn resolve_monster_damage(
             if playing {
                 if let Some(by) = dmg.attacker {
                     // Non-players (raiders) are skipped by `grant_xp`.
+                    let (base, scrap) = fauna_pay(monster);
                     xp.0.push(XpAward {
                         to: by,
-                        base: monster.xp(),
+                        base,
                         pos: pos.0,
                         loot: false,
-                        scrap: monster_scrap(monster.kind)
-                            * if monster.elite { ELITE_XP_MULT } else { 1 },
+                        scrap,
                     });
                 }
                 if let Some(killer) = player_attacker
@@ -343,5 +359,30 @@ mod tests {
             assert!(items.contains(&gun));
             assert_eq!(ammo_kinds(&items), vec![(kind, rounds)]);
         }
+    }
+
+    #[test]
+    fn normal_fauna_pay_half_again_and_elites_stay_on_the_old_multiple() {
+        let roach = Monster {
+            kind: MonsterKind::Roach,
+            elite: false,
+        };
+        assert_eq!(super::fauna_pay(&roach), (38, 6));
+        let elite = Monster {
+            kind: MonsterKind::Roach,
+            elite: true,
+        };
+        // ×3 of the base, not ×3 of the already-scaled normal payout.
+        assert_eq!(super::fauna_pay(&elite), (75, 12));
+        let drone = Monster {
+            kind: MonsterKind::Drone,
+            elite: false,
+        };
+        assert_eq!(super::fauna_pay(&drone), (68, 9));
+        let crawler = Monster {
+            kind: MonsterKind::Crawler,
+            elite: false,
+        };
+        assert_eq!(super::fauna_pay(&crawler), (165, 23));
     }
 }
