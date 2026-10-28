@@ -1,8 +1,10 @@
 //! Keyboard/mouse → `PlayerInput`, written into lightyear's input buffer every tick.
 //!
-//! The Esc stack lives here: it closes the backpack, then the evolution panel, then toggles the
-//! menu, so one key never opens two overlays. While any of those panels is open the buffered
-//! input stands still (aim frozen, weapon unchanged); B, Tab and Esc still toggle the panels.
+//! [`InputMode`](crate::input_mode::InputMode) is Ui or Aim. In Ui the mouse does not fire or
+//! throw and `aim` stays where it last was while aiming; movement keys still apply. The Esc
+//! stack lives here: it closes the backpack, then the evolution panel, then toggles the menu,
+//! so one key never opens two overlays. While any of those panels is open the buffered input
+//! stands still (aim frozen, weapon unchanged); B, Tab and Esc still toggle the panels.
 
 use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
@@ -14,6 +16,7 @@ use lightyear::prelude::*;
 
 use crate::buttons::PointerOverUi;
 use crate::evo_panel::EvoPanelOpen;
+use crate::input_mode::InputMode;
 use crate::menu::MenuOpen;
 
 /// Mouse position in world space, filled in by the renderer.
@@ -249,6 +252,7 @@ fn buffer_input(
     menu: Res<MenuOpen>,
     evo: Res<EvoPanelOpen>,
     over_ui: Res<PointerOverUi>,
+    mode: Res<InputMode>,
     mut last_aim: Local<Vec2>,
     specs: Query<(), With<Spectator>>,
     mut query: Query<(&mut ActionState<PlayerInput>, &Pos), With<InputMarker<PlayerInput>>>,
@@ -265,7 +269,9 @@ fn buffer_input(
     };
     let mut input = PlayerInput::default();
     let panel = panel_open(open.0, menu.0, evo.0);
-    let sampled = keys.is_some();
+    let ui = *mode == InputMode::Ui;
+    // Don't sample aim in Ui: the next Aim frame still has the direction from before the hold.
+    let sampled = keys.is_some() && !ui;
 
     if let Some(keys) = keys {
         use KeyCode::*;
@@ -273,9 +279,10 @@ fn buffer_input(
         input.move_y = axis(&keys, [KeyS, ArrowDown], [KeyW, ArrowUp]);
         input.dash = keys.any_pressed([Space, ShiftLeft]);
         input.interact = keys.any_pressed([KeyE, KeyF]);
-        // The mouse belongs to the backpack panel while it is open, and to the menu while that
-        // is open: a click there must not fire or throw. `apply_panel_lock` clears the rest.
-        let mouse = mouse.filter(|_| !open.0 && !menu.0);
+        // Ui (panel, hovered control, Alt, unfocused, cursor outside) keeps mouse buttons from
+        // firing or throwing. Keyboard fire / throw still work. `apply_panel_lock` freezes
+        // movement only while a panel is open.
+        let mouse = mouse.filter(|_| !open.0 && !menu.0 && !ui);
         input.throw = keys.pressed(KeyQ)
             || mouse
                 .as_ref()
@@ -287,10 +294,19 @@ fn buffer_input(
         input.select = selection.wire();
         input.skill_a = keys.pressed(KeyR);
         input.skill_b = keys.pressed(KeyT);
-        input.aim = cursor
-            .0
-            .map(|c| (c - (pos.0 + Vec2::Y * GUN_HEIGHT)).normalize_or(Vec2::X))
-            .unwrap_or(Vec2::X);
+        if !ui {
+            input.aim = cursor
+                .0
+                .map(|c| (c - (pos.0 + Vec2::Y * GUN_HEIGHT)).normalize_or(Vec2::X))
+                .unwrap_or(Vec2::X);
+        }
+    }
+    if ui {
+        input.aim = if *last_aim == Vec2::ZERO {
+            Vec2::X
+        } else {
+            *last_aim
+        };
     }
     if panel {
         // Keys may be missing; still keep the weapon the player already asked for.
@@ -343,5 +359,68 @@ mod tests {
         let fallback = apply_panel_lock(true, live, true, &mut unset);
         assert_eq!(fallback.aim, Vec2::X);
         assert_eq!(unset, Vec2::ZERO);
+    }
+
+    /// `buffer_input` in a bare app: a combatant at the origin, the cursor to its right, the
+    /// left button held. Returns the app after one frame in `mode`.
+    fn buffering(mode: InputMode) -> App {
+        let mut app = App::new();
+        app.add_systems(Update, buffer_input)
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<Selection>()
+            .init_resource::<BackpackOpen>()
+            .init_resource::<MenuOpen>()
+            .init_resource::<EvoPanelOpen>()
+            .init_resource::<PointerOverUi>()
+            .insert_resource(mode)
+            .insert_resource(CursorWorld(Some(Vec2::new(200.0, GUN_HEIGHT))));
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        app.world_mut().spawn((
+            ActionState::<PlayerInput>::default(),
+            InputMarker::<PlayerInput>::default(),
+            Pos(Vec2::ZERO),
+        ));
+        app.update();
+        app
+    }
+
+    fn sent(app: &mut App) -> PlayerInput {
+        app.world_mut()
+            .query::<&ActionState<PlayerInput>>()
+            .single(app.world())
+            .unwrap()
+            .0
+            .clone()
+    }
+
+    #[test]
+    fn aim_mode_clicks_fire_and_ui_mode_clicks_do_not() {
+        let mut app = buffering(InputMode::Aim);
+        let aimed = sent(&mut app);
+        assert!(aimed.fire);
+        assert_eq!(aimed.aim, Vec2::X);
+
+        // Hover a control: the held button stops firing and the aim stays put even though the
+        // cursor moved above the player. Movement keys still apply.
+        app.insert_resource(InputMode::Ui);
+        app.insert_resource(CursorWorld(Some(Vec2::new(0.0, 500.0))));
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyD);
+        app.update();
+        let held = sent(&mut app);
+        assert!(!held.fire && !held.throw);
+        assert_eq!(held.aim, Vec2::X);
+        assert_eq!(held.move_x, 1);
+
+        // Back to Aim: the new cursor direction is used at once.
+        app.insert_resource(InputMode::Aim);
+        app.update();
+        let resumed = sent(&mut app);
+        assert!(resumed.fire);
+        assert!(resumed.aim.y > 0.99);
     }
 }

@@ -4,6 +4,7 @@ use super::*;
 
 use crate::evo_panel::EvoPanelOpen;
 use crate::input::{BackpackOpen, panel_open};
+use crate::input_mode::InputMode;
 use crate::menu::MenuOpen;
 
 /// A melee swing: cock back over `SWING_WINDUP`, sweep through, then settle back on the aim.
@@ -341,6 +342,7 @@ pub(super) fn pose_players(
     backpack: Res<BackpackOpen>,
     menu: Res<MenuOpen>,
     evo: Res<EvoPanelOpen>,
+    mode: Res<InputMode>,
     fixed: Res<Time<Fixed>>,
     time: Res<Time>,
     selection: Res<Selection>,
@@ -378,8 +380,9 @@ pub(super) fn pose_players(
         let p = visual_pos(pos, samples, &fixed);
         let gun_at = p + Vec2::Y * GUN_HEIGHT;
         // Your own body follows the cursor directly instead of waiting for the server's aim.
-        // An open panel uses the aim already in the input buffer, which stays frozen.
-        let aim = if local && panel_open(backpack.0, menu.0, evo.0) {
+        // Ui (an open panel, a hovered control, Alt) uses the aim already in the input buffer,
+        // which stays frozen.
+        let aim = if local && (panel_open(backpack.0, menu.0, evo.0) || *mode == InputMode::Ui) {
             action.map(|a| a.0.aim.normalize_or(aim.0)).unwrap_or(aim.0)
         } else {
             match (local, cursor.0) {

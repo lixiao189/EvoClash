@@ -197,7 +197,7 @@ fn click_buttons(
     send(&mut senders, cmd);
 }
 
-fn pointer_over_ui(
+pub(crate) fn pointer_over_ui(
     mut over: ResMut<PointerOverUi>,
     nodes: Query<
         (&RelativeCursorPosition, &InheritedVisibility),
