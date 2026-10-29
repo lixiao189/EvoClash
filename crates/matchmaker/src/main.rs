@@ -145,8 +145,24 @@ fn launch(registry: &mut Registry, fleet: &Fleet) -> Result<(String, SocketAddr)
     Ok((id, addr))
 }
 
-/// Socket address when the listener recorded one. Missing (tests, odd proxies) still rate-limits.
+/// Client address for the join / room-create rate limit.
+///
+/// The TCP peer when the listener recorded one. The single-node nginx proxies from loopback
+/// and sets `x-real-ip` to Cloudflare's connecting IP; only a loopback peer may supply that
+/// header, and only when it parses as an IP. Any other peer keeps the socket address.
+/// Missing peer info (tests, odd proxies) is `"unknown"` and still rate-limits.
 struct ClientIp(String);
+
+fn rate_limit_ip(peer: Option<IpAddr>, x_real_ip: Option<&str>) -> String {
+    match peer {
+        Some(ip) if ip.is_loopback() => x_real_ip
+            .and_then(|value| value.parse::<IpAddr>().ok())
+            .map(|forwarded| forwarded.to_string())
+            .unwrap_or_else(|| ip.to_string()),
+        Some(ip) => ip.to_string(),
+        None => "unknown".to_string(),
+    }
+}
 
 impl<S> FromRequestParts<S> for ClientIp
 where
@@ -155,12 +171,15 @@ where
     type Rejection = Infallible;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let ip = parts
+        let peer = parts
             .extensions
             .get::<ConnectInfo<SocketAddr>>()
-            .map(|info| info.0.ip().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        Ok(ClientIp(ip))
+            .map(|info| info.0.ip());
+        let forwarded = parts
+            .headers
+            .get("x-real-ip")
+            .and_then(|value| value.to_str().ok());
+        Ok(ClientIp(rate_limit_ip(peer, forwarded)))
     }
 }
 
@@ -803,4 +822,59 @@ async fn main() {
     })
     .await
     .expect("server error");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, SocketAddr};
+
+    use axum::extract::{ConnectInfo, FromRequestParts};
+    use axum::http::Request;
+
+    use super::{ClientIp, rate_limit_ip};
+
+    #[test]
+    fn loopback_peer_takes_a_parsed_x_real_ip() {
+        let v4: IpAddr = "127.0.0.1".parse().unwrap();
+        let v6: IpAddr = "::1".parse().unwrap();
+        assert_eq!(rate_limit_ip(Some(v4), Some("203.0.113.9")), "203.0.113.9");
+        assert_eq!(rate_limit_ip(Some(v6), Some("2001:db8::5")), "2001:db8::5");
+    }
+
+    #[test]
+    fn missing_or_foreign_header_keeps_the_peer() {
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        let peer: IpAddr = "198.51.100.4".parse().unwrap();
+        assert_eq!(rate_limit_ip(Some(loopback), None), "127.0.0.1");
+        assert_eq!(
+            rate_limit_ip(Some(loopback), Some("not-an-ip")),
+            "127.0.0.1"
+        );
+        assert_eq!(
+            rate_limit_ip(Some(loopback), Some("203.0.113.9:443")),
+            "127.0.0.1"
+        );
+        assert_eq!(
+            rate_limit_ip(Some(peer), Some("203.0.113.9")),
+            "198.51.100.4"
+        );
+        assert_eq!(rate_limit_ip(None, Some("203.0.113.9")), "unknown");
+    }
+
+    #[tokio::test]
+    async fn extractor_reads_x_real_ip_only_by_that_name() {
+        let mut request = Request::builder()
+            .header("X-Real-IP", "203.0.113.9")
+            .header("x-forwarded-for", "198.51.100.8")
+            .body(())
+            .expect("request");
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 9))));
+        let (mut parts, _) = request.into_parts();
+        let ClientIp(ip) = ClientIp::from_request_parts(&mut parts, &())
+            .await
+            .expect("infallible");
+        assert_eq!(ip, "203.0.113.9");
+    }
 }

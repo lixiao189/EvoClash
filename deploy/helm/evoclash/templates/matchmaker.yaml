@@ -1,3 +1,5 @@
+{{- /* single mode has its own Deployment; it does not render this one, or its Service/HPA/PDB/Ingress. */ -}}
+{{- if not (dig "enabled" false .Values.single) }}
 {{- $mm := .Values.matchmaker }}
 {{- $selector := include "evoclash.selectorLabels" (dict "root" . "component" "matchmaker") }}
 # Stateless replicas: the fleet view comes from heartbeats and reconnect keys are HMACs, so
@@ -188,7 +190,7 @@ spec:
       http:
         # Only what browsers load and call; heartbeats and drain stay inside the cluster.
         paths:
-          {{- range list "/" "/v1/join" "/v1/rejoin" "/healthz" }}
+          {{- range list "/" "/v1/join" "/v1/rooms" "/v1/rejoin" "/healthz" }}
           - path: {{ . }}
             pathType: Exact
             backend:
@@ -203,4 +205,5 @@ spec:
                 name: {{ include "evoclash.matchmaker" $ }}
                 port: { name: http }
     {{- end }}
+{{- end }}
 {{- end }}
