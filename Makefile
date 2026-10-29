@@ -3,22 +3,32 @@
 
 LISTEN ?= 127.0.0.1:8080
 BOTS   ?= 8
+# Address put in connect tokens. Set this when using `make lan`, or other machines
+# are told to open the match on 127.0.0.1. `make lan` prints the value to use.
+PUBLIC_HOST ?=
+# Host port of the nginx HTTPS proxy (`make lan`). LAN_IP overrides detection.
+LAN_PORT ?= 8443
+LAN_IP ?=
 
 CARGO_BINS := -p evoclash-server -p evoclash-matchmaker
 WASM_TARGET := wasm32-unknown-unknown
 # Empty for the debug client (cargo `dev` profile); `--release` uses the size-optimized `wasm` profile.
 TRUNK_FLAGS := --release
 
-.PHONY: run dev web watch watch-dev server check clean-logs
+.PHONY: run dev web watch watch-dev server check clean-logs lan
 
 ## run: build everything and serve the game at http://$(LISTEN)
 run: web server
 	@echo "→ open http://$(LISTEN)"
-	target/debug/evoclash-matchmaker --listen $(LISTEN) --bots $(BOTS) --web-dir target/web
+	target/debug/evoclash-matchmaker --listen $(LISTEN) --bots $(BOTS) --web-dir target/web $(if $(PUBLIC_HOST),--public-host $(PUBLIC_HOST),)
 
 ## dev: like `run`, but with a debug client: much faster to rebuild, slower in the browser
 dev: TRUNK_FLAGS :=
 dev: run
+
+## lan: nginx in Docker, HTTPS in front of the local matchmaker (run `make dev` as well)
+lan:
+	LISTEN='$(LISTEN)' LAN_PORT='$(LAN_PORT)' LAN_IP='$(LAN_IP)' "$(CURDIR)/scripts/lan-proxy.sh"
 
 ## web: build the browser client into target/web (needs `trunk`: cargo install trunk)
 web:
