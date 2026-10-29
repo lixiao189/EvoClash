@@ -3,31 +3,22 @@
 
 LISTEN ?= 127.0.0.1:8080
 BOTS   ?= 8
-# Address put in connect tokens. Set this when using `make lan`, or other machines
-# are told to open the match on 127.0.0.1. `make lan` prints the value to use.
-PUBLIC_HOST ?=
-# `make lan` binds this address. Empty detects a private LAN address.
-LAN_IP ?=
 
 CARGO_BINS := -p evoclash-server -p evoclash-matchmaker
 WASM_TARGET := wasm32-unknown-unknown
 # Empty for the debug client (cargo `dev` profile); `--release` uses the size-optimized `wasm` profile.
 TRUNK_FLAGS := --release
 
-.PHONY: run dev web watch watch-dev server check clean-logs lan
+.PHONY: run dev web watch watch-dev server check clean-logs
 
 ## run: build everything and serve the game at http://$(LISTEN)
 run: web server
 	@echo "→ open http://$(LISTEN)"
-	target/debug/evoclash-matchmaker --listen $(LISTEN) --bots $(BOTS) --web-dir target/web $(if $(PUBLIC_HOST),--public-host $(PUBLIC_HOST),)
+	target/debug/evoclash-matchmaker --listen $(LISTEN) --bots $(BOTS) --web-dir target/web
 
 ## dev: like `run`, but with a debug client: much faster to rebuild, slower in the browser
 dev: TRUNK_FLAGS :=
 dev: run
-
-## lan: forward the matchmaker port onto this machine's LAN address (run `make dev` too)
-lan:
-	LISTEN='$(LISTEN)' LAN_IP='$(LAN_IP)' python3 -u "$(CURDIR)/scripts/lan-forward.py"
 
 ## web: build the browser client into target/web (needs `trunk`: cargo install trunk)
 web:
