@@ -37,7 +37,7 @@ Cloudflare：DNS 橙云；Origin Rule 把 `game.node189.top` 回源端口改成 
 
 ## GitHub
 
-Environment 名 `production`。推到 `main`（或手动跑 Deploy）会构建 `linux/amd64` 镜像并 `ssh … deploy <12位 sha>`，stdin 是含 `image.tar` 和 `chart/` 的 gzip tar。
+Environment 名 `production`。`main` 上的 CI 通过后，Deploy（`workflow_run`）不再编译：直接下载 CI `image` 任务冒烟测试过的 release 镜像（artifact `server-image`，标签是二进制、网页和 Dockerfile 的内容哈希前 12 位），连同同一提交的 chart 打成 gzip tar，`ssh … deploy <tag>` 送过去。内容没变时标签不变，helm 不会重建 Pod、打断对局。手动跑 Deploy 部署最近一次通过的 main CI。
 
 | 名字 | 种类 | 内容 |
 |---|---|---|

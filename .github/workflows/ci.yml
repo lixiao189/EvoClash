@@ -111,6 +111,7 @@ jobs:
 
   # Builds the release Docker image (without pushing) and runs it, so a broken Dockerfile or a
   # binary that can't start on the distroless base shows up in the PR, not at release time.
+  # On main the smoke-tested image is also uploaded; deploy.yml ships exactly that image.
   image:
     name: Server image
     # Same glibc baseline as the release binaries the real image packages.
@@ -146,8 +147,9 @@ jobs:
           key: wasm-profile-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.cargo/config.toml', 'crates/client/Cargo.toml', 'crates/game/Cargo.toml', 'crates/server/Cargo.toml', 'crates/matchmaker/Cargo.toml') }}
           restore-keys: |
             wasm-profile-${{ runner.os }}-${{ runner.arch }}-
-      # Dev profile (dependencies are still optimized): this checks packaging, not performance.
-      - run: cargo build --locked -p evoclash-server -p evoclash-matchmaker
+      # Release profile, so the image main uploads is the one production runs. PRs build the
+      # same profile and reuse the cache main saves.
+      - run: cargo build --release --locked -p evoclash-server -p evoclash-matchmaker
       - run: trunk build --release --locked
         working-directory: crates/client
         env:
@@ -166,7 +168,7 @@ jobs:
       - name: Stage binaries and the browser client like release.yml does
         run: |
           mkdir -p dist/amd64
-          cp target/debug/evoclash-server target/debug/evoclash-matchmaker dist/amd64/
+          cp target/release/evoclash-server target/release/evoclash-matchmaker dist/amd64/
           cp -r target/web dist/amd64/web
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -193,6 +195,23 @@ jobs:
           docker logs evoclash
           cat match-logs/*.log || true
           exit 1
+      # Tagged by content, not commit: a push that leaves the binaries, client and Dockerfile
+      # unchanged redeploys the same tag, so helm leaves the running pod (and its matches) alone.
+      - name: Save the image for deploy.yml
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          tag=$( (cd dist && find . -type f -print0 | sort -z | xargs -0 sha256sum; sha256sum ../Dockerfile) | sha256sum | cut -c1-12)
+          docker tag evoclash-server:ci "evoclash-server:${tag}"
+          mkdir image
+          echo "$tag" > image/tag
+          docker save "evoclash-server:${tag}" | gzip -1 > image/image.tar.gz
+      - if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: server-image
+          path: image
+          retention-days: 7
+          if-no-files-found: error
 
   # Single required status for branch protection, so jobs can change without editing settings.
   ci-success:

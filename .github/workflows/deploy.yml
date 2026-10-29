@@ -1,13 +1,13 @@
 name: Deploy
 
-# Push to main ships the single-node k3s box. doc/ and markdown do not.
-# Manual runs use the same production environment.
+# Ships the single-node k3s box after CI passes on main. Nothing is built here: the image is the
+# one CI's `image` job smoke-tested and uploaded (tagged by content, so a push that changes no
+# binaries leaves the running pod alone). Manual runs deploy the latest green main CI run.
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
-    paths-ignore:
-      - "doc/**"
-      - "**.md"
   workflow_dispatch:
 
 permissions:
@@ -17,80 +17,50 @@ concurrency:
   group: deploy
   cancel-in-progress: false
 
-env:
-  CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: 0
-
 jobs:
-  web:
-    name: Build browser client
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
-        with:
-          toolchain: stable
-          targets: wasm32-unknown-unknown
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
-        with:
-          tool: trunk
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: trunk build --release --locked
-        working-directory: crates/client
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: web
-          path: target/web
-          if-no-files-found: error
-
-  # Same glibc baseline as the distroless image (release.yml's amd64 server job).
-  server:
-    name: Server binaries (amd64)
-    runs-on: ubuntu-22.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
-        with:
-          toolchain: stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo build --release --locked -p evoclash-server -p evoclash-matchmaker
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: server-amd64
-          path: |
-            target/release/evoclash-server
-            target/release/evoclash-matchmaker
-          if-no-files-found: error
-
   deploy:
     name: Deploy
-    needs: [web, server]
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     environment: production
+    permissions:
+      contents: read
+      # Download the image artifact from the CI run.
+      actions: read
     steps:
+      - name: Pick the CI run
+        id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${RUN_ID}" ]]; then
+            read -r RUN_ID HEAD_SHA < <(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1" \
+              --jq '.workflow_runs[0] | "\(.id) \(.head_sha)"')
+          fi
+          echo "CI run ${RUN_ID} at ${HEAD_SHA}"
+          echo "id=${RUN_ID}" >> "$GITHUB_OUTPUT"
+          echo "sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+      # The chart from the same commit as the image.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ steps.run.outputs.sha }}
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: server-amd64
-          path: artifacts/server
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: web
-          path: artifacts/web
-      - name: Build image, pack chart, ship over ssh
+          name: server-image
+          path: image
+          run-id: ${{ steps.run.outputs.id }}
+          github-token: ${{ github.token }}
+      - name: Pack image and chart, ship over ssh
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
@@ -100,7 +70,7 @@ jobs:
           set -euo pipefail
           host=${DEPLOY_HOST:-179.255.113.5}
           port=${DEPLOY_PORT:-1145}
-          tag=${GITHUB_SHA::12}
+          tag=$(cat image/tag)
           if [[ -z "${DEPLOY_SSH_KEY:-}" || -z "${DEPLOY_KNOWN_HOSTS:-}" ]]; then
             echo "::error::DEPLOY_SSH_KEY and DEPLOY_KNOWN_HOSTS must be set on environment production"
             exit 1
@@ -110,15 +80,11 @@ jobs:
             exit 1
           fi
           if [[ ! "$tag" =~ ^[0-9a-f]{12}$ ]]; then
-            echo "::error::GITHUB_SHA prefix is not 12 hex chars"
+            echo "::error::image tag '$tag' is not 12 hex chars"
             exit 1
           fi
-          mkdir -p dist/amd64 bundle
-          cp artifacts/server/evoclash-server artifacts/server/evoclash-matchmaker dist/amd64/
-          chmod +x dist/amd64/evoclash-server dist/amd64/evoclash-matchmaker
-          cp -a artifacts/web dist/amd64/web
-          docker build --platform linux/amd64 -t "evoclash-server:${tag}" .
-          docker save "evoclash-server:${tag}" -o bundle/image.tar
+          mkdir bundle
+          gunzip -c image/image.tar.gz > bundle/image.tar
           cp -a deploy/helm/evoclash bundle/chart
           tar -czf bundle.tgz -C bundle image.tar chart
           key=$(mktemp)
