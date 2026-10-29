@@ -36,10 +36,12 @@ mod projectiles;
 mod props;
 mod scenery;
 mod skills;
+mod smoothing;
 #[cfg(test)]
 mod tests;
 
 use camera::*;
+use lightyear::prelude::InterpolationSystems;
 use monsters::*;
 use overlays::*;
 use pickups::*;
@@ -48,6 +50,7 @@ pub use projectiles::*;
 use props::*;
 use scenery::*;
 use skills::*;
+use smoothing::smooth_remotes;
 
 const Z_FLOOR: f32 = -10.0;
 const Z_DECAL: f32 = -8.0;
@@ -307,6 +310,9 @@ impl Plugin for RenderPlugin {
         app.add_systems(
             Update,
             (
+                // After lightyear writes interpolated `Pos`, and before every reader in this
+                // chain (players, monsters, overlays, camera). The chain is the ordering.
+                smooth_remotes.after(InterpolationSystems::Interpolate),
                 adopt_layout,
                 build_scenery,
                 update_roofs,

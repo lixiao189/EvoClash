@@ -455,6 +455,39 @@ const NEW_MATCH_AFTER_ATTEMPTS: u32 = 2;
 /// inserts `Connecting` on a later flush. One slow frame must not spend a reconnect.
 const INITIAL_MARKER_FRAMES: u32 = 8;
 
+/// Floor matches lightyear's default (5ms). It only wins if the server ever sends
+/// faster than the ratio below; replication is every other tick (31.25ms), so it doesn't.
+const INTERP_MIN_DELAY: Duration = Duration::from_millis(5);
+/// 1.5× the send interval ≈ 47ms, against the default 1.2× (≈ 37ms). One lost packet is
+/// covered by render extrapolation (`render/smoothing.rs`), not a deeper buffer, so a
+/// LAN client stays near the old delay (~53ms → ~62ms, the extra being this half interval).
+const INTERP_SEND_INTERVAL_RATIO: f32 = 1.5;
+/// Ticks of error ignored before the presentation clock speeds up or slows down.
+/// The default 1.0 tick is smaller than server-tick noise at high RTT, which pulsed
+/// NPC speed by ±5%. 3 ticks is ~47ms.
+const INTERP_ERROR_MARGIN_TICKS: f32 = 3.0;
+/// Snap the presentation clock only past this many ticks. The default 10 (156ms)
+/// teleports on a late burst; 30 (~469ms) stays on the slow ramp instead.
+const INTERP_MAX_ERROR_MARGIN_TICKS: f32 = 30.0;
+/// Catch-up rate once the error leaves the dead-band. 2% instead of the default 5%,
+/// so a correction does not read as NPCs speeding up. `jitter_multiple` stays 4.
+const INTERP_SPEEDUP_FACTOR: f32 = 1.02;
+
+/// Buffer and sync settings for interpolated bots, monsters and remote players.
+/// `SyncConfig::jitter_multiple` stays at its default of 4.
+fn interpolation_config() -> InterpolationConfig {
+    InterpolationConfig {
+        min_delay: INTERP_MIN_DELAY,
+        send_interval_ratio: INTERP_SEND_INTERVAL_RATIO,
+        sync: SyncConfig {
+            error_margin: INTERP_ERROR_MARGIN_TICKS,
+            max_error_margin: INTERP_MAX_ERROR_MARGIN_TICKS,
+            speedup_factor: INTERP_SPEEDUP_FACTOR,
+            ..SyncConfig::default()
+        },
+    }
+}
+
 pub struct SessionPlugin;
 
 impl Plugin for SessionPlugin {
@@ -479,6 +512,19 @@ impl Plugin for SessionPlugin {
                 InputTimelineConfig::default().with_input_delay(InputDelayConfig::no_input_delay()),
             );
             world.insert_resource(PredictionManager::default());
+            // ClientPlugins already `init_resource`'d the lightyear default. That only
+            // fills an empty slot, and Startup runs before Connect, so this is the value
+            // timeline sync reads. A later `init_resource` will not replace it.
+            let interpolation = interpolation_config();
+            info!(
+                "interpolation buffer: min_delay={}ms ratio={} error_margin={} max_error_margin={} speedup={}",
+                interpolation.min_delay.as_millis(),
+                interpolation.send_interval_ratio,
+                interpolation.sync.error_margin,
+                interpolation.sync.max_error_margin,
+                interpolation.sync.speedup_factor,
+            );
+            world.insert_resource(interpolation);
         });
         // Join only once the files the match needs have loaded.
         app.add_systems(
@@ -1197,6 +1243,33 @@ fn watch_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_interpolation_config_replaces_the_lightyear_default() {
+        let mut app = App::new();
+        // TimelinePlugin::build does this, and only this, before our Startup runs.
+        app.init_resource::<InterpolationConfig>();
+        app.init_resource::<PendingAssets>();
+        app.add_plugins(SessionPlugin);
+        app.update();
+
+        let config = app.world().resource::<InterpolationConfig>();
+        assert_eq!(config.min_delay, INTERP_MIN_DELAY);
+        assert_eq!(config.send_interval_ratio, INTERP_SEND_INTERVAL_RATIO);
+        assert_eq!(config.sync.error_margin, INTERP_ERROR_MARGIN_TICKS);
+        assert_eq!(config.sync.max_error_margin, INTERP_MAX_ERROR_MARGIN_TICKS);
+        assert_eq!(config.sync.speedup_factor, INTERP_SPEEDUP_FACTOR);
+        assert_eq!(
+            config.sync.jitter_multiple,
+            SyncConfig::default().jitter_multiple
+        );
+
+        app.world_mut().init_resource::<InterpolationConfig>();
+        assert_eq!(
+            app.world().resource::<InterpolationConfig>().min_delay,
+            INTERP_MIN_DELAY
+        );
+    }
 
     #[test]
     fn started_quick_starts_once_then_stops() {
