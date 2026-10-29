@@ -1,5 +1,5 @@
 //! EvoClash browser client (wasm32). Served by the matchmaker, which it joins through the same
-//! origin it was loaded from: `http://127.0.0.1:8080/play/?name=Alice` (`&lag=100` simulates latency).
+//! origin it was loaded from: `http://127.0.0.1:8080/play/?name=Alice` (`&lag=100` simulates latency in a debug build).
 //!
 //! The crate still compiles natively so its tests (sprite previews) run with `cargo test`, but
 //! the game itself only runs in a browser: `make run`.
@@ -42,7 +42,7 @@ pub struct ClientArgs {
     pub name: String,
     /// Matchmaker base URL: the origin the page was served from.
     pub matchmaker: String,
-    /// Simulated one-way latency in ms for testing prediction (dev only).
+    /// Simulated one-way latency in ms for testing prediction. Debug builds only (`make dev`).
     pub fake_latency_ms: u64,
     /// Private room code from `?room=`. Absent for a quick start.
     pub room: Option<String>,
@@ -71,8 +71,10 @@ fn page_args() -> Option<ClientArgs> {
     Some(ClientArgs {
         name,
         matchmaker: location.origin().ok()?,
+        // Release builds (what players get) ignore `?lag=`.
         fake_latency_ms: params
             .get("lag")
+            .filter(|_| cfg!(debug_assertions))
             .and_then(|lag| lag.parse().ok())
             .unwrap_or(0),
         room,
