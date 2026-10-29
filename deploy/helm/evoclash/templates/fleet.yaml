@@ -1,3 +1,5 @@
+{{- /* single mode launches match servers in-process; no Agones Fleet. */ -}}
+{{- if not (dig "enabled" false .Values.single) }}
 {{- $srv := .Values.server }}
 # One pod per match, each on its own dynamic host UDP port. Lifecycle (crates/server/src/agones.rs):
 #   Ready      empty server, part of the warm buffer; the matchmaker may send players here
@@ -105,4 +107,5 @@ spec:
       bufferSize: {{ .Values.fleet.autoscaler.bufferSize }}
       minReplicas: {{ .Values.fleet.autoscaler.minReplicas }}
       maxReplicas: {{ .Values.fleet.autoscaler.maxReplicas }}
+{{- end }}
 {{- end }}

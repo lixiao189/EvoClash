@@ -1,0 +1,250 @@
+{{- if dig "enabled" false .Values.single }}
+{{- $single := .Values.single }}
+{{- if not $single.publicHost }}
+{{- fail "single.publicHost is required when single.enabled (IP players' WebTransport connects to)" }}
+{{- end }}
+{{- if not (contains "-" ($single.ports | toString)) }}
+{{- fail "single.ports must look like 37000-37063" }}
+{{- end }}
+{{- $name := include "evoclash.fullname" . }}
+{{- $selector := include "evoclash.selectorLabels" (dict "root" . "component" "single") }}
+# Cloudflare authenticated origin pull CA.
+# https://developers.cloudflare.com/ssl/static/authenticated_origin_pull_ca.pem
+# CN=origin-pull.cloudflare.net, notAfter 2029-11-01.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-nginx
+  labels:
+    {{- include "evoclash.labels" . | nindent 4 }}
+    app.kubernetes.io/component: single
+data:
+  proxy.conf: |
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $http_cf_connecting_ip;
+    proxy_set_header Connection "";
+  nginx.conf: |
+    worker_processes 1;
+    error_log /dev/stderr notice;
+    pid /tmp/nginx.pid;
+    events {
+        worker_connections 512;
+    }
+    http {
+        include /etc/nginx/mime.types;
+        default_type application/octet-stream;
+        access_log /dev/stdout;
+        sendfile on;
+        server_tokens off;
+        client_body_temp_path /tmp/client_temp;
+        proxy_temp_path /tmp/proxy_temp;
+        fastcgi_temp_path /tmp/fastcgi_temp;
+        uwsgi_temp_path /tmp/uwsgi_temp;
+        scgi_temp_path /tmp/scgi_temp;
+        gzip on;
+        gzip_proxied any;
+        gzip_vary on;
+        gzip_min_length 256;
+        gzip_types application/javascript text/javascript application/wasm text/css application/json image/svg+xml;
+        server {
+            listen {{ $single.httpsPort }} ssl;
+            server_name _;
+            ssl_certificate /etc/nginx/tls/tls.crt;
+            ssl_certificate_key /etc/nginx/tls/tls.key;
+            ssl_protocols TLSv1.2 TLSv1.3;
+            {{ if $single.tls.originPull }}
+            ssl_client_certificate /etc/nginx/evoclash/origin-pull-ca.pem;
+            ssl_verify_client on;
+            {{ end }}
+            location = / {
+                include /etc/nginx/evoclash/proxy.conf;
+                proxy_pass http://127.0.0.1:8080;
+            }
+            location = /healthz {
+                include /etc/nginx/evoclash/proxy.conf;
+                proxy_pass http://127.0.0.1:8080;
+            }
+            location = /v1/join {
+                include /etc/nginx/evoclash/proxy.conf;
+                proxy_pass http://127.0.0.1:8080;
+            }
+            location = /v1/rooms {
+                include /etc/nginx/evoclash/proxy.conf;
+                proxy_pass http://127.0.0.1:8080;
+            }
+            location = /v1/rejoin {
+                include /etc/nginx/evoclash/proxy.conf;
+                proxy_pass http://127.0.0.1:8080;
+            }
+            location /play {
+                include /etc/nginx/evoclash/proxy.conf;
+                proxy_pass http://127.0.0.1:8080;
+            }
+            location / {
+                return 404;
+            }
+        }
+    }
+  # Exact bytes of the Cloudflare origin-pull CA (see the URL above).
+  origin-pull-ca.pem: |
+    -----BEGIN CERTIFICATE-----
+    MIIGCjCCA/KgAwIBAgIIV5G6lVbCLmEwDQYJKoZIhvcNAQENBQAwgZAxCzAJBgNV
+    BAYTAlVTMRkwFwYDVQQKExBDbG91ZEZsYXJlLCBJbmMuMRQwEgYDVQQLEwtPcmln
+    aW4gUHVsbDEWMBQGA1UEBxMNU2FuIEZyYW5jaXNjbzETMBEGA1UECBMKQ2FsaWZv
+    cm5pYTEjMCEGA1UEAxMab3JpZ2luLXB1bGwuY2xvdWRmbGFyZS5uZXQwHhcNMTkx
+    MDEwMTg0NTAwWhcNMjkxMTAxMTcwMDAwWjCBkDELMAkGA1UEBhMCVVMxGTAXBgNV
+    BAoTEENsb3VkRmxhcmUsIEluYy4xFDASBgNVBAsTC09yaWdpbiBQdWxsMRYwFAYD
+    VQQHEw1TYW4gRnJhbmNpc2NvMRMwEQYDVQQIEwpDYWxpZm9ybmlhMSMwIQYDVQQD
+    ExpvcmlnaW4tcHVsbC5jbG91ZGZsYXJlLm5ldDCCAiIwDQYJKoZIhvcNAQEBBQAD
+    ggIPADCCAgoCggIBAN2y2zojYfl0bKfhp0AJBFeV+jQqbCw3sHmvEPwLmqDLqynI
+    42tZXR5y914ZB9ZrwbL/K5O46exd/LujJnV2b3dzcx5rtiQzso0xzljqbnbQT20e
+    ihx/WrF4OkZKydZzsdaJsWAPuplDH5P7J82q3re88jQdgE5hqjqFZ3clCG7lxoBw
+    hLaazm3NJJlUfzdk97ouRvnFGAuXd5cQVx8jYOOeU60sWqmMe4QHdOvpqB91bJoY
+    QSKVFjUgHeTpN8tNpKJfb9LIn3pun3bC9NKNHtRKMNX3Kl/sAPq7q/AlndvA2Kw3
+    Dkum2mHQUGdzVHqcOgea9BGjLK2h7SuX93zTWL02u799dr6Xkrad/WShHchfjjRn
+    aL35niJUDr02YJtPgxWObsrfOU63B8juLUphW/4BOjjJyAG5l9j1//aUGEi/sEe5
+    lqVv0P78QrxoxR+MMXiJwQab5FB8TG/ac6mRHgF9CmkX90uaRh+OC07XjTdfSKGR
+    PpM9hB2ZhLol/nf8qmoLdoD5HvODZuKu2+muKeVHXgw2/A6wM7OwrinxZiyBk5Hh
+    CvaADH7PZpU6z/zv5NU5HSvXiKtCzFuDu4/Zfi34RfHXeCUfHAb4KfNRXJwMsxUa
+    +4ZpSAX2G6RnGU5meuXpU5/V+DQJp/e69XyyY6RXDoMywaEFlIlXBqjRRA2pAgMB
+    AAGjZjBkMA4GA1UdDwEB/wQEAwIBBjASBgNVHRMBAf8ECDAGAQH/AgECMB0GA1Ud
+    DgQWBBRDWUsraYuA4REzalfNVzjann3F6zAfBgNVHSMEGDAWgBRDWUsraYuA4REz
+    alfNVzjann3F6zANBgkqhkiG9w0BAQ0FAAOCAgEAkQ+T9nqcSlAuW/90DeYmQOW1
+    QhqOor5psBEGvxbNGV2hdLJY8h6QUq48BCevcMChg/L1CkznBNI40i3/6heDn3IS
+    zVEwXKf34pPFCACWVMZxbQjkNRTiH8iRur9EsaNQ5oXCPJkhwg2+IFyoPAAYURoX
+    VcI9SCDUa45clmYHJ/XYwV1icGVI8/9b2JUqklnOTa5tugwIUi5sTfipNcJXHhgz
+    6BKYDl0/UP0lLKbsUETXeTGDiDpxZYIgbcFrRDDkHC6BSvdWVEiH5b9mH2BON60z
+    0O0j8EEKTwi9jnafVtZQXP/D8yoVowdFDjXcKkOPF/1gIh9qrFR6GdoPVgB3SkLc
+    5ulBqZaCHm563jsvWb/kXJnlFxW+1bsO9BDD6DweBcGdNurgmH625wBXksSdD7y/
+    fakk8DagjbjKShYlPEFOAqEcliwjF45eabL0t27MJV61O/jHzHL3dknXeE4BDa2j
+    bA+JbyJeUMtU7KMsxvx82RmhqBEJJDBCJ3scVptvhDMRrtqDBW5JShxoAOcpFQGm
+    iYWicn46nPDjgTU0bX1ZPpTpryXbvciVL5RkVBuyX2ntcOLDPlZWgxZCBp96x07F
+    AnOzKgZk4RzZPNAxCXERVxajn/FLcOhglVAKo5H0ac+AitlQ0ip55D2/mf8o72tM
+    fVQ6VpyjEXdiIXWUq/o=
+    -----END CERTIFICATE-----
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "evoclash.labels" . | nindent 4 }}
+    app.kubernetes.io/component: single
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- $selector | nindent 6 }}
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        {{- include "evoclash.commonLabels" . | nindent 8 }}
+        {{- $selector | nindent 8 }}
+      annotations:
+        # Roll the pod when nginx's listen port, origin pull, or image changes. The
+        # ConfigMap itself is not mounted in a way that restarts the process.
+        checksum/nginx: {{ printf "%v|%v|%s|%s" $single.httpsPort $single.tls.originPull $single.tls.secretName $single.nginx.image | sha256sum | quote }}
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      terminationGracePeriodSeconds: {{ $single.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+        # emptyDir ends up group-writable by nginx's gid. Both containers get it as a
+        # supplemental group, so the matchmaker (uid 65532) can write /tmp too.
+        fsGroup: 101
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: matchmaker
+          image: {{ include "evoclash.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/app/evoclash-matchmaker"]
+          args:
+            - --listen
+            - 127.0.0.1:8080
+            - --public-host
+            - {{ $single.publicHost | quote }}
+            - --ports
+            - {{ $single.ports | quote }}
+            - --max-matches
+            - {{ $single.maxMatches | quote }}
+            - --warm-matches
+            - {{ $single.warmMatches | quote }}
+            - --log-dir
+            - /tmp/logs
+            {{- range $single.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            {{- include "evoclash.keyEnv" . | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+              host: 127.0.0.1
+              scheme: HTTP
+            initialDelaySeconds: 3
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+              host: 127.0.0.1
+              scheme: HTTP
+            periodSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml $single.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - { name: matchmaker-tmp, mountPath: /tmp }
+        - name: https
+          image: {{ $single.nginx.image }}
+          imagePullPolicy: {{ $single.nginx.pullPolicy }}
+          # Skip the image entrypoint: it rewrites nginx.conf, which is a read-only mount.
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              mkdir -p /tmp/client_temp /tmp/proxy_temp /tmp/fastcgi_temp /tmp/uwsgi_temp /tmp/scgi_temp
+              exec /usr/sbin/nginx -g 'daemon off;' -c /etc/nginx/evoclash/nginx.conf
+          ports:
+            - { name: https, containerPort: {{ $single.httpsPort }}, protocol: TCP }
+          readinessProbe:
+            tcpSocket: { port: https, host: 127.0.0.1 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: https, host: 127.0.0.1 }
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            {{- toYaml $single.nginx.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+            runAsUser: 101
+            runAsGroup: 101
+          volumeMounts:
+            - { name: nginx-config, mountPath: /etc/nginx/evoclash, readOnly: true }
+            - { name: origin-tls, mountPath: /etc/nginx/tls, readOnly: true }
+            - { name: nginx-tmp, mountPath: /tmp }
+            - { name: nginx-cache, mountPath: /var/cache/nginx }
+      volumes:
+        - { name: matchmaker-tmp, emptyDir: {} }
+        - { name: nginx-tmp, emptyDir: {} }
+        - { name: nginx-cache, emptyDir: {} }
+        - name: nginx-config
+          configMap:
+            name: {{ $name }}-nginx
+        - name: origin-tls
+          secret:
+            secretName: {{ $single.tls.secretName }}
+            defaultMode: 0444
+{{- end }}
