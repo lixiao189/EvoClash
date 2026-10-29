@@ -18,7 +18,7 @@ make run
 
 - `make watch`：另开一个终端，改客户端代码后自动重新构建，刷新页面即可。
 - `make dev` / `make watch-dev`：同上，但客户端用调试版构建（改代码后几秒就能重建，浏览器里运行较慢），日常调试用。
-- `make lan`：另开一个终端，用 Docker 里的 nginx 把本机的匹配服务反代到 `https://<局域网 IP>:8443`，局域网里的其他浏览器才能打开（自签证书，第一次要继续访问）。匹配服务仍用 `make dev` 或 `make run`，并带上 `make lan` 打印的那个地址：`make dev PUBLIC_HOST=192.168.1.10`。探测不对就 `make lan LAN_IP=192.168.1.10`。反代只转发网页和匹配 API；对局是到本机 UDP 7000–7099 的 WebTransport，不经过 nginx。
+- `make lan`：另开一个终端，把 `127.0.0.1` 上的匹配服务转发到本机局域网地址（同一端口）。其他机器打开打印出来的 `http://<局域网 IP>:8080`。匹配服务仍用 `make dev` 或 `make run`，并带上打印的地址：`make dev PUBLIC_HOST=192.168.1.10`。探测不对就 `make lan LAN_IP=192.168.1.10`。这只转发 TCP；浏览器在非本机的 http 页面上不能用 WebTransport。
 - `make run LISTEN=127.0.0.1:9000`：换个端口（每局固定 8 人，机器人由服务器补满）。
 - `make check`：本地跑一遍 CI 的 fmt / clippy（含 wasm）/ test。
 

@@ -6,8 +6,7 @@ BOTS   ?= 8
 # Address put in connect tokens. Set this when using `make lan`, or other machines
 # are told to open the match on 127.0.0.1. `make lan` prints the value to use.
 PUBLIC_HOST ?=
-# Host port of the nginx HTTPS proxy (`make lan`). LAN_IP overrides detection.
-LAN_PORT ?= 8443
+# `make lan` binds this address. Empty detects a private LAN address.
 LAN_IP ?=
 
 CARGO_BINS := -p evoclash-server -p evoclash-matchmaker
@@ -26,9 +25,9 @@ run: web server
 dev: TRUNK_FLAGS :=
 dev: run
 
-## lan: nginx in Docker, HTTPS in front of the local matchmaker (run `make dev` as well)
+## lan: forward the matchmaker port onto this machine's LAN address (run `make dev` too)
 lan:
-	LISTEN='$(LISTEN)' LAN_PORT='$(LAN_PORT)' LAN_IP='$(LAN_IP)' "$(CURDIR)/scripts/lan-proxy.sh"
+	LISTEN='$(LISTEN)' LAN_IP='$(LAN_IP)' python3 -u "$(CURDIR)/scripts/lan-forward.py"
 
 ## web: build the browser client into target/web (needs `trunk`: cargo install trunk)
 web:
