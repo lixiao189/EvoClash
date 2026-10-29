@@ -80,9 +80,12 @@ const DROP_TTL_TICKS: u32 = 30 * TICKS_PER_SEC;
 pub(crate) const SPAWN_SHIELD_TICKS: u16 = (2.5 * TICKS_PER_SEC as f32) as u16;
 /// Killing someone whose gear is this many tiers above your weapon earns an extra point.
 const GIANT_SLAYER_GAP: u8 = 2;
-/// Upper bound on lag compensation (~220 ms) so high-ping players can't shoot far into the past.
-pub const MAX_REWIND_TICKS: u32 = 14;
+/// Upper bound on lag compensation (~375 ms) so high-ping players can't shoot far into the past.
+/// A synced client at 200 ms RTT needs ~17 ticks; the rest is headroom for jitter.
+pub const MAX_REWIND_TICKS: u32 = 24;
 const HISTORY_LEN: usize = 32;
+// `PosHistory::at` falls back to the oldest sample, so history must reach past the deepest rewind.
+const _: () = assert!((MAX_REWIND_TICKS as usize) < HISTORY_LEN);
 
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SimSet {
