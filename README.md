@@ -18,7 +18,8 @@ make run
 
 - `make watch`：另开一个终端，改客户端代码后自动重新构建，刷新页面即可。
 - `make dev` / `make watch-dev`：同上，但客户端用调试版构建（改代码后几秒就能重建，浏览器里运行较慢），日常调试用。
-- `make run LISTEN=127.0.0.1:9000`：换个端口（每局固定 8 人，机器人由服务器补满）。
+- `make dev LAN=1`（或 `make dev-lan`）：同上，并且局域网里的其他机器可以加入。本机仍打开 <http://127.0.0.1:8080>；其他机器打开终端里打印的 `https://<本机局域网 IP>:8443`，第一次要在浏览器里选择继续访问（自签证书）。浏览器不允许在 `http://192.168.x.x` 这种页面上使用 WebTransport，所以局域网必须走 HTTPS。对局地址自动用本机局域网 IP；探测不对时用 `PUBLIC_HOST=192.168.1.10`。HTTPS 端口用 `TLS_LISTEN=0.0.0.0:9443`（不能和 HTTP 同端口）。
+- `make run LISTEN=127.0.0.1:9000`：换个端口（每局固定 8 人，机器人由服务器补满）。`LAN=1` 时这个端口仍是本机的 HTTP 端口。
 - `make check`：本地跑一遍 CI 的 fmt / clippy（含 wasm）/ test。
 
 浏览器只允许 HTTPS 页面（`localhost` / `127.0.0.1` 除外）使用 WebTransport，所以局域网或公网上的玩家要通过 HTTPS 访问（见下文 Kubernetes 部署的 ingress）。

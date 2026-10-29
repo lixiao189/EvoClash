@@ -17,6 +17,7 @@
 //! replica can place players and the others keep working when one goes down.
 
 mod fleet;
+mod lan;
 mod recovery;
 mod registry;
 mod rooms;
@@ -159,6 +160,12 @@ where
             .extensions
             .get::<ConnectInfo<SocketAddr>>()
             .map(|info| info.0.ip().to_string())
+            .or_else(|| {
+                parts
+                    .extensions
+                    .get::<ConnectInfo<lan::PeerAddr>>()
+                    .map(|info| info.0.0.ip().to_string())
+            })
             .unwrap_or_else(|| "unknown".to_string());
         Ok(ClientIp(ip))
     }
@@ -615,31 +622,12 @@ fn apply_step(state: &AppState, fleet: &Fleet, step: recovery::Step) {
     }
 }
 
-/// Ctrl-C locally, SIGTERM from a container runtime or process manager.
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
-    #[cfg(unix)]
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut signal) => {
-                signal.recv().await;
-            }
-            Err(_) => std::future::pending().await,
-        }
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-    tokio::select! {
-        _ = ctrl_c => {}
-        _ = terminate => {}
-    }
-}
-
 struct Args {
     listen: SocketAddr,
-    public_host: IpAddr,
+    /// Set by `--public-host`. `None` stays 127.0.0.1 unless `--lan` detects one.
+    public_host: Option<IpAddr>,
+    lan: bool,
+    tls_listen: Option<SocketAddr>,
     ports: (u16, u16),
     max_matches: usize,
     max_players: u32,
@@ -655,7 +643,9 @@ struct Args {
 fn parse_args() -> Args {
     let mut args = Args {
         listen: net::DEFAULT_MATCHMAKER_ADDR.parse().unwrap(),
-        public_host: IpAddr::from([127, 0, 0, 1]),
+        public_host: None,
+        lan: false,
+        tls_listen: None,
         ports: (7000, 7099),
         max_matches: 16,
         max_players: ROOM_COMBATANTS.into(),
@@ -676,9 +666,15 @@ fn parse_args() -> Args {
         match arg.as_str() {
             "--listen" => args.listen = value("--listen").parse().expect("invalid --listen"),
             "--public-host" => {
-                args.public_host = value("--public-host")
-                    .parse()
-                    .expect("invalid --public-host")
+                args.public_host = Some(
+                    value("--public-host")
+                        .parse()
+                        .expect("invalid --public-host"),
+                )
+            }
+            "--lan" => args.lan = true,
+            "--tls-listen" => {
+                args.tls_listen = Some(value("--tls-listen").parse().expect("invalid --tls-listen"))
             }
             "--ports" => {
                 let v = value("--ports");
@@ -712,11 +708,16 @@ fn parse_args() -> Args {
                     "evoclash-matchmaker [--listen 127.0.0.1:8080] [--public-host 127.0.0.1] [--ports 7000-7099]\n\
                      \x20                   [--max-matches 16] [--max-players 8] [--bots 8]\n\
                      \x20                   [--server-bin PATH] [--log-dir logs] [--no-launch]\n\
-                     \x20                   [--warm-matches 0] [--peer URL[,URL...]] [--web-dir DIR]\n\n\
+                     \x20                   [--warm-matches 0] [--peer URL[,URL...]] [--web-dir DIR]\n\
+                     \x20                   [--lan] [--tls-listen 0.0.0.0:8443]\n\n\
                      --no-launch     only adopt servers that heartbeat in (external orchestrator)\n\
                      --warm-matches  empty matches kept running so joins never wait on a launch\n\
                      --peer          other matchmaker replicas; launched servers heartbeat to all\n\
-                     --web-dir       browser client to serve at /play/ (default: `web` next to this binary)"
+                     --web-dir       browser client to serve at /play/ (default: `web` next to this binary)\n\
+                     --lan           bind HTTP on every interface and serve HTTPS for other machines\n\
+                     --tls-listen    HTTPS address in --lan mode (default 0.0.0.0:8443)\n\
+                     --public-host   address clients use to reach matches (default 127.0.0.1, or the\n\
+                     \x20                 detected LAN address with --lan)"
                 );
                 std::process::exit(0);
             }
@@ -729,6 +730,14 @@ fn parse_args() -> Args {
 #[tokio::main]
 async fn main() {
     let args = parse_args();
+    let plan = lan::plan(
+        args.listen,
+        args.lan,
+        args.tls_listen,
+        args.public_host,
+        lan::detect_lan_ip,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
     let (key, dev_key) = net::private_key_from_env();
     if dev_key {
         eprintln!(
@@ -743,12 +752,12 @@ async fn main() {
         });
         Fleet::new(FleetConfig {
             server_bin,
-            public_host: args.public_host,
+            public_host: plan.public_host,
             ports: args.ports.0..=args.ports.1,
             max_matches: args.max_matches,
             max_players: args.max_players,
             bots: args.bots,
-            matchmaker_urls: std::iter::once(format!("http://{}", args.listen))
+            matchmaker_urls: std::iter::once(lan::loopback_base(plan.http))
                 .chain(args.peers.iter().cloned())
                 .collect(),
             log_dir: args.log_dir.clone(),
@@ -789,18 +798,5 @@ async fn main() {
         None => println!("no --web-dir: API only, the browser client is not served"),
     }
 
-    let listener = tokio::net::TcpListener::bind(args.listen)
-        .await
-        .unwrap_or_else(|e| panic!("bind {}: {e}", args.listen));
-    println!("matchmaker listening on http://{}", args.listen);
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(async {
-        shutdown_signal().await;
-        println!("shutting down; running matches keep going and will be re-adopted");
-    })
-    .await
-    .expect("server error");
+    lan::serve(app, plan.http, plan.tls, plan.public_host).await;
 }

@@ -3362,10 +3362,13 @@ dependencies = [
  "hmac",
  "lightyear",
  "rand 0.9.5",
+ "rcgen",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tokio",
+ "tokio-rustls",
  "tower-http",
 ]
 
