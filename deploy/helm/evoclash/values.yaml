@@ -67,14 +67,38 @@ server:
   monsters: true
   # ECS worker threads per match process; a match ticks in well under 1 ms of one core.
   threads: 1
-  containerPort: 7000
+  # UDP port of pod ordinal 0. Pod N binds basePort + N on its node's network (hostNetwork), so
+  # two matches on one node never share a port and clients reach a match by node IP and port.
+  # Open basePort .. basePort + replicas - 1 to players (WebTransport runs over UDP).
+  basePort: 7000
+  # IP written into connect tokens. Empty = the pod's status.hostIP (the node it runs on), which
+  # is right whenever nodes have public IPs. Set it when the node's public address differs from
+  # the internal one (NAT, a cloud load balancer in front): every match on every node then
+  # advertises this address. Not a hostname, and it must reach basePort+ordinal on that node.
+  publicHost: ""
+  # Static size when autoscaling is off.
+  replicas: 4
   # SIGTERM drains (finish the match, then exit): one 8-minute match plus warmup and intermission.
+  # A pod is a long-lived room that loops matches, so this only bounds a drain, not a restart.
   terminationGracePeriodSeconds: 540
-  # Agones health checking; the server only pings while its simulation ticks.
-  health:
-    initialDelaySeconds: 5
+  # Pods share the node's network, so no single probe port fits every pod: the probe runs the
+  # server binary against a health file the simulation refreshes while it ticks (--healthcheck).
+  livenessProbe:
+    exec:
+      command: ["/app/evoclash-server", "--healthcheck"]
+    initialDelaySeconds: 10
     periodSeconds: 5
     failureThreshold: 3
+  # Buffer autoscaling, done by the matchmaker through the StatefulSet's scale subresource
+  # (crates/matchmaker/src/scaler/): replicas = matches with players + bufferSize, clamped to
+  # min..max. Scale-down only removes empty, highest-ordinal pods; a player on the top pod holds
+  # it until their match ends. An idle pod is a warm room between matches, so joins never wait
+  # for a pod start.
+  autoscaler:
+    enabled: true
+    bufferSize: 3
+    minReplicas: 3
+    maxReplicas: 300
   extraArgs: []
   resources:
     requests: { cpu: 100m, memory: 64Mi }
@@ -84,22 +108,10 @@ server:
   tolerations: []
   affinity: {}
 
-fleet:
-  # Initial size; the FleetAutoscaler takes over when enabled.
-  replicas: 4
-  # Packed fills nodes before using new ones, so the cluster autoscaler can drain empty nodes.
-  scheduling: Packed
-  rollingUpdate: { maxSurge: 25%, maxUnavailable: 25% }
-  # Empty Ready servers kept on standby so joins never wait for a pod to schedule.
-  autoscaler:
-    enabled: true
-    bufferSize: 3
-    minReplicas: 3
-    maxReplicas: 300
-
-# One small pod, no Agones. The matchmaker launches match servers as child processes in the same
-# container; a namespace Ingress terminates HTTPS and one NodePort Service carries match UDP.
-# Off by default: the Fleet / HPA chart is unchanged. See deploy/sealos/.
+# One small pod, no match StatefulSet. The matchmaker launches match servers as child processes
+# in the same container; a namespace Ingress terminates HTTPS and one NodePort Service carries
+# match UDP. Off by default: the cluster chart (matchmaker Deployment + match StatefulSet) runs
+# when this is false. See deploy/sealos/.
 single:
   enabled: false
   # IP written into connect tokens. Required when enabled. Not a hostname.

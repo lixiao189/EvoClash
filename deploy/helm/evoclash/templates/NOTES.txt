@@ -1,17 +1,25 @@
 {{- if dig "enabled" false .Values.single }}
-EvoClash {{ .Chart.AppVersion }} (single pod, no Agones) is deploying to {{ .Release.Namespace }}.
+EvoClash {{ .Chart.AppVersion }} (single pod, no match StatefulSet) is deploying to {{ .Release.Namespace }}.
 
 Play: https://{{ .Values.single.nodePort.ingress.host }}/play/
 Players' WebTransport uses UDP NodePorts {{ .Values.single.ports }} on {{ .Values.single.publicHost }} directly.
 {{- else }}
 EvoClash {{ .Chart.AppVersion }} is deploying to namespace {{ .Release.Namespace }}.
 
-Agones must be installed and allowed to manage GameServers here, e.g.
-  helm upgrade agones agones/agones -n agones-system --reuse-values \
-    --set "gameservers.namespaces={ {{- .Release.Namespace -}} }"
+Matches are pods of the StatefulSet {{ include "evoclash.server" . }} (one match per pod). The
+matchmaker's leader replica keeps its size at "matches with players + buffer":
 
-Watch the match servers come up (Ready = warm spare, Allocated = match in progress):
-  kubectl -n {{ .Release.Namespace }} get fleet,gameservers
+  kubectl -n {{ .Release.Namespace }} get statefulset {{ include "evoclash.server" . }} -w
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/component=server
+
+{{- $max := ternary .Values.server.autoscaler.maxReplicas .Values.server.replicas .Values.server.autoscaler.enabled }}
+{{- $lastPort := add (int .Values.server.basePort) (int $max) | add -1 }}
+A pod's UDP port is {{ .Values.server.basePort }} + its ordinal, on the node it runs on, so open
+{{ .Values.server.basePort }}-{{ $lastPort }} to players (WebTransport runs over QUIC, i.e. UDP). Pods use the
+node network (hostNetwork), so the namespace must allow host networking and host ports.
+
+Players reach a match at the node's status.hostIP unless server.publicHost is set (do that when the
+node's public IP differs from the internal one).
 
 {{- if $.Values.matchmaker.ingress.enabled }}
 
@@ -24,7 +32,4 @@ Play in a browser:
 Browsers only allow WebTransport from an HTTPS page (localhost excepted), so players need
 matchmaker.ingress enabled with TLS; the plain-HTTP service alone is not playable.
 {{- end }}
-
-Match servers need the node UDP port range Agones allocates from (default 7000-8000) open to
-players (WebTransport runs over QUIC, i.e. UDP).
 {{- end }}

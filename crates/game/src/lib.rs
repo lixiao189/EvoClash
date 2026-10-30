@@ -97,6 +97,10 @@ pub mod api {
         pub match_id: String,
         pub client_id: u64,
         pub reconnect_key: String,
+        /// Goes into the new token. A live server keeps the seat's own name; a recovered one
+        /// that did not restore the seat has only this.
+        #[serde(default)]
+        pub name: String,
     }
 
     /// Periodic report from a match server; doubles as its liveness signal.

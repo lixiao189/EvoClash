@@ -90,6 +90,15 @@ pub struct MatchView {
     pub spectators: u32,
 }
 
+/// A match as the StatefulSet scaler sees it: whether anyone is in it, and whether it already
+/// stopped taking new players.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotView {
+    pub id: String,
+    pub in_use: bool,
+    pub draining: bool,
+}
+
 impl MatchInfo {
     pub fn new(id: String, addr: SocketAddr, max_players: u32) -> Self {
         Self {
@@ -149,7 +158,9 @@ impl MatchInfo {
     }
 
     fn open_for_quick_start(&self) -> bool {
-        !self.catching_up && !self.abandoned && self.phase != "recovering"
+        // `exiting` is the last heartbeat of a process that is on its way out: a seat there is a
+        // token for a match that is already over, and in a StatefulSet its pod is restarting.
+        !self.catching_up && !self.abandoned && !self.exiting && self.phase != "recovering"
     }
 
     fn joinable(&mut self, now: Instant) -> bool {
@@ -178,6 +189,17 @@ impl MatchInfo {
     fn idle(&mut self, now: Instant) -> bool {
         self.joinable(now) && self.players == 0 && self.reservations.is_empty()
     }
+
+    /// Someone is in the room or on the way. Bots are not people: a warm lobby no human has
+    /// entered yet is exactly what scale-down is allowed to reclaim.
+    fn in_use(&mut self, now: Instant) -> bool {
+        self.free_seats(now);
+        self.free_spec_seats(now);
+        self.humans > 0
+            || self.spectators > 0
+            || !self.reservations.is_empty()
+            || !self.spec_reservations.is_empty()
+    }
 }
 
 /// Seconds until this room is a lobby again. Playing adds the results screen.
@@ -187,6 +209,19 @@ fn spectate_wait(m: &MatchInfo) -> u32 {
         left.saturating_add(rooms::RESULTS_SECS)
     } else {
         left
+    }
+}
+
+/// Lower StatefulSet ordinal first, so a room on pod 2 is picked before one on pod 10: the
+/// highest ordinals are the ones scale-down can reclaim. Ordinals are compared as numbers
+/// (`server-10` is after `server-2`, not before it), and matches that are not StatefulSet pods
+/// sort last so they never outrank a reclaimable one.
+fn cmp_ordinal(a: Option<u32>, b: Option<u32>) -> std::cmp::Ordering {
+    match (a, b) {
+        (Some(x), Some(y)) => x.cmp(&y),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
     }
 }
 
@@ -203,12 +238,32 @@ fn cmp_time_left(a: Option<u32>, b: Option<u32>) -> std::cmp::Ordering {
 #[derive(Default)]
 pub struct Registry {
     pub matches: HashMap<String, MatchInfo>,
+    /// Set when the match servers are pods of a StatefulSet (`--k8s-scale`): lobby picking then
+    /// prefers the lowest ordinal, so the highest ones drain and can be scaled away.
+    statefulset: Option<String>,
     /// Room codes whose process is gone, kept so a lookup is "closed" rather than a fresh mint.
     released: HashMap<String, Instant>,
     attempts: rooms::Attempts,
 }
 
 impl Registry {
+    /// The match servers are pods of this StatefulSet (`--k8s-scale`), so their ordinals can
+    /// order lobby picking and the scaler's drain list.
+    pub fn set_statefulset(&mut self, statefulset: &str) {
+        self.statefulset = Some(statefulset.to_owned());
+    }
+
+    fn ordinal(&self, id: &str) -> Option<u32> {
+        crate::scaler::ordinal_of(id, self.statefulset.as_deref()?)
+    }
+
+    /// Ordinal per match id, so a sort closure does not borrow `self` while it indexes matches.
+    fn ordinals(&self, ids: &[String]) -> HashMap<String, Option<u32>> {
+        ids.iter()
+            .map(|id| (id.clone(), self.ordinal(id)))
+            .collect()
+    }
+
     /// Quick start. Open lobbies first (more humans, then more time left). If none are
     /// taking combatants, a public `spectate` room whose wait is at most two minutes,
     /// shortest wait first (time left, plus the results screen while the round is still on).
@@ -241,6 +296,7 @@ impl Registry {
 
     fn pick_lobby(&mut self, now: Instant) -> Option<String> {
         let mut ids: Vec<String> = self.matches.keys().cloned().collect();
+        let ordinals = self.ordinals(&ids);
         ids.sort_by(|a, b| {
             let (left_a, humans_a) = {
                 let m = &self.matches[a];
@@ -253,6 +309,7 @@ impl Registry {
             humans_b
                 .cmp(&humans_a)
                 .then_with(|| cmp_time_left(left_a, left_b))
+                .then_with(|| cmp_ordinal(ordinals[a], ordinals[b]))
                 .then_with(|| a.cmp(b))
         });
         ids.into_iter()
@@ -261,9 +318,13 @@ impl Registry {
 
     fn pick_spectate(&mut self, now: Instant, max_wait: Option<u32>) -> Option<String> {
         let mut ids: Vec<String> = self.matches.keys().cloned().collect();
+        let ordinals = self.ordinals(&ids);
         ids.sort_by(|a, b| {
             let wait = |id: &String| spectate_wait(&self.matches[id]);
-            wait(a).cmp(&wait(b)).then_with(|| a.cmp(b))
+            wait(a)
+                .cmp(&wait(b))
+                .then_with(|| cmp_ordinal(ordinals[a], ordinals[b]))
+                .then_with(|| a.cmp(b))
         });
         ids.into_iter().find(|id| {
             let within = max_wait.is_none_or(|cap| spectate_wait(&self.matches[id]) <= cap);
@@ -305,10 +366,11 @@ impl Registry {
     }
 
     /// Public rooms a human is in or about to be in. Empty warm servers are left out.
-    /// Order matches [`Self::pick_lobby`]: more humans, then more time left, then id.
+    /// Order matches [`Self::pick_lobby`]: more humans, then more time left, then ordinal, then id.
     pub fn room_list(&mut self) -> evoclash_game::api::RoomList {
         let now = Instant::now();
         let mut ids: Vec<String> = self.matches.keys().cloned().collect();
+        let ordinals = self.ordinals(&ids);
         ids.sort_by(|a, b| {
             let (left_a, humans_a) = {
                 let m = &self.matches[a];
@@ -321,6 +383,7 @@ impl Registry {
             humans_b
                 .cmp(&humans_a)
                 .then_with(|| cmp_time_left(left_a, left_b))
+                .then_with(|| cmp_ordinal(ordinals[a], ordinals[b]))
                 .then_with(|| a.cmp(b))
         });
         let mut rooms = Vec::new();
@@ -374,7 +437,8 @@ impl Registry {
     pub fn claim_idle_public(&mut self) -> Option<(String, SocketAddr)> {
         let now = Instant::now();
         let mut ids: Vec<String> = self.matches.keys().cloned().collect();
-        ids.sort();
+        let ordinals = self.ordinals(&ids);
+        ids.sort_by(|a, b| cmp_ordinal(ordinals[a], ordinals[b]).then_with(|| a.cmp(b)));
         let id = ids.into_iter().find(|id| {
             self.matches.get_mut(id).is_some_and(|m| {
                 m.spectators == 0
@@ -688,8 +752,14 @@ impl Registry {
         self.begin_crash(id)
     }
 
-    /// Heartbeat gap. A process already marked `exiting` is removed. Others crash.
-    pub fn poll_crashes(&mut self, now: Instant) -> Vec<recovery::Step> {
+    /// Heartbeat gap. A process already marked `exiting` is removed, and so is one we do not
+    /// `own`: an adopted server may still be running (frozen, or its last beat was lost), and a
+    /// `--recover` copy would run the same room twice. Owned ones crash.
+    pub fn poll_crashes(
+        &mut self,
+        now: Instant,
+        owns: impl Fn(&str) -> bool,
+    ) -> Vec<recovery::Step> {
         let ids: Vec<String> = self.matches.keys().cloned().collect();
         let mut steps = Vec::new();
         for id in ids {
@@ -703,7 +773,7 @@ impl Registry {
             if abandoned || healthy {
                 continue;
             }
-            if exiting {
+            if exiting || !owns(&id) {
                 self.forget(&id);
                 steps.push(recovery::Step::Dropped(id));
                 continue;
@@ -808,6 +878,47 @@ impl Registry {
 
     pub fn used_addrs(&self) -> Vec<SocketAddr> {
         self.matches.values().map(|m| m.addr).collect()
+    }
+
+    /// Every match, for the StatefulSet scaler: who is in it and whether it is on its way out.
+    pub fn scaler_slots(&mut self) -> Vec<SlotView> {
+        let now = Instant::now();
+        let slots: Vec<SlotView> = self
+            .matches
+            .values_mut()
+            .map(|m| {
+                let in_use = m.in_use(now);
+                SlotView {
+                    id: m.id.clone(),
+                    in_use,
+                    draining: m.draining,
+                }
+            })
+            .collect();
+        // Ordinal order, so the scaler's drain list runs lowest pod to highest, numerically.
+        let mut keyed: Vec<(Option<u32>, SlotView)> = slots
+            .into_iter()
+            .map(|slot| (self.ordinal(&slot.id), slot))
+            .collect();
+        keyed.sort_by(|(left_ord, left), (right_ord, right)| {
+            cmp_ordinal(*left_ord, *right_ord).then_with(|| left.id.cmp(&right.id))
+        });
+        keyed.into_iter().map(|(_, slot)| slot).collect()
+    }
+
+    /// Stop handing new players to these matches: their pods are about to be scaled away.
+    /// Returns how many entries changed.
+    pub fn drain_matches(&mut self, ids: &[String]) -> usize {
+        let mut changed = 0;
+        for id in ids {
+            if let Some(m) = self.matches.get_mut(id)
+                && !m.draining
+            {
+                m.draining = true;
+                changed += 1;
+            }
+        }
+        changed
     }
 }
 

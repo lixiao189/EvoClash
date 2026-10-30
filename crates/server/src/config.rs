@@ -5,6 +5,34 @@ use bevy::prelude::*;
 use evoclash_game::net::DEFAULT_GAME_PORT;
 use evoclash_game::protocol::ROOM_COMBATANTS;
 
+/// `--fault-drop-every` interval in milliseconds, 0 when off.
+///
+/// A debug hook for reconnect testing without a browser: it cuts one human link per interval so
+/// the drop/grace/rejoin path can be exercised with `scripts/fault-inject`. Release builds accept
+/// the flag and ignore it; the system that reads this is compiled out too.
+#[cfg(debug_assertions)]
+static FAULT_DROP_EVERY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(debug_assertions)]
+fn set_fault_drop_every(secs: f32) {
+    FAULT_DROP_EVERY_MS.store(
+        (secs.max(0.2) * 1000.0) as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+#[cfg(not(debug_assertions))]
+fn set_fault_drop_every(secs: f32) {
+    eprintln!("--fault-drop-every {secs} ignored: debug builds only");
+}
+
+/// How often to force a human link down, when `--fault-drop-every` asked for it.
+#[cfg(debug_assertions)]
+pub fn fault_drop_every() -> Option<std::time::Duration> {
+    let ms = FAULT_DROP_EVERY_MS.load(std::sync::atomic::Ordering::Relaxed);
+    (ms > 0).then(|| std::time::Duration::from_millis(ms))
+}
+
 #[derive(Resource, Clone, Debug)]
 pub struct ServerConfig {
     /// UDP port (WebTransport over QUIC) to bind on all interfaces.
@@ -21,15 +49,17 @@ pub struct ServerConfig {
     /// Matchmaker base URLs for heartbeats, e.g. `http://127.0.0.1:8080`. Every replica gets
     /// its own heartbeat, so any of them can place players here and survive the others failing.
     pub matchmakers: Vec<String>,
-    /// Exit after one match ends (orchestrated mode: the fleet starts a fresh process).
+    /// Exit after one match ends instead of looping rooms. A StatefulSet pod leaves this off:
+    /// exiting every match would run into the kubelet's restart backoff and starve the warm pool.
     pub single_match: bool,
     /// Spawn wandering monsters and spore pods.
     pub monsters: bool,
     /// Worker threads for the ECS task pools. A match ticks in well under a millisecond, so one
     /// thread is plenty and keeps many match processes per host from oversubscribing the cores.
     pub threads: usize,
-    /// Run as an Agones GameServer: identity and public address come from the SDK sidecar.
-    pub agones: bool,
+    /// Run as one pod of a Kubernetes StatefulSet (`--statefulset`): pod name, ordinal, port and
+    /// public address come from the environment, and the health file feeds the exec probe.
+    pub statefulset: bool,
     /// Fixed for the life of this process. Every round's map seed is `mix(room_seed, match_index)`.
     pub room_seed: u64,
     /// Friends-only room. The countdown waits for the host, and quick start will not offer it.
@@ -60,6 +90,8 @@ pub enum Launch {
     Serve(ServerConfig),
     Replay(std::path::PathBuf),
     Headless(HeadlessOpts),
+    /// `--healthcheck`: the liveness exec probe, which never starts a match.
+    Healthcheck(std::path::PathBuf),
 }
 
 /// The one OS random draw: the startup seed when `--room-seed` is omitted.
@@ -79,7 +111,8 @@ impl ServerConfig {
         let mut single_match = false;
         let mut monsters = true;
         let mut threads = 1;
-        let mut agones = false;
+        let mut statefulset = false;
+        let mut healthcheck = false;
         let mut room_seed = None;
         let mut private = false;
         let mut room_code = String::new();
@@ -127,7 +160,11 @@ impl ServerConfig {
                 ),
                 "--single-match" => single_match = true,
                 "--no-monsters" => monsters = false,
-                "--agones" => agones = true,
+                // The room loops matches like a local fleet; only a crash, certificate
+                // retirement or SIGTERM ends the process (a per-match exit would restart the
+                // container into the kubelet's backoff and starve the warm pool).
+                "--statefulset" => statefulset = true,
+                "--healthcheck" => healthcheck = true,
                 "--threads" => {
                     threads = value("--threads")
                         .parse::<usize>()
@@ -142,6 +179,11 @@ impl ServerConfig {
                 "--log-dir" => log_dir = PathBuf::from(value("--log-dir")),
                 "--replay" => replay = Some(PathBuf::from(value("--replay"))),
                 "--recover" => recover = true,
+                "--fault-drop-every" => set_fault_drop_every(
+                    value("--fault-drop-every")
+                        .parse()
+                        .expect("invalid --fault-drop-every"),
+                ),
                 "--headless" => headless = true,
                 "--seeds" => seeds = Some(crate::headless::parse_seeds(&value("--seeds"))),
                 "--report" => report = Some(PathBuf::from(value("--report"))),
@@ -158,9 +200,11 @@ impl ServerConfig {
                     println!(
                         "evoclash-server [--port 7000] [--public-addr 127.0.0.1:7000] [--match-id ID]\n\
                          \x20               [--max-players 8] [--bots 8] [--matchmaker URL[,URL...]] [--single-match]\n\
-                         \x20               [--no-monsters] [--threads 1] [--agones] [--room-seed U64]\n\
+                         \x20               [--no-monsters] [--threads 1] [--statefulset] [--room-seed U64]\n\
                          \x20               [--private] [--room-code CODE] [--log-dir logs] [--replay FILE] [--recover]\n\
-                         \x20               [--headless --seeds 0..200 --report out.json] [--jobs N] [--skills high:1,default:7]\n\n\
+                         \x20               [--fault-drop-every SECS] [--headless --seeds 0..200 --report out.json] [--jobs N] [--skills high:1,default:7]\n\n\
+                         --fault-drop-every disconnect one human link this often (debug builds only,\n\
+                         \x20                 for reconnect tests; ignored in release)\n\
                          --bots N          keep at least N combatants in the arena by adding bots (0 disables)\n\
                          --room-seed       fixed seed for this room; omitted once, from the OS\n\
                          --private         friends-only room; the host starts the match\n\
@@ -175,7 +219,13 @@ impl ServerConfig {
                          --skills          aim/reaction mix, assigned by ascending client id; default is all default\n\
                          --matchmaker      heartbeat to every listed matchmaker, and to every address\n\
                          \x20                 a hostname resolves to (a headless Service reaches all pods)\n\
-                         --agones          run as an Agones GameServer (implies --single-match)\n\
+                         --statefulset     run as one StatefulSet pod: match id, UDP port and public\n\
+                         \x20                 address come from HOSTNAME, EVOCLASH_BASE_PORT (default 7000)\n\
+                         \x20                 and EVOCLASH_NODE_IP / POD_IP, or EVOCLASH_PUBLIC_HOST when the\n\
+                         \x20                 node's public IP differs; the room loops matches like a\n\
+                         \x20                 local fleet (no --single-match)\n\
+                         --healthcheck     liveness probe: exit 0 while the simulation ticks (reads\n\
+                         \x20                 EVOCLASH_HEALTH_FILE, default /tmp/evoclash-health)\n\
                          SIGTERM / Ctrl-C  drain: finish the current match, then exit (twice: exit now)"
                     );
                     std::process::exit(0);
@@ -184,6 +234,9 @@ impl ServerConfig {
             }
         }
 
+        if healthcheck {
+            return Launch::Healthcheck(crate::k8s::health_file());
+        }
         if headless {
             if replay.is_some() {
                 panic!("--headless and --replay cannot be combined");
@@ -216,7 +269,7 @@ impl ServerConfig {
             single_match,
             monsters,
             threads,
-            agones,
+            statefulset,
             room_seed: room_seed.unwrap_or_else(startup_seed),
             private,
             room_code,

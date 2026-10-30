@@ -389,7 +389,7 @@ fn blank_config(header: &Header) -> ServerConfig {
         single_match: false,
         monsters: header.settings.monsters,
         threads: 1,
-        agones: false,
+        statefulset: false,
         room_seed: header.room_seed,
         private: header.settings.private_room,
         room_code: header.settings.code.clone(),

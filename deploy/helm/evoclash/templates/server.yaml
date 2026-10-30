@@ -1,0 +1,145 @@
+{{- /* single mode launches match servers in-process; no StatefulSet. */ -}}
+{{- if not (dig "enabled" false .Values.single) }}
+{{- $srv := .Values.server }}
+{{- $name := include "evoclash.server" . }}
+# One room per pod, on the node's network. Lifecycle (crates/server/src/k8s.rs):
+#   start   the pod binds UDP basePort+<ordinal>; the matchmaker adopts it via its heartbeat
+#   match   the room loops matches (results, then a fresh lobby) like a local fleet room, so an
+#           idle pod is the warm pool and never restarts between matches. A crash restarts the
+#           container in place under the same pod name, with a new match id.
+#   exit    SIGTERM drains (finish the match, then exit); an empty pod exits immediately
+# The matchmaker's scaler (crates/matchmaker/src/scaler/) keeps `replicas` at
+# "matches with players + buffer" and only ever removes empty, highest-ordinal pods.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "evoclash.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  serviceName: {{ $name }}
+  # Fill (or drain) the warm pool in one pass instead of one pod per ordinal.
+  podManagementPolicy: Parallel
+  {{- if .Values.server.autoscaler.enabled }}
+  # The matchmaker rewrites this within seconds of an upgrade.
+  replicas: {{ .Values.server.autoscaler.minReplicas }}
+  {{- else }}
+  replicas: {{ $srv.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "evoclash.selectorLabels" (dict "root" . "component" "server") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "evoclash.commonLabels" . | nindent 8 }}
+        {{- include "evoclash.selectorLabels" (dict "root" . "component" "server") | nindent 8 }}
+      {{- with $srv.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      # Each pod owns the node's UDP port basePort+ordinal, so pods on one node never collide and
+      # clients reach a match by node IP and port. Pods of the set are numbered, which is what
+      # makes a fixed port per pod possible.
+      hostNetwork: true
+      # hostNetwork pods otherwise use the node's resolver, and the matchmaker Service is in-cluster.
+      dnsPolicy: ClusterFirstWithHostNet
+      terminationGracePeriodSeconds: {{ $srv.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: evoclash-server
+          image: {{ include "evoclash.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/app/evoclash-server"]
+          args:
+            # Identity (match id, UDP port, public address) comes from the environment below.
+            - --statefulset
+            - --matchmaker
+            - http://{{ include "evoclash.heartbeat" . }}:8080
+            - --max-players
+            - {{ $srv.maxPlayers | quote }}
+            - --bots
+            - {{ $srv.bots | quote }}
+            - --threads
+            - {{ $srv.threads | quote }}
+            - --log-dir
+            - /tmp/logs
+            {{- if not $srv.monsters }}
+            - --no-monsters
+            {{- end }}
+            {{- range $srv.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            {{- include "evoclash.keyEnv" . | nindent 12 }}
+            - name: EVOCLASH_BASE_PORT
+              value: {{ $srv.basePort | quote }}
+            # status.hostIP is the node IP: with hostNetwork it is also the pod IP, and it is
+            # what clients dial unless server.publicHost overrides it.
+            - name: EVOCLASH_NODE_IP
+              valueFrom:
+                fieldRef: { fieldPath: status.hostIP }
+            {{- if $srv.publicHost }}
+            - name: EVOCLASH_PUBLIC_HOST
+              value: {{ $srv.publicHost | quote }}
+            {{- end }}
+            - name: EVOCLASH_HEALTH_FILE
+              value: /tmp/evoclash-health
+          ports:
+            # Informational: the real port is basePort+ordinal, which no containerPort can name.
+            - name: game
+              containerPort: {{ $srv.basePort }}
+              protocol: UDP
+          # Pods share the node's network, so no fixed probe port fits every pod: the probe runs
+          # the server binary against a health file only a ticking simulation refreshes.
+          livenessProbe:
+            {{- toYaml $srv.livenessProbe | nindent 12 }}
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+          resources:
+            {{- toYaml $srv.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with $srv.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $srv.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $srv.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+# `spec.serviceName` needs a Service, and per-pod DNS is handy when debugging a match.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "evoclash.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  clusterIP: None
+  # A pod that is still starting must be reachable, and visible to the matchmaker's heartbeat.
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "evoclash.selectorLabels" (dict "root" . "component" "server") | nindent 4 }}
+  ports:
+    - name: game
+      port: {{ $srv.basePort }}
+      targetPort: {{ $srv.basePort }}
+      protocol: UDP
+{{- end }}

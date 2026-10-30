@@ -34,6 +34,8 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      # Holds the scaler's Lease and rewrites the match StatefulSet's replica count (rbac.yaml).
+      serviceAccountName: {{ include "evoclash.serviceAccount" . }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       # Spread replicas over nodes and zones so one outage leaves the rest running.
@@ -51,16 +53,34 @@ spec:
           image: {{ include "evoclash.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/app/evoclash-matchmaker"]
-          # Agones owns the match server pods; the matchmaker only adopts them via heartbeats.
+          # Match servers are StatefulSet pods; the matchmaker only adopts them via heartbeats
+          # and, as the Lease holder, keeps the replica count at "matches in use + buffer".
           args:
             - --listen
             - 0.0.0.0:8080
             - --no-launch
+            {{- if .Values.server.autoscaler.enabled }}
+            - --k8s-scale
+            - {{ include "evoclash.server" . }}
+            - --buffer
+            - {{ .Values.server.autoscaler.bufferSize | quote }}
+            - --min
+            - {{ .Values.server.autoscaler.minReplicas | quote }}
+            - --max
+            - {{ .Values.server.autoscaler.maxReplicas | quote }}
+            {{- end }}
             {{- range $mm.extraArgs }}
             - {{ . | quote }}
             {{- end }}
           env:
             {{- include "evoclash.keyEnv" . | nindent 12 }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef: { fieldPath: metadata.namespace }
+            # Lease holder identity: the replica that scales the fleet.
+            - name: HOSTNAME
+              valueFrom:
+                fieldRef: { fieldPath: metadata.name }
           ports:
             - { name: http, containerPort: 8080, protocol: TCP }
           readinessProbe:

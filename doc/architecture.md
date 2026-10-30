@@ -4,13 +4,13 @@ Rust · Bevy 0.20（客户端只在浏览器里跑，目标 `wasm32`）· lighty
 
 ```
         网页 + HTTPS/JSON                 WebTransport / QUIC（netcode.io，加密 + 认证）
- 浏览器 ───────────────▶ 匹配服务 ──签发令牌──▶ 浏览器 ═══════════════▶ 对局进程（一局一个）
+ 浏览器 ───────────────▶ 匹配服务 ──签发令牌──▶ 浏览器 ═══════════════▶ 对局进程（一个房间一个）
                           ▲   │ 拉起/回收                                      │
                           │   └──────────────▶ evoclash-server                 │
                           └──────────── 每 2 秒心跳（人数、阶段、tick 耗时）◀──┘
 ```
 
-本地 `fleet` 拉起的对局进程不要带 `--single-match`。Agones 上仍是一个 Pod 一局，由运行时强制 `--single-match`。
+本地 `fleet` 拉起的对局进程不要带 `--single-match`（一局打完回到大厅继续下一局）。集群里也一样：`--statefulset` 的 Pod 就是一个长期房间，打完回大厅继续下一局；只有崩溃、证书到期退役或 SIGTERM 才让进程退出（每局退出会撞上 kubelet 的重启退避，热池会枯竭）。
 
 | crate | 包名 | 职责 |
 |---|---|---|
@@ -105,18 +105,18 @@ Rust · Bevy 0.20（客户端只在浏览器里跑，目标 `wasm32`）· lighty
 
 ## 高并发
 
-- 一局一个进程，固定 8 名战斗者。debug 构建里满编 8 个战斗者加满野怪时 tick 平均约 0.5 毫秒（`/v1/matches` 的 `tick_us`；旧配置实测，当时 8 人为上限），大约是 15.6 毫秒预算的 3%。墙和视线走网格，地图变大不会让每个 tick 变慢。
+- 一个房间一个进程（集群里一个 Pod），固定 8 名战斗者。debug 构建里满编 8 个战斗者加满野怪时 tick 平均约 0.5 毫秒（`/v1/matches` 的 `tick_us`；旧配置实测，当时 8 人为上限），大约是 15.6 毫秒预算的 3%。墙和视线走网格，地图变大不会让每个 tick 变慢。
 - 容量等于进程数。匹配服务优先把人放进最满的局。满员（8/8）或正在排空的局不再分配。席位预留防止同时加入时超卖。
 - 局与局不共享状态。
 - `--threads` 默认 1。
-- 预热池：`--warm-matches`（默认 0：本地不常备空房，房间由玩家创建或快速开始拉起）个空局。Kubernetes 上由 Agones FleetAutoscaler 的 buffer 负责。
+- 预热池：`--warm-matches`（默认 0：本地不常备空房，房间由玩家创建或快速开始拉起）个空局。集群里由匹配服务的扩缩器把 StatefulSet 副本数保持在「有人的局数 + buffer」，空 Pod 就是预热池。
 - tick 平均超过约 9.4 毫秒（预算的 60%）的局不再接收新人。
 
 ## 高可用
 
 下面是现在已经做到的。
 
-- **对局进程崩溃**：本地 `fleet` 上自动恢复，见下一节。Agones 上不恢复，只影响这一局。
+- **对局进程崩溃**：本地 `fleet` 上自动恢复，见下一节。集群里不恢复（Pod 里没有卷），StatefulSet 把容器重启成一个新的空局，只影响这一局。
 - **匹配服务重启**：对局进程不是它的子进程（`kill_on_drop(false)`），不受影响。新实例靠心跳在大约 2 秒内重新认领。重连密钥是 HMAC，不需要会话存储。注册表本身在内存里，重启会丢掉「正在恢复」这种还没落盘的状态。
 - **玩家断线**：角色保留 20 秒，装备和分数都在。客户端退避重连，用重连密钥换新令牌，接回原来的角色。
 - **多副本**：`--peer` 列出其他副本，新局向每一个发心跳。每个副本都有完整视图，都能分配。席位预留互不共享，偶尔超卖时由服务器的 netcode 人数上限（8 名战斗者 + 4 名旁观者 = 12）兜底，被拒的客户端会换一局。
@@ -136,16 +136,34 @@ Rust · Bevy 0.20（客户端只在浏览器里跑，目标 `wasm32`）· lighty
 
 ## Kubernetes
 
-Chart 在 `deploy/helm/evoclash`。匹配服务是 Deployment，带 `--no-launch`，只靠心跳认领对局。对局是 Agones Fleet。`server/src/agones.rs` 通过 sidecar 的 REST 做 Ready、Health、自己 Allocate 和 Shutdown。
+Chart 在 `deploy/helm/evoclash`，只用 Kubernetes 原生对象。匹配服务是 Deployment，带 `--no-launch`，只靠心跳认领对局。对局是 StatefulSet，一个 Pod 一个长期房间（一局接一局）。
 
 | 组件 | 资源 | 要点 |
 |---|---|---|
 | 匹配服务 | Deployment（3 副本，HPA 3–10）+ LoadBalancer | 打散到不同节点，PDB 至少留 2 个，滚动更新不停服 |
 | 心跳 | headless Service `evoclash-matchmaker-heartbeat` | DNS 返回每个匹配 Pod，对局向每一个发心跳 |
-| 对局 | Fleet，一局一个 Pod，动态 UDP 端口 | 不报健康就被换掉；SIGTERM 时打完再退 |
-| 预热 | FleetAutoscaler，Buffer 3 | 常备 Ready 的空局 |
+| 对局 | StatefulSet，一个 Pod 一个房间，`hostNetwork`，UDP 端口 = `basePort + ordinal` | livenessProbe 用 `--healthcheck` 读心跳文件，模拟不 tick 就被重启；SIGTERM 时打完再退；房间打完回大厅，空房间就是热池 |
+| 扩缩 | 匹配服务调 `statefulsets/<name>/scale`，Lease 选主 | 副本数 = 有人的局数 + buffer，夹在 min..max；只缩空的最高 ordinal |
 
-Pod 崩溃后 `logs/` 会跟着消失，新 Pod 也不一定在同一节点。所以集群里不做崩溃恢复：那需要 ReadWriteMany 的卷，并且不能靠匹配服务给固定的 Fleet 参数追加 `--recover`。
+### StatefulSet 身份与健康（`server/src/k8s.rs`）
+
+- **身份**：`HOSTNAME` 就是 Pod 名 `<statefulset>-<ordinal>`，ordinal 取最后一段；UDP 端口 = `EVOCLASH_BASE_PORT + ordinal`（默认 7000 起）。`hostNetwork` 让每个 Pod 直接占宿主机的这个端口，同节点多局天然不冲突，所以 Pod 的序号就是它的端口。
+- **公网地址**：downward API 注入 `EVOCLASH_NODE_IP`（`status.hostIP`），写进连接令牌；节点外网 IP 与之不同时用 `EVOCLASH_PUBLIC_HOST`（chart 的 `server.publicHost`）覆盖。
+- **match_id**：`<pod>-<启动后缀>`，每次进程启动都不同。房间跨局循环，所以正常运行时 id 不变；崩溃后 StatefulSet 用同一个 Pod 名重启容器，若沿用旧 match_id，新进程会继承注册表里上一份进程的条目（席位预留、房间码，甚至是让心跳被忽略的 `abandoned` 标记）。旧条目在心跳中断 6 秒后被回收。
+- **空房间不退出**：本地 fleet 的房间没人 30 秒就退出、由 fleet 重新拉起；StatefulSet 里空房间就是热池，只有 SIGTERM 排空才结束它。
+- **健康**：一个线程只在 tick 前进时刷新 `/tmp/evoclash-health`（先写临时文件再 rename）；livenessProbe 跑 `/app/evoclash-server --healthcheck`，戳记超过 10 秒就返回 1。用 exec probe 而不是 HTTP，是因为 `hostNetwork` 下没有哪个固定端口能同时属于所有 Pod。
+
+### 扩缩（`matchmaker/src/scaler.rs`）
+
+匹配服务用 ServiceAccount token + `ca.crt` 直接 HTTPS 调 API server（`ureq`，放在 `spawn_blocking` 里），`coordination.k8s.io/v1` 的 Lease 选主（holderIdentity = 匹配 Pod 名，15 秒过期，每 5 秒续约），只有 leader 干活：
+
+- 目标副本数 = 有真人/旁观者/席位预留的局数 + `buffer`，夹在 `min..max`。只有机器人没有人的空局算空闲，可以被缩掉。
+- 快速开始和房间列表的排序在「人数、剩余时间」之后按 ordinal 数字升序（`server-2` 在 `server-10` 前面），先把玩家压到低 ordinal 的房间，高 ordinal 才好空出来缩容；`scaler_slots` 返回的缩容清单也按 ordinal 升序。
+- 扩容直接 PATCH `spec.replicas`。
+- 缩容先给要砍的 ordinal（≥ 目标值、< 当前值）在注册表里标 `draining`，这些局立刻不再分配新玩家；下一个 tick 再 PATCH 副本数。因为 StatefulSet 先删最高 ordinal，所以副本数不会降到「最高有人的 ordinal + 1」以下——最高 ordinal 有人在打就等这一局结束。
+- 刚选上 leader 的 20 秒内不缩容：心跳还没收全时，空注册表不能当成空集群。
+
+Pod 崩溃后 `logs/` 会跟着消失，新 Pod 也不一定在同一节点。所以集群里不做崩溃恢复：那需要 ReadWriteMany 的卷，并且不能靠匹配服务给固定的 Pod 参数追加 `--recover`。
 
 ## 发布
 

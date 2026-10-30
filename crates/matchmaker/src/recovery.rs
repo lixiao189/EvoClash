@@ -30,6 +30,8 @@ pub struct Launch {
 pub enum Step {
     None,
     Dropped(String),
+    /// Crash recovery. The caller must stop the old process first (`Fleet::stop`, which waits for
+    /// it to exit): a heartbeat timeout does not prove it is gone.
     Relaunch(Launch),
     Abandoned(String),
 }
@@ -132,7 +134,7 @@ mod tests {
             m.exiting = true;
             m.last_heartbeat = Some(Instant::now() - Duration::from_secs(7));
         }
-        let steps = reg.poll_crashes(Instant::now());
+        let steps = reg.poll_crashes(Instant::now(), |_| true);
         assert!(matches!(steps.as_slice(), [Step::Dropped(_)]));
         assert!(!reg.matches.contains_key("gap"));
     }
@@ -151,11 +153,23 @@ mod tests {
         reg.heartbeat(&beat("a"));
         reg.matches.get_mut("a").unwrap().last_heartbeat =
             Some(Instant::now() - Duration::from_secs(6));
-        let steps = reg.poll_crashes(Instant::now());
+        let steps = reg.poll_crashes(Instant::now(), |_| true);
         assert!(matches!(steps.as_slice(), [Step::Relaunch(_)]));
         assert!(reg.matches["a"].catching_up);
         // Still inside the startup grace: do not count the same outage twice.
-        assert!(reg.poll_crashes(Instant::now()).is_empty());
+        assert!(reg.poll_crashes(Instant::now(), |_| true).is_empty());
+    }
+
+    #[test]
+    fn an_adopted_match_that_goes_quiet_is_dropped_not_recovered() {
+        // Adopted after a matchmaker restart: no child to kill, so it may still be running.
+        let mut reg = Registry::default();
+        reg.heartbeat(&beat("adopted"));
+        reg.matches.get_mut("adopted").unwrap().last_heartbeat =
+            Some(Instant::now() - Duration::from_secs(7));
+        let steps = reg.poll_crashes(Instant::now(), |_| false);
+        assert!(matches!(steps.as_slice(), [Step::Dropped(_)]));
+        assert!(!reg.matches.contains_key("adopted"));
     }
 
     #[test]
