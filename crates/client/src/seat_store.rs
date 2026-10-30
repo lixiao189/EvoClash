@@ -19,6 +19,9 @@ pub(crate) struct StoredSeat {
     pub(crate) match_id: String,
     pub(crate) client_id: u64,
     pub(crate) reconnect_key: String,
+    /// Private room code, so a reload of a `?room=` page can tell it is the same room.
+    #[serde(default)]
+    pub(crate) room_code: Option<String>,
 }
 
 #[cfg(target_family = "wasm")]

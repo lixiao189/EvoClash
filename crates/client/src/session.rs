@@ -348,6 +348,8 @@ struct Seat {
     client_id: u64,
     token: Vec<u8>,
     reconnect_key: String,
+    /// Private room code, if this seat is in one. A reload of a `?room=` page matches on it.
+    room_code: Option<String>,
 }
 
 impl Seat {
@@ -365,6 +367,7 @@ impl Seat {
             client_id: response.client_id,
             token,
             reconnect_key: response.reconnect_key,
+            room_code: response.room_code,
         })
     }
 }
@@ -384,6 +387,7 @@ fn stored_seat() -> Option<Seat> {
         client_id: stored.client_id,
         token: Vec::new(),
         reconnect_key: stored.reconnect_key,
+        room_code: stored.room_code,
     })
 }
 
@@ -668,9 +672,16 @@ fn spawn_client(commands: &mut Commands, seat: &Seat, args: &ClientArgs) -> Resu
 
 fn connect(mut session: ResMut<Session>, args: Res<ClientArgs>, time: Res<Time>) {
     // A reload keeps the seat: the tab remembers its reconnect key, so 刷新 rejoins the match it
-    // was in instead of queueing for a new one. A page that names a room or match wants that.
-    let page_seat = args.match_id.is_none() && args.room.is_none() && !args.create_room;
-    if page_seat && let Some(seat) = stored_seat() {
+    // was in (gear and all) instead of joining again as a new body. The URL still carries how
+    // the tab got in (`?match=`, `?room=`, `?create=1`); the seat wins whenever it is that place.
+    if let Some(seat) = stored_seat().filter(|seat| {
+        reload_keeps_seat(
+            args.match_id.as_deref(),
+            args.room.as_deref(),
+            &seat.match_id,
+            seat.room_code.as_deref(),
+        )
+    }) {
         info!(
             "rejoining {} as client {} after a reload",
             seat.match_id, seat.client_id
@@ -680,6 +691,21 @@ fn connect(mut session: ResMut<Session>, args: Res<ClientArgs>, time: Res<Time>)
         return;
     }
     session.dispatch(&args, time.elapsed_secs());
+}
+
+/// Whether a reload of this page should rejoin the stored seat. A page naming another match or
+/// room code means the player went somewhere else; `?create=1` names nothing, so the room the
+/// tab created (its stored seat) is the one to go back to instead of creating another.
+fn reload_keeps_seat(
+    page_match: Option<&str>,
+    page_room: Option<&str>,
+    seat_match: &str,
+    seat_room: Option<&str>,
+) -> bool {
+    let same_match = page_match.is_none_or(|id| id == seat_match);
+    let same_room =
+        page_room.is_none_or(|code| seat_room.is_some_and(|seat| seat.eq_ignore_ascii_case(code)));
+    same_match && same_room
 }
 
 /// `run_once` is checked even on frames where `assets_ready` is false, and that burns it.
@@ -1217,6 +1243,7 @@ fn watch_connection(
                         match_id: seat.match_id.clone(),
                         client_id: seat.client_id,
                         reconnect_key: seat.reconnect_key.clone(),
+                        room_code: seat.room_code.clone(),
                     });
                 }
             }
@@ -1881,6 +1908,19 @@ mod tests {
         assert!(reconnect_budget(false) < reconnect_budget(true));
         assert!(!reconnect_exhausted(25.0, false));
         assert!(reconnect_exhausted(FIRST_JOIN_BUDGET_SECS, false));
+    }
+
+    #[test]
+    fn a_reload_rejoins_the_seat_the_page_was_in() {
+        // Quick start and 创建房间 (`?create=1`) name no place: the stored seat is it.
+        assert!(reload_keeps_seat(None, None, "m1", None));
+        // Joined from the room list (`?match=`) or by code (`?room=`): same place, same seat.
+        assert!(reload_keeps_seat(Some("m1"), None, "m1", None));
+        assert!(reload_keeps_seat(None, Some("abcd"), "m1", Some("ABCD")));
+        // The page now names somewhere else: join that instead.
+        assert!(!reload_keeps_seat(Some("m2"), None, "m1", None));
+        assert!(!reload_keeps_seat(None, Some("WXYZ"), "m1", Some("ABCD")));
+        assert!(!reload_keeps_seat(None, Some("ABCD"), "m1", None));
     }
 
     #[test]
