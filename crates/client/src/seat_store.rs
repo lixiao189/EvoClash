@@ -58,6 +58,47 @@ pub(crate) fn save(seat: &StoredSeat) {
 #[cfg(not(target_family = "wasm"))]
 pub(crate) fn save(_seat: &StoredSeat) {}
 
+/// The query a created room's page should carry once it exists: `create` gives way to the
+/// room it made (`room=CODE` for a private room, `match=ID` for a public one), so a reload or a
+/// shared link goes back to it instead of creating another.
+pub(crate) fn created_query(query: &str, match_id: &str, room_code: Option<&str>) -> String {
+    let mut pairs: Vec<(String, String)> = query
+        .trim_start_matches('?')
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .filter_map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (!matches!(key, "create" | "private" | "room" | "match"))
+                .then(|| (key.to_string(), value.to_string()))
+        })
+        .collect();
+    match room_code {
+        Some(code) => pairs.push(("room".into(), code.to_string())),
+        None => pairs.push(("match".into(), match_id.to_string())),
+    }
+    let joined: Vec<String> = pairs.into_iter().map(|(k, v)| format!("{k}={v}")).collect();
+    format!("?{}", joined.join("&"))
+}
+
+/// Rewrite the address bar in place (no reload, no history entry) after 创建房间 succeeds.
+#[cfg(target_family = "wasm")]
+pub(crate) fn settle_created_url(match_id: &str, room_code: Option<&str>) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Ok(search) = window.location().search() else {
+        return;
+    };
+    let url = created_query(&search, match_id, room_code);
+    if let Ok(history) = window.history() {
+        let _ =
+            history.replace_state_with_url(&web_sys::wasm_bindgen::JsValue::NULL, "", Some(&url));
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn settle_created_url(_match_id: &str, _room_code: Option<&str>) {}
+
 /// Forget the seat: the match is gone, or the player left it on purpose.
 #[cfg(target_family = "wasm")]
 pub(crate) fn clear() {
@@ -68,3 +109,27 @@ pub(crate) fn clear() {
 
 #[cfg(not(target_family = "wasm"))]
 pub(crate) fn clear() {}
+
+#[cfg(test)]
+mod tests {
+    use super::created_query;
+
+    #[test]
+    fn a_created_room_page_names_the_room_it_made() {
+        // Private: the code, which is also the link to share.
+        assert_eq!(
+            created_query("?name=Ann&create=1&private=1", "m1", Some("ABCD")),
+            "?name=Ann&room=ABCD"
+        );
+        // Public: the match id, the same thing a room-list click puts there.
+        assert_eq!(
+            created_query("?name=Ann&create=1", "m1", None),
+            "?name=Ann&match=m1"
+        );
+        // Other parameters (debug `lag`, `fault`) stay; a stale room/match is replaced.
+        assert_eq!(
+            created_query("?name=Ann&lag=80&create=1&match=old", "m1", None),
+            "?name=Ann&lag=80&match=m1"
+        );
+    }
+}

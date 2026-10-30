@@ -1245,6 +1245,12 @@ fn watch_connection(
                         reconnect_key: seat.reconnect_key.clone(),
                         room_code: seat.room_code.clone(),
                     });
+                    if args.create_room {
+                        crate::seat_store::settle_created_url(
+                            &seat.match_id,
+                            seat.room_code.as_deref(),
+                        );
+                    }
                 }
             }
             Err(e) => {
