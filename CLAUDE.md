@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-EvoClash is a top-down 2D multiplayer shooter set in a post-apocalyptic wasteland (Rust, Bevy 0.20, lightyear 0.31 over WebTransport/netcode.io, axum matchmaker). The client runs only in the browser (wasm32). Every room fields exactly 8 combatants — humans first, bots fill the rest — in an 8-minute match won by the highest final score (kills, then fewer deaths, then whoever reached their score first break ties; there is no point target), and rooms loop match after match. Gameplay rules are in `doc/gameplay.md` and architecture in `doc/architecture.md`. README.md (in Chinese) keeps the quick start, deploy commands and release process.
+EvoClash is a top-down 2D multiplayer shooter set in a post-apocalyptic wasteland (Rust, Bevy 0.20, lightyear 0.31 over WebTransport/netcode.io, axum matchmaker). The client runs only in the browser (wasm32). Every room fields exactly 8 combatants — humans first, bots fill the rest — in an 8-minute match won by the highest final score (kills, then fewer deaths, then whoever reached their score first break ties; there is no point target), and rooms loop match after match. Gameplay rules are in `doc/gameplay.md` and architecture in `doc/architecture.md`. README.md (in Chinese) is a short landing page (quick start, links); deploy commands are in `doc/deployment.md` and the release process in `doc/architecture.md`.
 
 ## Git workflow (required)
 
