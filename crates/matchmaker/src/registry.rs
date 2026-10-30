@@ -51,6 +51,9 @@ pub struct MatchInfo {
     pub exiting: bool,
     /// Fast-forward in progress, or the replacement process has not heartbeated ready yet.
     pub catching_up: bool,
+    /// `--no-launch` only: when this adopted entry went quiet and started waiting for its pod to
+    /// come back. `None` while it heartbeats.
+    pub restarting_since: Option<Instant>,
     /// Log rejected or the room crashed too many times. Rejoin is 410.
     pub abandoned: bool,
     /// How many replacement processes have been launched. The third crash abandons.
@@ -61,6 +64,15 @@ pub struct MatchInfo {
 
 /// Quick start will not spectate a round whose wait (time left plus results) exceeds this.
 pub const QUICK_SPECTATE_MAX_SECS: u32 = 120;
+
+/// Outcome of [`Registry::poll_restarts`].
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RestartPoll {
+    /// Entries that just went quiet and now wait for their pod.
+    pub restarting: Vec<String>,
+    /// Entries that never came back inside the grace, or exited on purpose.
+    pub reaped: Vec<String>,
+}
 
 /// What `POST /v1/join` should do with an optional `match_id`.
 #[derive(Debug)]
@@ -126,6 +138,7 @@ impl MatchInfo {
             join_mode: "lobby".into(),
             exiting: false,
             catching_up: false,
+            restarting_since: None,
             abandoned: false,
             recoveries: 0,
             spec_reservations: Vec::new(),
@@ -503,6 +516,8 @@ impl Registry {
         entry.join_mode = beat.join_mode.clone();
         entry.exiting = beat.exiting;
         entry.last_heartbeat = Some(now);
+        // A pod that came back (or never left) is not waiting for a restart any more.
+        entry.restarting_since = None;
         if entry.catching_up {
             // The replacement process bound a new port.
             if let Ok(addr) = beat.public_addr.parse() {
@@ -515,20 +530,48 @@ impl Registry {
         entry.draining
     }
 
-    /// Forget matches that stopped heartbeating. Returns their ids.
-    /// A private code is held so the next lookup is "closed", not a new room.
-    pub fn reap(&mut self) -> Vec<String> {
-        let now = Instant::now();
-        let dead: Vec<String> = self
-            .matches
-            .values()
-            .filter(|m| !m.healthy(now))
-            .map(|m| m.id.clone())
-            .collect();
-        for id in &dead {
-            self.forget_at(id, now);
+    /// `--no-launch` (cluster) housekeeping: an adopted match that stops heartbeating is a pod
+    /// restarting, and it comes back under the same match id after replaying its journal. Hold
+    /// the entry in `recovering` (rejoin 503 with `retry_after`, quick start and the room list
+    /// skip it) until a heartbeat arrives or [`recovery::POD_RESTART_GRACE`] runs out.
+    ///
+    /// A process that said `exiting` is on its way out for good: dropped at once, and a private
+    /// code is held so the next lookup is "closed", not a new room.
+    pub fn poll_restarts(&mut self, now: Instant) -> RestartPoll {
+        let mut poll = RestartPoll::default();
+        let ids: Vec<String> = self.matches.keys().cloned().collect();
+        for id in ids {
+            let Some(m) = self.matches.get(&id) else {
+                continue;
+            };
+            if m.abandoned || m.healthy(now) {
+                continue;
+            }
+            if m.exiting {
+                self.forget_at(&id, now);
+                poll.reaped.push(id);
+                continue;
+            }
+            match m.restarting_since {
+                None => poll.restarting.push(id.clone()),
+                Some(since) if now.duration_since(since) >= recovery::POD_RESTART_GRACE => {
+                    self.forget_at(&id, now);
+                    poll.reaped.push(id);
+                    continue;
+                }
+                Some(_) => continue,
+            }
+            if let Some(m) = self.matches.get_mut(&id) {
+                m.restarting_since = Some(now);
+                m.catching_up = true;
+                m.phase = "recovering".into();
+                m.join_mode = "none".into();
+                m.phase_left_secs = None;
+                m.accepting = false;
+                m.cert_digest = None;
+            }
         }
-        dead
+        poll
     }
 
     /// Drop one match and hold its room code. Missing ids are fine (already reaped).
@@ -836,7 +879,12 @@ impl Registry {
         if m.abandoned {
             return recovery::RejoinGate::Abandoned;
         }
-        if m.catching_up || !m.healthy(Instant::now()) {
+        // `catchup_done` covers the fast restart the registry never saw go quiet: the pod is
+        // already heartbeating `recovering` with no phase clock, i.e. still replaying.
+        if m.catching_up
+            || !recovery::catchup_done(&m.phase, m.phase_left_secs)
+            || !m.healthy(Instant::now())
+        {
             return recovery::RejoinGate::Recovering;
         }
         recovery::RejoinGate::Ready
@@ -1249,6 +1297,22 @@ mod tests {
             None,
             "no lobby and no watcher seat: open a room"
         );
+    }
+
+    #[test]
+    fn at_the_room_cap_quick_start_spectates_or_reports_busy() {
+        // Every room is in a match, so there is no lobby to join: a watcher seat is all quick
+        // start can take. `--no-launch` (cluster) has nothing to launch, so once the watcher
+        // seats are gone the caller answers 503 instead of opening a room.
+        let mut reg = Registry::default();
+        reg.heartbeat(&spectate_room("busy", "playing", 60, 0));
+        for _ in 0..MAX_SPECTATORS {
+            let (id, _, spectate) = reg.reserve_seat().unwrap();
+            assert_eq!(id, "busy");
+            assert!(spectate);
+        }
+        assert!(reg.reserve_seat().is_none(), "no lobby and no watcher seat");
+        assert!(reg.reserve_any_spectate().is_none());
     }
 
     #[test]

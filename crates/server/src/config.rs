@@ -58,7 +58,8 @@ pub struct ServerConfig {
     /// thread is plenty and keeps many match processes per host from oversubscribing the cores.
     pub threads: usize,
     /// Run as one pod of a Kubernetes StatefulSet (`--statefulset`): pod name, ordinal, port and
-    /// public address come from the environment, and the health file feeds the exec probe.
+    /// public address come from the environment, the health file feeds the exec probe, and a
+    /// container restart resumes the room in `log_dir` instead of opening a new one.
     pub statefulset: bool,
     /// Fixed for the life of this process. Every round's map seed is `mix(room_seed, match_index)`.
     pub room_seed: u64,
@@ -223,7 +224,9 @@ impl ServerConfig {
                          \x20                 address come from HOSTNAME, EVOCLASH_BASE_PORT (default 7000)\n\
                          \x20                 and EVOCLASH_NODE_IP / POD_IP, or EVOCLASH_PUBLIC_HOST when the\n\
                          \x20                 node's public IP differs; the room loops matches like a\n\
-                         \x20                 local fleet (no --single-match)\n\
+                         \x20                 local fleet (no --single-match); a container restart\n\
+                         \x20                 resumes the room in --log-dir (same match id and seed, as\n\
+                         \x20                 with --recover; the third crash opens a new room)\n\
                          --healthcheck     liveness probe: exit 0 while the simulation ticks (reads\n\
                          \x20                 EVOCLASH_HEALTH_FILE, default /tmp/evoclash-health)\n\
                          SIGTERM / Ctrl-C  drain: finish the current match, then exit (twice: exit now)"

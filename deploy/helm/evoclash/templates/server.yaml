@@ -2,12 +2,23 @@
 {{- if not (dig "enabled" false .Values.single) }}
 {{- $srv := .Values.server }}
 {{- $name := include "evoclash.server" . }}
+{{- /* One pod is one room, so the pod count can never exceed the room cap. */}}
+{{- if gt (int $srv.autoscaler.minReplicas) (int $srv.maxRooms) }}
+{{- fail (printf "server.autoscaler.minReplicas (%v) is above server.maxRooms (%v)" $srv.autoscaler.minReplicas $srv.maxRooms) }}
+{{- end }}
+{{- if and (not $srv.autoscaler.enabled) (gt (int $srv.replicas) (int $srv.maxRooms)) }}
+{{- fail (printf "server.replicas (%v) is above server.maxRooms (%v); one pod is one room" $srv.replicas $srv.maxRooms) }}
+{{- end }}
+{{- $journal := $srv.journal.persistence }}
 # One room per pod, on the node's network. Lifecycle (crates/server/src/k8s.rs):
 #   start   the pod binds UDP basePort+<ordinal>; the matchmaker adopts it via its heartbeat
 #   match   the room loops matches (results, then a fresh lobby) like a local fleet room, so an
-#           idle pod is the warm pool and never restarts between matches. A crash restarts the
-#           container in place under the same pod name, with a new match id.
-#   exit    SIGTERM drains (finish the match, then exit); an empty pod exits immediately
+#           idle pod is the warm pool and never restarts between matches.
+#   crash   the container restarts in place under the same pod name and resumes the room from the
+#           journal on its own volume: same match id, address and port, so players rejoin it.
+#           After two recoveries the room is void and the pod opens a new one.
+#   exit    SIGTERM drains (finish the match, then exit) and closes the journal, so a later
+#           container start opens a new room instead of resuming a drained one.
 # The matchmaker's scaler (crates/matchmaker/src/scaler/) keeps `replicas` at
 # "matches with players + buffer" and only ever removes empty, highest-ordinal pods.
 apiVersion: apps/v1
@@ -53,6 +64,9 @@ spec:
       {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+        # The image runs as distroless `nonroot` (65532) and a fresh PVC is root-owned, so the
+        # kubelet hands the journal volume to that group.
+        fsGroup: 65532
       containers:
         - name: evoclash-server
           image: {{ include "evoclash.image" . }}
@@ -70,7 +84,7 @@ spec:
             - --threads
             - {{ $srv.threads | quote }}
             - --log-dir
-            - /tmp/logs
+            - /var/lib/evoclash
             {{- if not $srv.monsters }}
             - --no-monsters
             {{- end }}
@@ -103,6 +117,7 @@ spec:
             {{- toYaml $srv.livenessProbe | nindent 12 }}
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
+            - { name: journal, mountPath: /var/lib/evoclash }
           resources:
             {{- toYaml $srv.resources | nindent 12 }}
           securityContext:
@@ -110,6 +125,11 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if not $journal.enabled }}
+        # Persistence off: the journal survives a container restart in this pod and nothing else.
+        - name: journal
+          emptyDir: {}
+        {{- end }}
       {{- with $srv.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -122,6 +142,29 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+  {{- if $journal.enabled }}
+  # One claim per pod (`journal-<statefulset>-<ordinal>`), holding the room journal that a
+  # restarted container resumes from.
+  volumeClaimTemplates:
+    - metadata:
+        name: journal
+        labels:
+          {{- include "evoclash.labels" . | nindent 10 }}
+          app.kubernetes.io/component: server
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with $journal.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $journal.size | quote }}
+  {{- end }}
+  # A pod's room lives on its claim, so the claim goes when the pod does: scaling down must not
+  # leave a volume (and its journal) behind for the next pod of the same ordinal.
+  persistentVolumeClaimRetentionPolicy:
+    whenScaled: Delete
+    whenDeleted: Delete
 ---
 # `spec.serviceName` needs a Service, and per-pod DNS is handy when debugging a match.
 apiVersion: v1

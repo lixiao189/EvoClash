@@ -6,11 +6,12 @@
 //!   another pod of the set on the same node, and the address clients dial is `status.hostIP`
 //!   (downward API) or `EVOCLASH_PUBLIC_HOST` when the node's public IP differs from its
 //!   internal one.
-//! - **match id**: `<pod>-<suffix>` with a suffix drawn once per process start. The room loops
-//!   matches, so a pod keeps its id while it is healthy; after a crash the StatefulSet restarts
-//!   the container under the same pod name, and the matchmaker must not hand the new process the
-//!   dead one's registry entry (seats, private room code, an `abandoned` flag that would make it
-//!   ignore heartbeats forever).
+//! - **match id**: `<pod>-<suffix>`, drawn when the pod has no room to resume. The room loops
+//!   matches, so a pod keeps its id while it is healthy. After a crash the StatefulSet restarts
+//!   the container under the same pod name, and the process resumes the room from the journal on
+//!   its own volume (same match id, same seed, same address and port) instead of opening a new
+//!   one; see [`start_from_journal`]. Only after [`MAX_RECOVERIES`] crashes does it start a new
+//!   room, and a room that exited on purpose (drain, certificate retirement) is never resumed.
 //! - **liveness**: a thread stamps a health file only while the simulation ticks, and the
 //!   `--healthcheck` exec probe fails when the stamp is old. The probe runs this same binary
 //!   because the runtime image has no shell. It is an exec probe rather than an HTTP one
@@ -116,6 +117,80 @@ fn public_host() -> Result<IpAddr, String> {
     Err(format!(
         "no public address: set {PUBLIC_HOST_ENV}, {NODE_IP_ENV} (downward API status.hostIP) or {POD_IP_ENV}"
     ))
+}
+
+/// A StatefulSet pod resumes the room on its volume at most this many times, then opens a new
+/// one (gameplay.md: the third crash voids the room). Mirrors `MAX_RECOVERIES` in
+/// `crates/matchmaker/src/recovery.rs`, which counts for a local fleet; a pod has no matchmaker
+/// child to count for it, so the count lives on the volume.
+pub const MAX_RECOVERIES: u8 = 2;
+/// Counter file on the journal volume: `<match id> <recoveries>`.
+const RECOVERIES_FILE: &str = "recoveries";
+
+/// What `--statefulset` should do with the journal it finds on its volume.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Start {
+    /// Nothing to resume: open a new room under a new match id and delete the old logs.
+    Fresh,
+    /// Crash recovery: resume this room, same match id and seed, like `--recover`.
+    Resume { match_id: String, room_seed: u64 },
+}
+
+/// The whole startup decision, from the journal directory alone, so it is testable without a
+/// cluster. A resumed room keeps the pod's address and port (`basePort + ordinal`); only the
+/// process changed.
+pub fn start_from_journal(dir: &Path) -> Start {
+    let Some(head) = crate::journal::unfinished(dir) else {
+        crate::journal::clear(dir);
+        clear_recoveries(dir);
+        return Start::Fresh;
+    };
+    let done = recoveries(dir, &head.match_id);
+    if done >= MAX_RECOVERIES {
+        println!(
+            "match {} crashed {} times; opening a new room",
+            head.match_id,
+            done + 1
+        );
+        crate::journal::clear(dir);
+        clear_recoveries(dir);
+        return Start::Fresh;
+    }
+    write_recoveries(dir, &head.match_id, done + 1);
+    Start::Resume {
+        match_id: head.match_id,
+        room_seed: head.room_seed,
+    }
+}
+
+/// Replacement processes this volume has already seen for `match_id`.
+fn recoveries(dir: &Path, match_id: &str) -> u8 {
+    let Ok(text) = std::fs::read_to_string(dir.join(RECOVERIES_FILE)) else {
+        return 0;
+    };
+    let mut parts = text.split_whitespace();
+    let (Some(id), Some(count)) = (parts.next(), parts.next()) else {
+        return 0;
+    };
+    if id != match_id {
+        return 0;
+    }
+    count.parse().unwrap_or(0)
+}
+
+/// A volume that cannot hold this file cannot hold a room log either, so failing to write is
+/// worth a warning, not a reason to refuse to start.
+fn write_recoveries(dir: &Path, match_id: &str, count: u8) {
+    let path = dir.join(RECOVERIES_FILE);
+    if let Err(e) = std::fs::create_dir_all(dir)
+        .and_then(|()| std::fs::write(&path, format!("{match_id} {count}\n")))
+    {
+        warn!("cannot write {}: {e}", path.display());
+    }
+}
+
+fn clear_recoveries(dir: &Path) {
+    let _ = std::fs::remove_file(dir.join(RECOVERIES_FILE));
 }
 
 pub fn health_file() -> PathBuf {
@@ -262,6 +337,76 @@ mod tests {
         assert_eq!(healthcheck(&path), 0);
         std::fs::write(&path, "not a number").unwrap();
         assert_eq!(healthcheck(&path), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A scratch journal directory, wiped before and after the test.
+    fn journal_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("evoclash-journal-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Room log with one snapshot line, as the journal writes it.
+    fn write_room(dir: &Path, match_id: &str, seed: u64) {
+        std::fs::write(
+            dir.join(format!("room-{match_id}.log")),
+            format!(
+                "EVOCLASH room v1\nroom_seed={seed} code=- private=0 bots=8 monsters=1 host=0 match_index=0 phase=playing paused=0\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn an_unfinished_journal_resumes_the_same_match_and_a_finished_one_starts_fresh() {
+        let dir = journal_dir("resume");
+        assert_eq!(start_from_journal(&dir), Start::Fresh);
+
+        write_room(&dir, "evoclash-server-0-00ab12", 4242);
+        assert_eq!(
+            start_from_journal(&dir),
+            Start::Resume {
+                match_id: "evoclash-server-0-00ab12".into(),
+                room_seed: 4242,
+            }
+        );
+
+        // A process that exited on purpose marks the log: the next start opens a new room and
+        // the old logs go away.
+        crate::journal::mark_finished(&dir, "evoclash-server-0-00ab12");
+        assert_eq!(start_from_journal(&dir), Start::Fresh);
+        assert!(!dir.join("room-evoclash-server-0-00ab12.log").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_third_crash_opens_a_new_room() {
+        let dir = journal_dir("crashes");
+        write_room(&dir, "pod-0-abc", 7);
+        assert!(matches!(start_from_journal(&dir), Start::Resume { .. }));
+        assert_eq!(recoveries(&dir, "pod-0-abc"), 1);
+        assert!(matches!(start_from_journal(&dir), Start::Resume { .. }));
+        assert_eq!(recoveries(&dir, "pod-0-abc"), 2);
+
+        // Third crash: the room is void. A new room, and the counter and logs are gone.
+        assert_eq!(start_from_journal(&dir), Start::Fresh);
+        assert!(!dir.join("room-pod-0-abc.log").exists());
+        assert_eq!(recoveries(&dir, "pod-0-abc"), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_finished_log_and_a_stale_counter_start_fresh() {
+        let dir = journal_dir("stale");
+        // Log from an older room, already closed, next to a counter for it.
+        write_room(&dir, "pod-0-old", 3);
+        crate::journal::mark_finished(&dir, "pod-0-old");
+        write_recoveries(&dir, "pod-0-old", 2);
+        assert_eq!(start_from_journal(&dir), Start::Fresh);
+        assert_eq!(recoveries(&dir, "pod-0-old"), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -34,6 +34,7 @@ mod parse;
 mod record;
 mod recover;
 mod replay;
+mod room;
 #[cfg(test)]
 mod tests;
 
@@ -41,6 +42,7 @@ pub use format::*;
 use parse::*;
 pub use record::*;
 pub use replay::*;
+pub use room::*;
 
 /// Sealed logs older than a match length times two are deleted.
 pub const RETAIN_SECS: u64 = 16 * 60;

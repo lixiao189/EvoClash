@@ -12,11 +12,14 @@ matchmaker's leader replica keeps its size at "matches with players + buffer":
   kubectl -n {{ .Release.Namespace }} get statefulset {{ include "evoclash.server" . }} -w
   kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/component=server
 
-{{- $max := ternary .Values.server.autoscaler.maxReplicas .Values.server.replicas .Values.server.autoscaler.enabled }}
-{{- $lastPort := add (int .Values.server.basePort) (int $max) | add -1 }}
-A pod's UDP port is {{ .Values.server.basePort }} + its ordinal, on the node it runs on, so open
+{{- $lastPort := add (int .Values.server.basePort) (int .Values.server.maxRooms) | add -1 }}
+A pod's UDP port is {{ .Values.server.basePort }} + its ordinal, on the node it runs on, and there is at
+most one pod per room (server.maxRooms = {{ .Values.server.maxRooms }}), so open
 {{ .Values.server.basePort }}-{{ $lastPort }} to players (WebTransport runs over QUIC, i.e. UDP). Pods use the
 node network (hostNetwork), so the namespace must allow host networking and host ports.
+
+A restarted pod resumes the room on its PersistentVolumeClaim (same match id, address and port);
+players rejoin and the room replays its journal. Claims are deleted with their pod.
 
 Players reach a match at the node's status.hostIP unless server.publicHost is set (do that when the
 node's public IP differs from the internal one).

@@ -53,19 +53,48 @@ fn main() {
     };
     // `--replay` is taken before this config exists; the field stays for the shared struct.
     debug_assert!(config.replay.is_none());
-    if config.recover {
-        info!("recovering match {}", config.match_id);
-    }
     if config.statefulset {
         let id = k8s::identity_from_env().unwrap_or_else(|e| panic!("--statefulset: {e}"));
-        // println, not info: the logger is not installed yet at this point.
-        println!(
-            "statefulset pod {} (ordinal {}) → match {} on {}",
-            id.pod, id.ordinal, id.match_id, id.public_addr
-        );
-        config.match_id = id.match_id;
         config.port = id.port;
         config.public_addr = id.public_addr;
+        // The journal on this pod's volume decides: resume the room it holds (a crash restart)
+        // or open a new one. Either way the pod keeps its address and port.
+        match k8s::start_from_journal(&config.log_dir) {
+            k8s::Start::Resume {
+                match_id,
+                room_seed,
+            } => {
+                config.match_id = match_id;
+                config.room_seed = room_seed;
+                config.recover = true;
+                // println, not info: the logger is not installed yet at this point.
+                println!(
+                    "statefulset pod {} (ordinal {}) → resuming match {} on {} from {}",
+                    id.pod,
+                    id.ordinal,
+                    config.match_id,
+                    id.public_addr,
+                    config.log_dir.display()
+                );
+            }
+            k8s::Start::Fresh => {
+                // The journal has the last word in this mode, even over an explicit `--recover`:
+                // a fresh room has no log to resume.
+                config.recover = false;
+                config.match_id = id.match_id.clone();
+                println!(
+                    "statefulset pod {} (ordinal {}) → match {} on {}",
+                    id.pod, id.ordinal, config.match_id, id.public_addr
+                );
+            }
+        }
+    }
+    // A graceful exit closes the room log so the next container start does not resume a room
+    // that was drained on purpose.
+    let journal_dir = config.log_dir.clone();
+    let journal_id = config.match_id.clone();
+    if config.recover {
+        info!("recovering match {}", config.match_id);
     }
 
     let mut app = App::new();
@@ -108,5 +137,9 @@ fn main() {
         app.add_plugins(k8s::K8sPlugin::from_env());
     }
     let exit = app.run();
+    drop(app);
+    if exit.is_success() {
+        journal::mark_finished(&journal_dir, &journal_id);
+    }
     std::process::exit(if exit.is_success() { 0 } else { 1 });
 }

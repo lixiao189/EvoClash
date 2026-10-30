@@ -1,10 +1,22 @@
-//! Crash detection for the local fleet: when to relaunch with `--recover`, and when to give up.
+//! Crash detection: when to relaunch a local fleet room with `--recover`, when to give up, and
+//! (cluster, `--no-launch`) how long to wait for a restarted pod before dropping its entry.
 //!
 //! A room is relaunched at most twice. The third crash, or a server that exits
 //! [`ABANDON_EXIT`] because the log does not match, closes the room.
 
+use std::time::Duration;
+
 /// Replacement processes already launched. The next crash gives up.
 pub const MAX_RECOVERIES: u8 = 2;
+/// `--no-launch` (cluster): how long an adopted match may stay silent before it is dropped.
+///
+/// A crashed StatefulSet pod comes back under the same match id and address: the kubelet
+/// restarts the container (a few seconds), the process replays its journal (the server's
+/// catch-up gives itself 30s), then heartbeats `recovering` with a clock. 90 seconds covers a
+/// restart plus a full catch-up with room to spare, and still reaps a room whose pod was deleted
+/// (scale-down, eviction to another node without its volume) soon enough that a player is told
+/// "gone" instead of waiting forever.
+pub const POD_RESTART_GRACE: Duration = Duration::from_secs(90);
 /// `evoclash-server --recover` exits with this when the log cannot be trusted.
 pub const ABANDON_EXIT: i32 = 2;
 /// Clients retry `/v1/rejoin` after this many seconds while catch-up is still running.
@@ -206,6 +218,101 @@ mod tests {
         ));
         assert_eq!(reg.matches["bad"].recoveries, 0);
         assert!(matches!(reg.rejoin_gate("bad"), RejoinGate::Abandoned));
+    }
+
+    #[test]
+    fn an_adopted_match_waits_for_its_pod_instead_of_being_dropped() {
+        let mut reg = Registry::default();
+        reg.heartbeat(&beat("pod"));
+        reg.matches.get_mut("pod").unwrap().last_heartbeat =
+            Some(Instant::now() - Duration::from_secs(7));
+        let now = Instant::now();
+        let poll = reg.poll_restarts(now);
+        assert_eq!(poll.restarting, ["pod"]);
+        assert!(poll.reaped.is_empty());
+        assert!(reg.matches["pod"].catching_up);
+        assert_eq!(reg.matches["pod"].phase, "recovering");
+        assert!(matches!(reg.rejoin_gate("pod"), RejoinGate::Recovering));
+        assert!(reg.reserve_seat().is_none(), "quick start skips it");
+        // Inside the grace it stays put, even though it is not heartbeating.
+        assert!(
+            reg.poll_restarts(now + POD_RESTART_GRACE - Duration::from_secs(1))
+                .reaped
+                .is_empty()
+        );
+        assert!(reg.matches.contains_key("pod"));
+
+        // The pod comes back under the same id: new address and certificate, still catching up.
+        let mut mid = beat("pod");
+        mid.public_addr = "127.0.0.1:7001".into();
+        mid.cert_digest = "cd".into();
+        mid.phase = "recovering".into();
+        mid.join_mode = "none".into();
+        mid.phase_left_secs = None;
+        reg.heartbeat(&mid);
+        assert!(matches!(reg.rejoin_gate("pod"), RejoinGate::Recovering));
+        mid.phase_left_secs = Some(240);
+        reg.heartbeat(&mid);
+        assert!(!reg.matches["pod"].catching_up);
+        assert!(reg.matches["pod"].restarting_since.is_none());
+        assert!(matches!(reg.rejoin_gate("pod"), RejoinGate::Ready));
+        assert_eq!(reg.matches["pod"].addr.port(), 7001);
+        assert_eq!(reg.matches["pod"].cert_digest.as_deref(), Some("cd"));
+    }
+
+    #[test]
+    fn a_pod_that_never_comes_back_is_reaped_after_the_grace() {
+        let mut reg = Registry::default();
+        reg.heartbeat(&private("room", "ABCD"));
+        reg.matches.get_mut("room").unwrap().last_heartbeat =
+            Some(Instant::now() - Duration::from_secs(7));
+        let now = Instant::now();
+        reg.poll_restarts(now);
+        assert!(matches!(reg.rejoin_gate("room"), RejoinGate::Recovering));
+
+        let poll = reg.poll_restarts(now + POD_RESTART_GRACE);
+        assert_eq!(poll.reaped, ["room"]);
+        assert!(reg.matches.is_empty());
+        assert!(matches!(reg.rejoin_gate("room"), RejoinGate::Gone));
+        // The code stays held: the room is closed, not a fresh one.
+        assert_eq!(
+            reg.lookup_room("ABCD", "1.1.1.1", Instant::now())
+                .unwrap_err()
+                .status,
+            410
+        );
+    }
+
+    #[test]
+    fn a_pod_that_said_exiting_is_dropped_at_once() {
+        let mut reg = Registry::default();
+        reg.heartbeat(&beat("bye"));
+        {
+            let m = reg.matches.get_mut("bye").unwrap();
+            m.exiting = true;
+            m.last_heartbeat = Some(Instant::now() - Duration::from_secs(7));
+        }
+        let poll = reg.poll_restarts(Instant::now());
+        assert_eq!(poll.reaped, ["bye"]);
+        assert!(poll.restarting.is_empty());
+        assert!(reg.matches.is_empty());
+    }
+
+    #[test]
+    fn a_restart_too_quick_to_see_is_still_recovering_until_the_replay_ends() {
+        // The pod came back inside the 6s heartbeat timeout, so the registry never saw a gap:
+        // only the heartbeat's `recovering` phase without a clock says the replay is running.
+        let mut reg = Registry::default();
+        reg.heartbeat(&beat("quick"));
+        let mut mid = beat("quick");
+        mid.phase = "recovering".into();
+        mid.join_mode = "none".into();
+        mid.phase_left_secs = None;
+        reg.heartbeat(&mid);
+        assert!(matches!(reg.rejoin_gate("quick"), RejoinGate::Recovering));
+        mid.phase_left_secs = Some(240);
+        reg.heartbeat(&mid);
+        assert!(matches!(reg.rejoin_gate("quick"), RejoinGate::Ready));
     }
 
     #[test]

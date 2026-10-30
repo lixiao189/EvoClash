@@ -587,11 +587,19 @@ async fn janitor(state: Shared) {
             }
         } else {
             // Adopt-only (`--no-launch`): the servers are pods or external processes, so there is
-            // no child to kill and nothing to relaunch. A missed heartbeat just drops the entry,
-            // exactly as before: cluster recovery is the orchestrator's job, not ours.
-            let dead = state.registry.lock().expect("registry lock").reap();
-            for id in dead {
-                println!("match {id} stopped heartbeating; removed");
+            // no child to kill and nothing to relaunch. A missed heartbeat is a pod restarting:
+            // hold the entry in `recovering` (rejoin 503, quick start skips it) until the pod
+            // comes back under the same match id and catches up, or the grace runs out.
+            let poll = state
+                .registry
+                .lock()
+                .expect("registry lock")
+                .poll_restarts(Instant::now());
+            for id in poll.restarting {
+                println!("match {id} stopped heartbeating; waiting for its pod to come back");
+            }
+            for id in poll.reaped {
+                println!("match {id} did not come back; removed");
             }
         }
     }
