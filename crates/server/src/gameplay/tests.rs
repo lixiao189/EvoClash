@@ -406,7 +406,7 @@ fn server_config() -> ServerConfig {
         single_match: false,
         monsters: false,
         threads: 1,
-        agones: false,
+        statefulset: false,
         room_seed: 1,
         private: false,
         room_code: String::new(),
@@ -1777,11 +1777,15 @@ fn monster_and_wasteland_kills_do_not_pay_the_finale_bonus() {
 }
 
 fn room_closes_after(phase: Phase, watcher: bool) -> bool {
+    room_closes_after_with(phase, watcher, server_config())
+}
+
+fn room_closes_after_with(phase: Phase, watcher: bool, config: ServerConfig) -> bool {
     use crate::ops::OpsState;
     use crate::spectate::SpectatorSession;
 
     let mut app = App::new();
-    app.insert_resource(server_config());
+    app.insert_resource(config);
     app.insert_resource(OpsState::for_test());
     app.world_mut().spawn(MatchState { phase, ..default() });
     if watcher {
@@ -1802,11 +1806,26 @@ fn room_closes_after(phase: Phase, watcher: bool) -> bool {
         ));
     }
     app.add_systems(Update, empty_close);
-    for _ in 0..EMPTY_MATCH_TICKS {
+    for _ in 0..EMPTY_MATCH_TICKS.max(EMPTY_LOBBY_TICKS) {
         app.update();
     }
     let mut messages = app.world_mut().resource_mut::<Messages<AppExit>>();
     messages.drain().next().is_some()
+}
+
+#[test]
+fn a_statefulset_room_keeps_its_empty_lobby_open() {
+    // The empty lobby is the warm pool the matchmaker scales on: only a drain ends it.
+    let mut config = server_config();
+    config.statefulset = true;
+    assert!(
+        !room_closes_after_with(Phase::Lobby, false, config.clone()),
+        "a StatefulSet room must not close itself while it is the warm pool"
+    );
+    assert!(
+        !room_closes_after_with(Phase::Playing, false, config),
+        "a match that lost its humans finishes and returns to the lobby"
+    );
 }
 
 #[test]

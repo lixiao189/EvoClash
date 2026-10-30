@@ -21,3 +21,6 @@ rand.workspace = true
 hmac.workspace = true
 sha2.workspace = true
 tower-http.workspace = true
+# In-cluster HTTPS to the API server for the StatefulSet scaler (synchronous, run in
+# `spawn_blocking`); rustls + the service account's CA come with it.
+ureq.workspace = true

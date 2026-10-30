@@ -1,9 +1,9 @@
 //! Local process fleet: launches one `evoclash-server` per room on this host.
 //! Rooms return to the lobby after results, so this does not pass `--single-match`.
 //!
-//! In production this is the piece you swap for an orchestrator allocation call
-//! (Agones `GameServerAllocation`, Edgegap, Hathora, …); the rest of the matchmaker only
-//! needs "give me a fresh server address".
+//! In a cluster the match servers are pods of a StatefulSet instead (`--k8s-scale`,
+//! `scaler.rs`): they heartbeat in and this module stays off (`--no-launch`). The rest of the
+//! matchmaker only needs "give me a fresh server address".
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};

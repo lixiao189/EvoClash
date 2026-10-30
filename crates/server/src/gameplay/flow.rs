@@ -457,6 +457,7 @@ pub(super) fn empty_close(
     state: Query<&MatchState>,
     settings: Query<&RoomSettings>,
     presence: Presence,
+    config: Res<ServerConfig>,
     ops: Option<Res<OpsState>>,
     catching: Option<Res<crate::journal::CatchingUp>>,
     mut empty_for: Local<u32>,
@@ -482,6 +483,12 @@ pub(super) fn empty_close(
         info!("draining empty lobby, shutting down");
         ops.mark_exiting();
         exit.write(AppExit::Success);
+        return;
+    }
+    // A StatefulSet pod is a long-lived room: its empty lobby is the warm pool the matchmaker
+    // keeps on standby, so only a drain (above) ends it. A local fleet room exits and is
+    // relaunched on demand.
+    if config.statefulset {
         return;
     }
     let private_room = settings.iter().next().is_some_and(|s| s.private_room);

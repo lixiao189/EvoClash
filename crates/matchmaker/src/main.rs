@@ -21,6 +21,7 @@ mod proxy;
 mod recovery;
 mod registry;
 mod rooms;
+mod scaler;
 mod tokens;
 
 use std::convert::Infallible;
@@ -46,7 +47,7 @@ use crate::fleet::{Fleet, FleetConfig};
 use crate::registry::{JoinPlan, MatchInfo, Registry};
 
 struct AppState {
-    registry: Mutex<Registry>,
+    registry: Arc<Mutex<Registry>>,
     /// `None` when servers are provided by an external orchestrator (adopt-only mode).
     fleet: Option<Fleet>,
     key: [u8; 32],
@@ -672,6 +673,12 @@ struct Args {
     peers: Vec<String>,
     web_dir: Option<PathBuf>,
     trusted_proxies: Vec<proxy::Cidr>,
+    /// `--k8s-scale <statefulset>`: buffer-autoscale that StatefulSet instead of launching locally.
+    scale: Option<String>,
+    buffer: u32,
+    min: u32,
+    max: u32,
+    namespace: String,
 }
 
 fn parse_args() -> Args {
@@ -689,6 +696,11 @@ fn parse_args() -> Args {
         peers: Vec::new(),
         web_dir: None,
         trusted_proxies: Vec::new(),
+        scale: None,
+        buffer: 3,
+        min: 3,
+        max: 300,
+        namespace: scaler::namespace_from_env(),
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -730,6 +742,11 @@ fn parse_args() -> Args {
                     .filter(|url| !url.is_empty()),
             ),
             "--web-dir" => args.web_dir = Some(value("--web-dir").into()),
+            "--k8s-scale" => args.scale = Some(value("--k8s-scale")),
+            "--buffer" => args.buffer = value("--buffer").parse().expect("number"),
+            "--min" => args.min = value("--min").parse().expect("number"),
+            "--max" => args.max = value("--max").parse().expect("number"),
+            "--namespace" => args.namespace = value("--namespace"),
             "--trusted-proxy" => args.trusted_proxies.extend(
                 value("--trusted-proxy")
                     .split(',')
@@ -744,12 +761,18 @@ fn parse_args() -> Args {
                      \x20                   [--max-matches 16] [--max-players 8] [--bots 8]\n\
                      \x20                   [--server-bin PATH] [--log-dir logs] [--no-launch]\n\
                      \x20                   [--warm-matches 0] [--peer URL[,URL...]] [--web-dir DIR]\n\
-                     \x20                   [--trusted-proxy CIDR[,CIDR...]]\n\n\
+                     \x20                   [--trusted-proxy CIDR[,CIDR...]]\n\
+                     \x20                   [--k8s-scale STATEFULSET [--buffer 3] [--min 3] [--max 300] [--namespace NS]]\n\n\
                      --no-launch     only adopt servers that heartbeat in (external orchestrator)\n\
                      --warm-matches  empty matches kept running so joins never wait on a launch\n\
                      --peer          other matchmaker replicas; launched servers heartbeat to all\n\
                      --web-dir       browser client to serve at /play/ (default: `web` next to this binary)\n\
-                     --trusted-proxy peers (besides loopback) whose X-Real-IP names the client"
+                     --trusted-proxy peers (besides loopback) whose X-Real-IP names the client\n\
+                     --k8s-scale     autoscale that StatefulSet (one match per pod) with the\n\
+                     \x20                 in-cluster service account: replicas = matches in use + buffer,\n\
+                     \x20                 clamped to min..max, through the statefulsets/scale subresource\n\
+                     --namespace     namespace of the StatefulSet (default: POD_NAMESPACE, then the\n\
+                     \x20                 service account's namespace)"
                 );
                 std::process::exit(0);
             }
@@ -789,7 +812,7 @@ async fn main() {
         })
     });
     let state = Arc::new(AppState {
-        registry: Mutex::default(),
+        registry: Arc::default(),
         fleet,
         key,
         warm_matches: args.warm_matches,
@@ -798,6 +821,24 @@ async fn main() {
         rejoins: AtomicU64::new(0),
     });
     tokio::spawn(janitor(state.clone()));
+    if let Some(statefulset) = &args.scale {
+        // Lobby picking prefers the lowest ordinal, so the highest pods drain and can go.
+        state
+            .registry
+            .lock()
+            .expect("registry lock")
+            .set_statefulset(statefulset);
+        scaler::start(
+            state.registry.clone(),
+            scaler::ScaleConfig {
+                statefulset: statefulset.clone(),
+                namespace: args.namespace.clone(),
+                buffer: args.buffer,
+                min: args.min,
+                max: args.max.max(args.min),
+            },
+        );
+    }
 
     let web_dir = args.web_dir.clone().or_else(|| {
         let bundled = std::env::current_exe().ok()?.with_file_name("web");

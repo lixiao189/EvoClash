@@ -5,7 +5,6 @@
 //! so they don't fight over cores); a crash or deploy only affects the matches on
 //! that process, and the matchmaker routes new players around it.
 
-mod agones;
 mod boss;
 mod bots;
 mod combat;
@@ -18,6 +17,7 @@ mod headless;
 mod inbox;
 mod inventory;
 mod journal;
+mod k8s;
 mod monsters;
 mod ops;
 mod rng;
@@ -48,6 +48,7 @@ fn main() {
             let code = headless::run(&opts);
             std::process::exit(code);
         }
+        Launch::Healthcheck(path) => std::process::exit(k8s::healthcheck(&path)),
         Launch::Serve(config) => config,
     };
     // `--replay` is taken before this config exists; the field stays for the shared struct.
@@ -55,17 +56,17 @@ fn main() {
     if config.recover {
         info!("recovering match {}", config.match_id);
     }
-    let agones = config.agones.then(|| {
-        let sdk = agones::AgonesSdk::from_env();
-        let (name, public_addr) = sdk
-            .discover()
-            .unwrap_or_else(|e| panic!("cannot reach the Agones SDK sidecar: {e}"));
-        config.match_id = name;
-        config.public_addr = public_addr;
-        // One pod per match: Agones replaces it with a fresh Ready server afterwards.
-        config.single_match = true;
-        sdk
-    });
+    if config.statefulset {
+        let id = k8s::identity_from_env().unwrap_or_else(|e| panic!("--statefulset: {e}"));
+        // println, not info: the logger is not installed yet at this point.
+        println!(
+            "statefulset pod {} (ordinal {}) → match {} on {}",
+            id.pod, id.ordinal, id.match_id, id.public_addr
+        );
+        config.match_id = id.match_id;
+        config.port = id.port;
+        config.public_addr = id.public_addr;
+    }
 
     let mut app = App::new();
     app.add_plugins((
@@ -85,6 +86,7 @@ fn main() {
     app.add_plugins(evoclash_game::SharedPlugin);
     app.insert_resource(connections::TlsIdentity::self_signed(&config));
     info!("room seed {}", config.room_seed);
+    let statefulset = config.statefulset;
     app.insert_resource(config);
     app.add_plugins((
         connections::ConnectionsPlugin,
@@ -102,14 +104,9 @@ fn main() {
         skills::SkillsPlugin,
         journal::JournalPlugin,
     ));
-    if let Some(sdk) = &agones {
-        app.add_plugins(agones::AgonesPlugin(sdk.clone()));
+    if statefulset {
+        app.add_plugins(k8s::K8sPlugin::from_env());
     }
     let exit = app.run();
-    if let Some(sdk) = agones
-        && let Err(e) = sdk.shutdown()
-    {
-        eprintln!("{e}");
-    }
     std::process::exit(if exit.is_success() { 0 } else { 1 });
 }

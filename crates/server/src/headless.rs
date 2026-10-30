@@ -164,7 +164,7 @@ fn match_config(seed: u64, monsters: bool) -> ServerConfig {
         single_match: false,
         monsters,
         threads: 1,
-        agones: false,
+        statefulset: false,
         room_seed: seed,
         private: false,
         room_code: String::new(),

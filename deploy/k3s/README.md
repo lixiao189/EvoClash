@@ -1,6 +1,6 @@
 # 单机 k3s
 
-一台小机器：k3s 关掉 traefik、servicelb、metrics-server，不装 Agones。`single.enabled` 时图表只渲染 netcode Secret、nginx ConfigMap 和一个 hostNetwork Deployment。
+一台小机器：k3s 关掉 traefik、servicelb、metrics-server。`single.enabled` 时图表只渲染 netcode Secret、nginx ConfigMap 和一个 hostNetwork Deployment，不起对局 StatefulSet。
 
 ## 流量
 

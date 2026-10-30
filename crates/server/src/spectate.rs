@@ -525,7 +525,7 @@ mod tests {
             single_match: false,
             monsters: false,
             threads: 1,
-            agones: false,
+            statefulset: false,
             room_seed: 1,
             private: false,
             room_code: String::new(),

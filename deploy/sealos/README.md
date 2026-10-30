@@ -1,6 +1,6 @@
 # Sealos（广州 gzg.sealos.run）
 
-一个 Sealos 命名空间（默认 `ns-80h1uphq`）。没有 Agones，PodSecurity 是 baseline，**不允许 hostNetwork**；配额里 NodePort 只有 10 个。图表开 `single.enabled` + `single.hostNetwork: false`，只渲染 netcode Secret、一个 Deployment（matchmaker 拉起对局子进程）、ClusterIP Service、UDP NodePort Service 和 Ingress。
+一个 Sealos 命名空间（默认 `ns-80h1uphq`）。只用单机模式（`single.enabled`），PodSecurity 是 baseline，**不允许 hostNetwork**；配额里 NodePort 只有 10 个。图表开 `single.enabled` + `single.hostNetwork: false`，只渲染 netcode Secret、一个 Deployment（matchmaker 拉起对局子进程）、ClusterIP Service、UDP NodePort Service 和 Ingress。
 
 ## 流量
 

@@ -27,9 +27,12 @@ app.kubernetes.io/instance: {{ .root.Release.Name }}
 app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 
+{{- define "evoclash.serviceAccount" -}}{{ include "evoclash.matchmaker" . }}{{- end -}}
+
 {{- define "evoclash.matchmaker" -}}{{ include "evoclash.fullname" . }}-matchmaker{{- end -}}
 {{- define "evoclash.heartbeat" -}}{{ include "evoclash.fullname" . }}-matchmaker-heartbeat{{- end -}}
-{{- define "evoclash.fleet" -}}{{ include "evoclash.fullname" . }}{{- end -}}
+{{- /* Room for "-<ordinal>" under the 63-character DNS-label limit of a pod hostname. */ -}}
+{{- define "evoclash.server" -}}{{ printf "%s-server" (include "evoclash.fullname" . | trunc 52 | trimSuffix "-") }}{{- end -}}
 
 {{- define "evoclash.image" -}}
 {{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}

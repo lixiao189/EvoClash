@@ -1,0 +1,52 @@
+{{- /* single mode launches match servers in-process and never scales anything. */ -}}
+{{- if not (dig "enabled" false .Values.single) }}
+{{- $name := printf "%s-matchmaker" (include "evoclash.fullname" .) }}
+# The matchmaker's scaler talks to the API server with this identity: it holds the leader Lease
+# and rewrites the match StatefulSet's replica count. Nothing else needs API access.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "evoclash.labels" . | nindent 4 }}
+    app.kubernetes.io/component: matchmaker
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "evoclash.labels" . | nindent 4 }}
+    app.kubernetes.io/component: matchmaker
+rules:
+  # One replica at a time scales the fleet; the Lease says which.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: [{{ printf "%s-scaler" (include "evoclash.server" .) | quote }}]
+    verbs: ["get", "patch"]
+  # Creating the Lease has no name yet, so it cannot be narrowed by resourceName.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create"]
+  # Read and set only the replica count of the match StatefulSet.
+  - apiGroups: ["apps"]
+    resources: ["statefulsets/scale"]
+    resourceNames: [{{ include "evoclash.server" . | quote }}]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "evoclash.labels" . | nindent 4 }}
+    app.kubernetes.io/component: matchmaker
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
