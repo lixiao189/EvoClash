@@ -17,6 +17,7 @@
 //! replica can place players and the others keep working when one goes down.
 
 mod fleet;
+mod proxy;
 mod recovery;
 mod registry;
 mod rooms;
@@ -148,14 +149,15 @@ fn launch(registry: &mut Registry, fleet: &Fleet) -> Result<(String, SocketAddr)
 /// Client address for the join / room-create rate limit.
 ///
 /// The TCP peer when the listener recorded one. The single-node nginx proxies from loopback
-/// and sets `x-real-ip` to Cloudflare's connecting IP; only a loopback peer may supply that
-/// header, and only when it parses as an IP. Any other peer keeps the socket address.
+/// and sets `x-real-ip` to Cloudflare's connecting IP; only a loopback peer, or one inside a
+/// `--trusted-proxy` block (a cluster ingress), may supply that header, and only when it parses
+/// as an IP. Any other peer keeps the socket address.
 /// Missing peer info (tests, odd proxies) is `"unknown"` and still rate-limits.
 struct ClientIp(String);
 
-fn rate_limit_ip(peer: Option<IpAddr>, x_real_ip: Option<&str>) -> String {
+fn rate_limit_ip(peer: Option<IpAddr>, x_real_ip: Option<&str>, trusted: &[proxy::Cidr]) -> String {
     match peer {
-        Some(ip) if ip.is_loopback() => x_real_ip
+        Some(ip) if ip.is_loopback() || trusted.iter().any(|net| net.contains(ip)) => x_real_ip
             .and_then(|value| value.parse::<IpAddr>().ok())
             .map(|forwarded| forwarded.to_string())
             .unwrap_or_else(|| ip.to_string()),
@@ -179,7 +181,7 @@ where
             .headers
             .get("x-real-ip")
             .and_then(|value| value.to_str().ok());
-        Ok(ClientIp(rate_limit_ip(peer, forwarded)))
+        Ok(ClientIp(rate_limit_ip(peer, forwarded, proxy::trusted())))
     }
 }
 
@@ -669,6 +671,7 @@ struct Args {
     warm_matches: usize,
     peers: Vec<String>,
     web_dir: Option<PathBuf>,
+    trusted_proxies: Vec<proxy::Cidr>,
 }
 
 fn parse_args() -> Args {
@@ -685,6 +688,7 @@ fn parse_args() -> Args {
         warm_matches: 0,
         peers: Vec::new(),
         web_dir: None,
+        trusted_proxies: Vec::new(),
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -726,16 +730,26 @@ fn parse_args() -> Args {
                     .filter(|url| !url.is_empty()),
             ),
             "--web-dir" => args.web_dir = Some(value("--web-dir").into()),
+            "--trusted-proxy" => args.trusted_proxies.extend(
+                value("--trusted-proxy")
+                    .split(',')
+                    .filter(|net| !net.trim().is_empty())
+                    .map(|net| {
+                        proxy::Cidr::parse(net).expect("--trusted-proxy like 172.16.0.0/12")
+                    }),
+            ),
             "-h" | "--help" => {
                 println!(
                     "evoclash-matchmaker [--listen 127.0.0.1:8080] [--public-host 127.0.0.1] [--ports 7000-7099]\n\
                      \x20                   [--max-matches 16] [--max-players 8] [--bots 8]\n\
                      \x20                   [--server-bin PATH] [--log-dir logs] [--no-launch]\n\
-                     \x20                   [--warm-matches 0] [--peer URL[,URL...]] [--web-dir DIR]\n\n\
+                     \x20                   [--warm-matches 0] [--peer URL[,URL...]] [--web-dir DIR]\n\
+                     \x20                   [--trusted-proxy CIDR[,CIDR...]]\n\n\
                      --no-launch     only adopt servers that heartbeat in (external orchestrator)\n\
                      --warm-matches  empty matches kept running so joins never wait on a launch\n\
                      --peer          other matchmaker replicas; launched servers heartbeat to all\n\
-                     --web-dir       browser client to serve at /play/ (default: `web` next to this binary)"
+                     --web-dir       browser client to serve at /play/ (default: `web` next to this binary)\n\
+                     --trusted-proxy peers (besides loopback) whose X-Real-IP names the client"
                 );
                 std::process::exit(0);
             }
@@ -748,6 +762,7 @@ fn parse_args() -> Args {
 #[tokio::main]
 async fn main() {
     let args = parse_args();
+    proxy::set_trusted(args.trusted_proxies.clone());
     let (key, dev_key) = net::private_key_from_env();
     if dev_key {
         eprintln!(
@@ -831,34 +846,55 @@ mod tests {
     use axum::extract::{ConnectInfo, FromRequestParts};
     use axum::http::Request;
 
-    use super::{ClientIp, rate_limit_ip};
+    use super::{ClientIp, proxy, rate_limit_ip};
 
     #[test]
     fn loopback_peer_takes_a_parsed_x_real_ip() {
         let v4: IpAddr = "127.0.0.1".parse().unwrap();
         let v6: IpAddr = "::1".parse().unwrap();
-        assert_eq!(rate_limit_ip(Some(v4), Some("203.0.113.9")), "203.0.113.9");
-        assert_eq!(rate_limit_ip(Some(v6), Some("2001:db8::5")), "2001:db8::5");
+        assert_eq!(
+            rate_limit_ip(Some(v4), Some("203.0.113.9"), &[]),
+            "203.0.113.9"
+        );
+        assert_eq!(
+            rate_limit_ip(Some(v6), Some("2001:db8::5"), &[]),
+            "2001:db8::5"
+        );
     }
 
     #[test]
     fn missing_or_foreign_header_keeps_the_peer() {
         let loopback: IpAddr = "127.0.0.1".parse().unwrap();
         let peer: IpAddr = "198.51.100.4".parse().unwrap();
-        assert_eq!(rate_limit_ip(Some(loopback), None), "127.0.0.1");
+        assert_eq!(rate_limit_ip(Some(loopback), None, &[]), "127.0.0.1");
         assert_eq!(
-            rate_limit_ip(Some(loopback), Some("not-an-ip")),
+            rate_limit_ip(Some(loopback), Some("not-an-ip"), &[]),
             "127.0.0.1"
         );
         assert_eq!(
-            rate_limit_ip(Some(loopback), Some("203.0.113.9:443")),
+            rate_limit_ip(Some(loopback), Some("203.0.113.9:443"), &[]),
             "127.0.0.1"
         );
         assert_eq!(
-            rate_limit_ip(Some(peer), Some("203.0.113.9")),
+            rate_limit_ip(Some(peer), Some("203.0.113.9"), &[]),
             "198.51.100.4"
         );
-        assert_eq!(rate_limit_ip(None, Some("203.0.113.9")), "unknown");
+        assert_eq!(rate_limit_ip(None, Some("203.0.113.9"), &[]), "unknown");
+    }
+
+    #[test]
+    fn trusted_proxy_peer_takes_x_real_ip() {
+        let ingress: IpAddr = "172.17.0.5".parse().unwrap();
+        let other: IpAddr = "10.107.0.9".parse().unwrap();
+        let trusted = [proxy::Cidr::parse("172.16.0.0/12").unwrap()];
+        assert_eq!(
+            rate_limit_ip(Some(ingress), Some("203.0.113.9"), &trusted),
+            "203.0.113.9"
+        );
+        assert_eq!(
+            rate_limit_ip(Some(other), Some("203.0.113.9"), &trusted),
+            "10.107.0.9"
+        );
     }
 
     #[tokio::test]

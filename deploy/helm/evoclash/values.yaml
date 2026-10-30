@@ -105,6 +105,11 @@ single:
   enabled: false
   # IP written into connect tokens. Required when enabled. Not a hostname.
   publicHost: ""
+  # false: no hostNetwork and no nginx sidecar, for namespaces that forbid host networking
+  # (Sealos). The matchmaker listens on the pod network behind an Ingress (`nodePort.ingress`);
+  # match UDP goes through one NodePort Service whose nodePorts equal `ports`, so the advertised
+  # port is the one players reach. `ports` must then sit in 30000-32767. See deploy/sealos/.
+  hostNetwork: true
   # Inclusive host UDP range the match servers bind. Open it to players.
   ports: "37000-37063"
   maxMatches: 4
@@ -132,3 +137,15 @@ single:
     secretName: evoclash-origin-tls
     # Require Cloudflare's authenticated origin pull client certificate.
     originPull: true
+  # Used only when hostNetwork is false.
+  nodePort:
+    # Peers (besides loopback) whose X-Real-IP names the player, for the per-IP room rate
+    # limit: the ingress gateway's source range. Comma-separated CIDRs; empty trusts none.
+    trustedProxies: ""
+    ingress:
+      className: ""
+      annotations: {}
+      # Required: the public HTTPS host, e.g. evoclash-xxxx.gzg.sealos.run.
+      host: ""
+      # Empty: the ingress controller's default certificate.
+      tls: []

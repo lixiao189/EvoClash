@@ -1,4 +1,9 @@
-{{- if dig "enabled" false .Values.single }}
+{{- if and (dig "enabled" false .Values.single) (not (dig "hostNetwork" true .Values.single)) }}
+EvoClash {{ .Chart.AppVersion }} (single pod, no hostNetwork, no Agones) is deploying to {{ .Release.Namespace }}.
+
+Play: https://{{ .Values.single.nodePort.ingress.host }}/play/
+Players' WebTransport uses UDP NodePorts {{ .Values.single.ports }} on {{ .Values.single.publicHost }} directly.
+{{- else if dig "enabled" false .Values.single }}
 EvoClash {{ .Chart.AppVersion }} (single node, no Agones) is deploying to {{ .Release.Namespace }}.
 
 HTTPS terminates in the pod (host port {{ .Values.single.httpsPort }}, Cloudflare origin pull).

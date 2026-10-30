@@ -1,0 +1,168 @@
+{{- /* single mode without hostNetwork (Sealos and other restricted namespaces): Ingress for HTTPS, NodePorts for match UDP. */ -}}
+{{- if and (dig "enabled" false .Values.single) (not (dig "hostNetwork" true .Values.single)) }}
+{{- $single := .Values.single }}
+{{- $np := $single.nodePort }}
+{{- if not $single.publicHost }}
+{{- fail "single.publicHost is required when single.enabled (IP players' WebTransport connects to)" }}
+{{- end }}
+{{- if not $np.ingress.host }}
+{{- fail "single.nodePort.ingress.host is required when single.hostNetwork is false" }}
+{{- end }}
+{{- $range := splitList "-" ($single.ports | toString) }}
+{{- if ne (len $range) 2 }}
+{{- fail "single.ports must look like 31700-31707" }}
+{{- end }}
+{{- $first := index $range 0 | atoi }}
+{{- $last := index $range 1 | atoi }}
+{{- if or (lt $first 30000) (gt $last 32767) (gt $first $last) }}
+{{- fail "single.ports must be an ascending range inside the NodePort range 30000-32767 when hostNetwork is false" }}
+{{- end }}
+{{- $name := include "evoclash.fullname" . }}
+{{- $selector := include "evoclash.selectorLabels" (dict "root" . "component" "single") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "evoclash.labels" . | nindent 4 }}
+    app.kubernetes.io/component: single
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- $selector | nindent 6 }}
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        {{- include "evoclash.commonLabels" . | nindent 8 }}
+        {{- $selector | nindent 8 }}
+    spec:
+      terminationGracePeriodSeconds: {{ $single.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: matchmaker
+          image: {{ include "evoclash.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/app/evoclash-matchmaker"]
+          args:
+            - --listen
+            - 0.0.0.0:8080
+            - --public-host
+            - {{ $single.publicHost | quote }}
+            - --ports
+            - {{ $single.ports | quote }}
+            - --max-matches
+            - {{ $single.maxMatches | quote }}
+            - --warm-matches
+            - {{ $single.warmMatches | quote }}
+            - --log-dir
+            - /tmp/logs
+            {{- with $np.trustedProxies }}
+            - --trusted-proxy
+            - {{ . | quote }}
+            {{- end }}
+            {{- range $single.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            {{- include "evoclash.keyEnv" . | nindent 12 }}
+          ports:
+            - { name: http, containerPort: 8080, protocol: TCP }
+            {{- range $port := untilStep $first (add1 $last | int) 1 }}
+            - { name: {{ printf "udp-%d" $port }}, containerPort: {{ $port }}, protocol: UDP }
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 2
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml $single.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tmp, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "evoclash.labels" . | nindent 4 }}
+    app.kubernetes.io/component: single
+spec:
+  type: ClusterIP
+  selector:
+    {{- $selector | nindent 4 }}
+  ports:
+    - { name: http, port: 8080, targetPort: http, protocol: TCP }
+---
+# nodePort == port == containerPort: the matchmaker advertises the port the match bound, and
+# players reach that same number on publicHost.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-udp
+  labels:
+    {{- include "evoclash.labels" . | nindent 4 }}
+    app.kubernetes.io/component: single
+spec:
+  type: NodePort
+  selector:
+    {{- $selector | nindent 4 }}
+  ports:
+    {{- range $port := untilStep $first (add1 $last | int) 1 }}
+    - { name: {{ printf "udp-%d" $port }}, port: {{ $port }}, targetPort: {{ $port }}, nodePort: {{ $port }}, protocol: UDP }
+    {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "evoclash.labels" . | nindent 4 }}
+    app.kubernetes.io/component: single
+  {{- with $np.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with $np.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with $np.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ $np.ingress.host | quote }}
+      http:
+        # Only what browsers load and call; heartbeats, drain and metrics stay in the pod.
+        paths:
+          {{- range list "/" "/v1/join" "/v1/rooms" "/v1/rejoin" "/healthz" }}
+          - path: {{ . }}
+            pathType: Exact
+            backend:
+              service:
+                name: {{ $name }}
+                port: { name: http }
+          {{- end }}
+          - path: /play
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $name }}
+                port: { name: http }
+{{- end }}
