@@ -5,7 +5,7 @@ use evoclash_game::sim::PLAYER_RADIUS;
 use super::*;
 use crate::rng::SimRng;
 
-/// First 3 minutes (more than 5:00 left): the old edge spawn, farthest from the living.
+/// First 3 minutes (more than 5:00 left): the edge spawn farthest from the living.
 const EARLY_UNTIL: u32 = 3 * 60 * TICKS_PER_SEC;
 /// 6:00 onward: street points inside this radius of the bunker.
 const LATE_FROM: u32 = 6 * 60 * TICKS_PER_SEC;
@@ -221,7 +221,7 @@ pub fn respawn(
             continue;
         }
         // Lobby: a random spawn. Playing: early edge, then the inner four, then the streets
-        // by the bunker. Anything else (Starting) keeps the old farthest edge spawn.
+        // by the bunker. Anything else (Starting) keeps the farthest edge spawn.
         let living: Vec<Vec2> = alive
             .iter()
             .filter(|(e, _)| *e != entity)

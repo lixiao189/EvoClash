@@ -49,6 +49,8 @@ The design write-up is `doc/architecture.md` (Chinese). Do not restate it here. 
 
 Workspace lints allow clippy `type_complexity` and `too_many_arguments` (normal for Bevy systems).
 
+Code comments briefly explain the code as it is now: what it does and why. They are not a change log. Don't write what the code used to do, what a change fixed, or "now"/"no longer"/"instead of the old ..." about past versions; that history belongs in commit messages and PR descriptions. Skip comments that only repeat the code.
+
 ## Sub-agent team
 
 The main session is the lead: it talks to the user, splits the work, briefs agents, merges their results, and alone does git (branch/commit/PR).

@@ -162,7 +162,7 @@ pub fn take(
         }
         Item::Bag => None,
     };
-    // Stuck with the stick for want of a gun that fires: reach for the one that now does.
+    // Stuck with the stick for want of a gun that fires: reach for the best slot that can attack.
     if !could_fire && loadout.selected == MELEE_SLOT {
         loadout.selected = loadout.best_slot();
     }

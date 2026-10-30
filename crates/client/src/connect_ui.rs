@@ -1,7 +1,7 @@
 //! Reconnect overlay: shown while the session is trying to get back into a match.
 //!
-//! Filled in by the UI workstream. `ConnectionStatus` is the interface the session writes to;
-//! the overlay only reads it, so the session never has to know about UI nodes.
+//! `ConnectionStatus` is the interface the session writes to; the overlay only reads it, so
+//! the session never has to know about UI nodes.
 //!
 //! The overlay never pauses the game (it is multiplayer) and never touches input: it only
 //! swallows the pointer with [`BlocksPointer`] and hit-tests its own 返回首页 button by hand,

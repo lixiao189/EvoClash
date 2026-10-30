@@ -2,7 +2,7 @@
 //!
 //! lightyear clears every unread `MessageReceiver` in `Last`, once per frame. The server loop
 //! wakes every millisecond but `FixedUpdate` runs at 64 Hz, so most frames have no fixed tick:
-//! a command read only from `FixedUpdate` was usually cleared before any tick saw it. Each frame,
+//! a command read only from `FixedUpdate` is usually cleared before any tick sees it. Each frame,
 //! right after lightyear receives, the messages move into an `Inbox` on the link, and the
 //! `SimSet::Input` readers drain that instead.
 

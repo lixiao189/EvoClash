@@ -549,8 +549,8 @@ fn loot(pos: Vec2, score: f32) -> scavenge::Desire {
     }
 }
 
-/// Walking toward two equally good pickups used to swap the goal every think, which
-/// showed up as a bot turning around mid-stride.
+/// Walking toward two equally good pickups must not swap the goal every think: that shows
+/// up as a bot turning around mid-stride.
 #[test]
 fn a_bot_keeps_its_pick_instead_of_swapping_equal_goals() {
     let best = |pool: &[scavenge::Desire]| {

@@ -38,7 +38,7 @@ pub enum SeatSet {
 }
 
 /// How long a dropped watcher's seat is kept. Combat seats are held by results screens
-/// instead (`gameplay::seats`); a watcher keeps the old 20s clock.
+/// instead (`gameplay::seats`); a watcher keeps the 20s grace clock.
 pub const SPECTATE_GRACE_TICKS: u32 = 64 * 20;
 
 /// Server-only. The replicated [`Spectator`] sits on the same entity.

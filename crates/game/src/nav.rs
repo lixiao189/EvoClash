@@ -312,7 +312,7 @@ mod tests {
     }
 
     /// An agent following the waypoints walks from every spawn to the vault, barely
-    /// touching a wall on the way (it used to grind along corners).
+    /// touching a wall on the way (no grinding along corners).
     #[test]
     fn agents_walk_without_grinding_walls() {
         let r = 22.0;
