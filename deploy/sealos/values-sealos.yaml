@@ -6,7 +6,6 @@ image:
 
 single:
   enabled: true
-  hostNetwork: false
   # 任一节点公网 IP 都转发 NodePort（externalTrafficPolicy: Cluster）；这是 gzg.sealos.run 的 A 记录之一。
   publicHost: 106.52.89.241
   # 8 个 NodePort（配额 10）。nodePort == 容器端口 == matchmaker 下发的端口。
