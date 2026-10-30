@@ -8,8 +8,7 @@ pub(crate) fn balance_bots(
     humans: Query<&Human>,
     bots: Query<(Entity, &Player), With<Bot>>,
     plain: Option<Res<PlainBots>>,
-    mut counter: Local<u64>,
-    mut cooldown: Local<u32>,
+    tick: Res<SimTick>,
     rng: Res<SimRng>,
 ) {
     if state.iter().any(|s| s.phase == Phase::Recovering) {
@@ -18,15 +17,19 @@ pub(crate) fn balance_bots(
     let lobby = state.iter().any(|s| s.phase == Phase::Lobby);
     // Outside the lobby, adjust at most once a second so joins/leaves don't thrash.
     // A lobby fills or sheds bots on the same tick a human arrives or leaves.
-    if !lobby {
-        if *cooldown > 0 {
-            *cooldown -= 1;
-            return;
-        }
-        *cooldown = 64;
+    // Keyed to the sim tick, not a system local, so a journal replay backfills on the same tick.
+    if !lobby && !tick.0.is_multiple_of(64) {
+        return;
     }
     let humans_n = humans.iter().filter(|human| !human.left).count();
     let mut bot_count = bots.iter().count();
+    // Next bot number follows the bots on the field (the match log's roster), not a count of
+    // every bot this process ever spawned, so a replay names and numbers a backfill the same.
+    let mut counter = bots
+        .iter()
+        .map(|(_, player)| u64::MAX - player.client_id)
+        .max()
+        .unwrap_or(0);
     // Fill target comes from the replicated settings. Production rooms are always
     // `Some(ROOM_COMBATANTS)`: humans first, bots fill the rest, and a human join over the
     // target is impossible because the room caps humans at the same number. `None` spawns
@@ -42,8 +45,8 @@ pub(crate) fn balance_bots(
         .saturating_sub(humans_n);
     let playing = state.iter().any(|s| s.phase == Phase::Playing);
     while bot_count < wanted {
-        *counter += 1;
-        let n = *counter;
+        counter += 1;
+        let n = counter;
         let name = format!("{}{}", NAMES[(n as usize - 1) % NAMES.len()], n);
         let player = Player {
             // High ids can't collide with matchmaker-issued client ids.

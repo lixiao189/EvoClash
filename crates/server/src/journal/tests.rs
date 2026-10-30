@@ -946,3 +946,106 @@ fn scored_board_is_written_before_phase_results() {
     assert!(lines[playing].contains("11|"), "{text}");
     assert!(lines[results].contains("board="), "{text}");
 }
+
+/// Live presence path: a human whose link drops is journaled as `disconnect`, then `connect` when
+/// a link comes back. Replay must land on the same digests.
+#[test]
+fn replay_matches_a_drop_that_reconnects() {
+    use lightyear::connection::client::Connected;
+    use lightyear::prelude::{ControlledBy, Lifetime, RemoteId};
+
+    let dir = temp("reconnect");
+    let mut app = recording_app(test_config(&dir, 0xD15C, true), 2);
+    app.init_resource::<crate::connections::ClearedSeats>();
+    app.add_systems(
+        FixedUpdate,
+        crate::connections::track_presence.in_set(SimSet::Input),
+    );
+    spawn_humans(&mut app, &[11, 22]);
+    let link_of = |app: &mut App, id: u64| {
+        app.world_mut()
+            .spawn((Connected, RemoteId(PeerId::Netcode(id))))
+            .id()
+    };
+    let control = |app: &mut App, id: u64, link: Entity| {
+        let world = app.world_mut();
+        let mut q = world.query::<(Entity, &Player)>();
+        let body = q
+            .iter(world)
+            .find(|(_, p)| p.client_id == id)
+            .map(|(e, _)| e)
+            .unwrap();
+        world.entity_mut(body).insert(ControlledBy {
+            owner: link,
+            lifetime: Lifetime::Persistent,
+        });
+    };
+    for id in [11, 22] {
+        let link = link_of(&mut app, id);
+        control(&mut app, id, link);
+    }
+    let link_22 = {
+        let world = app.world_mut();
+        let mut q = world.query::<(&Player, &ControlledBy)>();
+        q.iter(world)
+            .find(|(p, _)| p.client_id == 22)
+            .map(|(_, c)| c.owner)
+            .unwrap()
+    };
+
+    let mut drop_at = None;
+    let mut playing_ticks = 0;
+    for _ in 0..12_000 {
+        let tick = tick_of(&app);
+        let playing = phase_of(&mut app) == Phase::Playing;
+        if playing && drop_at.is_none() && tick >= 300 {
+            app.world_mut().despawn(link_22);
+            drop_at = Some(tick);
+        }
+        if drop_at.is_some_and(|at| tick == at + 640) {
+            // What `on_connected` does for a returning seat.
+            let link = link_of(&mut app, 22);
+            control(&mut app, 22, link);
+            let world = app.world_mut();
+            let mut q = world.query::<(&Player, &mut crate::connections::Human)>();
+            for (player, mut human) in q.iter_mut(world) {
+                if player.client_id == 22 {
+                    human.disconnected_ticks = 0;
+                }
+            }
+            world.resource_mut::<Trace>().push("connect 22");
+        }
+        let gone = drop_at.is_some_and(|at| tick <= at + 640);
+        let mut injected = app.world_mut().resource_mut::<Injected>();
+        injected.inputs.push((11, scripted(1, tick)));
+        if !gone {
+            injected.inputs.push((22, scripted(-1, tick)));
+        }
+        app.world_mut().run_schedule(FixedUpdate);
+        if phase_of(&mut app) == Phase::Playing {
+            playing_ticks = playing_ticks.max(tick_of(&app));
+        }
+        if playing_ticks >= 2560 || phase_of(&mut app) == Phase::Results {
+            break;
+        }
+    }
+    app.world_mut().resource_mut::<Journal>().flush();
+    let path = app
+        .world()
+        .resource::<Journal>()
+        .match_path
+        .clone()
+        .unwrap();
+    let kills = app.world().resource::<Journal>().kills.clone();
+    let scores = scoreboard(app.world_mut());
+    drop(app);
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains(" disconnect 22"), "no disconnect: {text}");
+    assert!(text.contains(" connect 22"), "no connect logged");
+    assert_replay(&Played {
+        path,
+        scores,
+        kills,
+        playing_ticks,
+    });
+}
