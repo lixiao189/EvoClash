@@ -84,6 +84,10 @@ pub(crate) fn balance_bots(
                 focus: None,
                 last_gun: WeaponKind::Stick,
                 banked: false,
+                pick: None,
+                band: 0,
+                strafe_hold: 0,
+                heading: (0, 0),
             },
             Aggressors::default(),
         ));
@@ -174,6 +178,10 @@ pub(super) fn seed_match_once(
             bot.focus = None;
             bot.last_gun = WeaponKind::Stick;
             bot.banked = false;
+            bot.pick = None;
+            bot.band = 0;
+            bot.strafe_hold = 0;
+            bot.heading = (0, 0);
         }
     });
 }

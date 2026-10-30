@@ -11,7 +11,7 @@ pub const DT: f32 = 1.0 / TICK_HZ as f32;
 
 pub const MAX_HP: f32 = 100.0;
 pub const PLAYER_RADIUS: f32 = 22.0;
-pub const PLAYER_SPEED: f32 = 340.0;
+pub const PLAYER_SPEED: f32 = 300.0;
 pub const DASH_SPEED: f32 = 1150.0;
 pub const DASH_TICKS: u16 = 9;
 pub const DASH_COOLDOWN: u16 = 70;
@@ -71,6 +71,21 @@ pub fn speed_mult(vitals: &Vitals, evo: &Evolution, skills: &SkillState) -> f32 
 /// prediction history and replication don't see spurious updates. `obstacles` are the props
 /// currently standing, as `(center, radius)`.
 pub fn step_movement(
+    pos: Mut<crate::protocol::Pos>,
+    dash: Mut<Dash>,
+    input: &PlayerInput,
+    vitals: &Vitals,
+    evo: &Evolution,
+    skills: &SkillState,
+    map: &ArenaMap,
+    obstacles: &[(Vec2, f32)],
+) {
+    step_movement_scaled(pos, dash, input, vitals, evo, skills, map, obstacles, 1.0);
+}
+
+/// [`step_movement`] at `scale` times ordinary walking speed. Bots pass a value below 1 so
+/// they are a little slower than a human on the same kit. A dash keeps its full speed.
+pub fn step_movement_scaled(
     mut pos: Mut<crate::protocol::Pos>,
     mut dash: Mut<Dash>,
     input: &PlayerInput,
@@ -79,6 +94,7 @@ pub fn step_movement(
     skills: &SkillState,
     map: &ArenaMap,
     obstacles: &[(Vec2, f32)],
+    scale: f32,
 ) {
     if !vitals.alive {
         return;
@@ -104,7 +120,7 @@ pub fn step_movement(
         d.active -= 1;
         d.dir * DASH_SPEED
     } else {
-        move_dir * PLAYER_SPEED * speed_mult(vitals, evo, skills)
+        move_dir * PLAYER_SPEED * scale * speed_mult(vitals, evo, skills)
     };
 
     if d != *dash {
@@ -167,6 +183,45 @@ mod tests {
             "{} vs {expected}",
             pos.0.x
         );
+    }
+
+    /// `scale` slows walking only: a dash keeps its full speed.
+    #[test]
+    fn a_speed_scale_leaves_the_dash_alone() {
+        use crate::protocol::Pos;
+
+        let map = ArenaMap::default();
+        let walk = |scale: f32, input: &PlayerInput| {
+            let mut world = World::new();
+            world.spawn((Pos(Vec2::ZERO), Dash::default()));
+            let mut query = world.query::<(&mut Pos, &mut Dash)>();
+            let (pos, dash) = query.single_mut(&mut world).unwrap();
+            step_movement_scaled(
+                pos,
+                dash,
+                input,
+                &Vitals::default(),
+                &Evolution::default(),
+                &SkillState::default(),
+                &map,
+                &[],
+                scale,
+            );
+            query.single(&world).unwrap().0.0
+        };
+        let step = PlayerInput {
+            move_x: 1,
+            ..default()
+        };
+        let full = walk(1.0, &step).x;
+        assert!((full - PLAYER_SPEED * DT).abs() < 1e-3);
+        assert!((walk(0.5, &step).x - full * 0.5).abs() < 1e-3);
+        let dash = PlayerInput {
+            move_x: 1,
+            dash: true,
+            ..default()
+        };
+        assert!((walk(0.5, &dash).x - DASH_SPEED * DT).abs() < 1e-3);
     }
 
     #[test]

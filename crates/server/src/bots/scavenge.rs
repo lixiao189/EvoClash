@@ -158,6 +158,32 @@ pub(super) fn choose(
     pick(&all)
 }
 
+/// A new target must score at least this much better (25% keener) to replace the one the bot
+/// is already walking to. Without it two equally good pickups trade places every think.
+pub(super) const SWITCH_MARGIN: f32 = 0.75;
+
+fn same_target(a: &Desire, b: &Desire) -> bool {
+    a.entity == b.entity && pos_key(a.pos) == pos_key(b.pos)
+}
+
+/// [`choose`] with stickiness: keep walking to `held` while it is still there and nothing
+/// else is clearly better. A target already reached scores near zero, so it is always kept.
+pub(super) fn hold_pick(
+    desires: &[Desire],
+    held: Option<Desire>,
+    pick: impl Fn(&[Desire]) -> Option<Desire>,
+) -> Option<Desire> {
+    let fresh = held.and_then(|h| desires.iter().copied().find(|d| same_target(d, &h)));
+    let best = pick(desires)?;
+    match fresh {
+        Some(fresh) if !same_target(&best, &fresh) && best.score < fresh.score * SWITCH_MARGIN => {
+            Some(best)
+        }
+        Some(fresh) => Some(fresh),
+        None => Some(best),
+    }
+}
+
 pub(super) fn retreat_point(at: Vec2, enemy: Vec2) -> Vec2 {
     let away = (at - enemy).normalize_or(Vec2::Y);
     let bound = ARENA_HALF * 0.9;
@@ -307,6 +333,7 @@ pub(super) fn follow(
     stuck: u16,
     goal: &mut Vec2,
     safe_spot: impl Fn(Vec2) -> bool,
+    heading: &mut (i8, i8),
     rng: &mut impl Rng,
 ) -> (Option<Entity>, u16) {
     let mut stuck = stuck;
@@ -336,7 +363,7 @@ pub(super) fn follow(
                     Some(enemy) => depart_dir(enemy - at, dir),
                     None => dir,
                 };
-                super::think::steer(input, dir, arena, obstacles, at);
+                super::think::steer(input, dir, arena, obstacles, at, heading);
             }
         }
         return (crack, stuck);
@@ -364,7 +391,7 @@ pub(super) fn follow(
         Some(enemy) => depart_dir(enemy - at, dir),
         None => dir,
     };
-    super::think::steer(input, dir, arena, obstacles, at);
+    super::think::steer(input, dir, arena, obstacles, at, heading);
     input.aim = dir.normalize_or(Vec2::X);
     (None, stuck)
 }

@@ -1,6 +1,7 @@
 //! Tick counter, human input, movement, position history and cooldowns.
 
 use super::*;
+use crate::bots::{BOT_SPEED_MULT, Bot};
 use crate::journal::Injected;
 
 pub(super) fn advance_tick(mut tick: ResMut<SimTick>) {
@@ -76,13 +77,14 @@ pub(super) fn movement(
         &Vitals,
         &Evolution,
         &SkillState,
+        Has<Bot>,
     )>,
 ) {
     if state.iter().any(|s| s.phase == Phase::Recovering) {
         return;
     }
     let frozen = state.iter().any(|s| s.phase == Phase::Starting);
-    for (pos, dash, mut aim, mut input, vitals, evo, skills) in &mut players {
+    for (pos, dash, mut aim, mut input, vitals, evo, skills, is_bot) in &mut players {
         if frozen {
             // Zeroed before step_movement and before Combat reads the same component.
             input.0.move_x = 0;
@@ -94,7 +96,7 @@ pub(super) fn movement(
             input.0.skill_a = false;
             input.0.skill_b = false;
         }
-        sim::step_movement(
+        sim::step_movement_scaled(
             pos,
             dash,
             &input.0,
@@ -103,6 +105,7 @@ pub(super) fn movement(
             skills,
             &arena,
             &obstacles.0,
+            if is_bot { BOT_SPEED_MULT } else { 1.0 },
         );
         let dir = input.0.aim.normalize_or_zero();
         if vitals.alive && dir != Vec2::ZERO && dir.distance_squared(aim.0) > 1e-4 {

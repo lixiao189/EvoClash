@@ -243,6 +243,7 @@ pub fn steer_clear(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sim::{DT, PLAYER_SPEED};
 
     #[test]
     fn finds_route_into_the_vault() {
@@ -315,7 +316,7 @@ mod tests {
     #[test]
     fn agents_walk_without_grinding_walls() {
         let r = 22.0;
-        let speed = 340.0 / 64.0;
+        let speed = PLAYER_SPEED * DT;
         for seed in 0..20 {
             let map = ArenaMap::generate(seed);
             let grid = NavGrid::new(&map, r + 2.0);

@@ -6,6 +6,7 @@
 // Natively only the tests use the game code; the wasm build (checked in CI) catches dead code.
 #![cfg_attr(not(target_family = "wasm"), allow(dead_code, unused_imports))]
 
+mod aim_assist;
 mod assets;
 mod backpack;
 mod board_ui;

@@ -12,6 +12,48 @@ use super::*;
 /// Cosine of 100°: past this the bot is on the crawler's side or rear, where the shell is thin.
 const REAR_COS: f32 = -0.17364818;
 
+/// Chance per think (1/16 s) that a fighting bot swaps the side it strafes on.
+const STRAFE_FLIP: f32 = 0.03;
+/// Thinks a strafe side is kept before it may flip again (~0.75 s). Without it a bot that
+/// flips twice in a row is back where it started, which reads as shaking on the spot.
+pub(super) const STRAFE_HOLD_THINKS: u16 = 12;
+
+/// Distance bands for a fight. Held across thinks with separate enter and leave distances,
+/// so a target hovering on a line does not reverse the bot's heading every think.
+pub(super) const BACK: i8 = -1;
+pub(super) const CIRCLE: i8 = 0;
+pub(super) const CLOSE: i8 = 1;
+
+pub(super) fn hold_band(
+    held: i8,
+    dist: f32,
+    back_in: f32,
+    back_out: f32,
+    close_in: f32,
+    close_out: f32,
+) -> i8 {
+    match held {
+        BACK if dist > back_out => CIRCLE,
+        CLOSE if dist < close_out => CIRCLE,
+        BACK | CLOSE => held,
+        _ if dist < back_in => BACK,
+        _ if dist > close_in => CLOSE,
+        _ => CIRCLE,
+    }
+}
+
+/// Swap the strafe side at most once per hold.
+pub(super) fn flip_strafe(strafe: &mut f32, hold: &mut u16, rng: &mut impl Rng) {
+    if *hold > 0 {
+        *hold -= 1;
+        return;
+    }
+    if rng.random_bool(STRAFE_FLIP as f64) {
+        *strafe = -*strafe;
+        *hold = STRAFE_HOLD_THINKS;
+    }
+}
+
 pub(super) fn on_rear(facing: f32, crawler_to_bot: Vec2) -> bool {
     let dir = crawler_to_bot.normalize_or_zero();
     dir != Vec2::ZERO && dir.dot(Vec2::from_angle(facing)) < REAR_COS
@@ -48,14 +90,13 @@ pub(super) fn press(
     nav: &evoclash_game::nav::NavGrid,
     arena: &Arena,
     obstacles: &[(Vec2, f32)],
+    (band, strafe_hold, heading): (&mut i8, &mut u16, &mut (i8, i8)),
     rng: &mut impl Rng,
 ) {
     let to_enemy = (enemy - at).normalize_or(Vec2::X);
     input.aim = aim_toward(to_enemy, aim_error, rng);
     let range = engage_range(weapon);
-    if rng.random_bool(0.03) {
-        *strafe = -*strafe;
-    }
+    flip_strafe(strafe, strafe_hold, rng);
     // Bite reach is `radius + PLAYER_RADIUS + 4` in monsters/attacks.rs (30+22+4).
     const CRAWLER_REACH: f32 = 56.0;
     const CRAWLER_ORBIT: f32 = CRAWLER_REACH + 60.0;
@@ -71,7 +112,7 @@ pub(super) fn press(
         if dist < CRAWLER_ORBIT {
             dir -= to_me.normalize_or_zero();
         }
-        steer(input, dir, arena, obstacles, at);
+        steer(input, dir, arena, obstacles, at, heading);
         let shot = rng.random_bool(0.85);
         input.fire = !stick && locked_for > reaction && dist < range && shot;
         return;
@@ -88,48 +129,66 @@ pub(super) fn press(
     };
     let strafe_dir = to_enemy.perp() * *strafe;
     let dir = if kite {
-        let lo = range * 0.5;
-        let hi = range * 0.8;
-        if dist < lo {
-            let back = -to_enemy;
-            if hazard(at + back * 56.0) || cornered {
-                to_enemy.perp()
-            } else {
-                back
+        *band = hold_band(
+            *band,
+            dist,
+            range * 0.5,
+            range * 0.575,
+            range * 0.8,
+            range * 0.72,
+        );
+        match *band {
+            BACK => {
+                let back = -to_enemy;
+                if hazard(at + back * 56.0) || cornered {
+                    to_enemy.perp()
+                } else {
+                    back
+                }
             }
-        } else if dist > hi {
-            to_enemy + strafe_dir * 0.2
-        } else {
-            strafe_dir
+            CLOSE => to_enemy + strafe_dir * 0.2,
+            _ => strafe_dir,
         }
     } else if let Some(min) = keep {
-        if dist < min {
-            -to_enemy + strafe_dir * 0.3
-        } else if dist > min + 80.0 {
-            to_enemy + strafe_dir * 0.2
-        } else {
-            strafe_dir
+        *band = hold_band(*band, dist, min, min * 1.15, min + 80.0, min + 60.0);
+        match *band {
+            BACK => -to_enemy + strafe_dir * 0.3,
+            CLOSE => to_enemy + strafe_dir * 0.2,
+            _ => strafe_dir,
         }
-    } else if weapon.melee().is_some() || dist > range * 0.85 {
+    } else if weapon.melee().is_some() {
         let waypoint = next_waypoint(nav, arena, at, enemy, PLAYER_RADIUS);
         (waypoint - at).normalize_or_zero() + strafe_dir * 0.3
-    } else if dist < range * 0.35 {
-        -to_enemy + strafe_dir
     } else {
-        strafe_dir
+        *band = hold_band(
+            *band,
+            dist,
+            range * 0.35,
+            range * 0.5,
+            range * 0.85,
+            range * 0.75,
+        );
+        match *band {
+            BACK => -to_enemy + strafe_dir,
+            CLOSE => {
+                let waypoint = next_waypoint(nav, arena, at, enemy, PLAYER_RADIUS);
+                (waypoint - at).normalize_or_zero() + strafe_dir * 0.3
+            }
+            _ => strafe_dir,
+        }
     };
-    steer(input, dir, arena, obstacles, at);
+    steer(input, dir, arena, obstacles, at, heading);
     let shot = rng.random_bool(0.85);
     input.fire = locked_for > reaction
         && dist < range
         && (kite || shot)
         && !shot_hits_barrel(at, enemy, barrels);
-    input.dash = dist < 260.0 && !kite && rng.random_bool(0.04);
+    input.dash = dist < 260.0 && !kite && rng.random_bool(0.02);
     input.throw = emps > 0 && armor >= 50.0 && dist < 420.0 && rng.random_bool(0.1);
     if stealth_hurt {
         input.fire = false;
         input.throw = false;
-        steer(input, -to_enemy, arena, obstacles, at);
+        steer(input, -to_enemy, arena, obstacles, at, heading);
     }
     input.skill_b = skill_b_ready && dist < SKILL_RANGE;
 }

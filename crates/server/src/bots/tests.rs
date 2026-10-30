@@ -538,3 +538,100 @@ fn open_pair(arena: &Arena) -> (Vec2, Vec2) {
     }
     panic!("no clear ground beside a spawn");
 }
+
+fn loot(pos: Vec2, score: f32) -> scavenge::Desire {
+    scavenge::Desire {
+        pos,
+        score,
+        act: scavenge::Act::Walk,
+        entity: None,
+        safe: false,
+    }
+}
+
+/// Walking toward two equally good pickups used to swap the goal every think, which
+/// showed up as a bot turning around mid-stride.
+#[test]
+fn a_bot_keeps_its_pick_instead_of_swapping_equal_goals() {
+    let best = |pool: &[scavenge::Desire]| {
+        pool.iter()
+            .copied()
+            .min_by(|a, b| a.score.total_cmp(&b.score))
+    };
+    let (left, right) = (
+        loot(Vec2::new(-100.0, 0.0), 200.0),
+        loot(Vec2::new(100.0, 0.0), 199.0),
+    );
+    let first = scavenge::hold_pick(&[left, right], None, best).expect("a pick");
+    assert_eq!(first.pos, right.pos, "the marginally closer one wins first");
+
+    // One think later the other one is 20% keener: still not worth turning around.
+    let (left, right) = (
+        loot(Vec2::new(-100.0, 0.0), 160.0),
+        loot(Vec2::new(100.0, 0.0), 205.0),
+    );
+    let held = scavenge::hold_pick(&[left, right], Some(first), best).expect("a pick");
+    assert_eq!(held.pos, first.pos, "held while the margin is under 25%");
+
+    // Well past the margin the bot does commit to the better one.
+    let (near, far) = (
+        loot(Vec2::new(-100.0, 0.0), 100.0),
+        loot(Vec2::new(100.0, 0.0), 205.0),
+    );
+    let switched = scavenge::hold_pick(&[near, far], Some(held), best).expect("a pick");
+    assert_eq!(switched.pos, near.pos);
+
+    // A target that is gone (picked up, opened, out of sight) is dropped.
+    let only = loot(Vec2::new(300.0, 0.0), 400.0);
+    let after = scavenge::hold_pick(&[only], Some(switched), best).expect("a pick");
+    assert_eq!(after.pos, only.pos);
+}
+
+/// A rifle fight backs off under 140 and closes in over 340. Hovering on those lines used
+/// to reverse the heading every think.
+#[test]
+fn a_fight_distance_band_does_not_flip_on_its_edge() {
+    use super::fight::{BACK, CIRCLE, CLOSE, hold_band};
+    let step = |held: i8, dist: f32| hold_band(held, dist, 140.0, 200.0, 340.0, 300.0);
+    let mut band = CIRCLE;
+    for dist in [139.0, 141.0, 138.0, 199.0, 139.0] {
+        band = step(band, dist);
+        assert_eq!(band, BACK, "{dist} should still be backing off");
+    }
+    band = step(band, 201.0);
+    assert_eq!(band, CIRCLE);
+    band = step(band, 150.0);
+    assert_eq!(band, CIRCLE, "150 is past the way back in");
+    band = step(band, 139.0);
+    assert_eq!(band, BACK);
+    band = step(band, 210.0);
+    for dist in [341.0, 339.0, 301.0] {
+        band = step(band, dist);
+        assert_eq!(band, CLOSE, "{dist} should still be closing in");
+    }
+    band = step(band, 299.0);
+    assert_eq!(band, CIRCLE);
+}
+
+/// Swapping the strafe side twice in a row puts the bot back where it was, which reads as
+/// shaking on the spot.
+#[test]
+fn a_fighting_bot_holds_its_strafe_side() {
+    use super::fight::{STRAFE_HOLD_THINKS, flip_strafe};
+    let rng = SimRng::from_match_seed(11);
+    let (mut strafe, mut hold) = (1.0_f32, 0_u16);
+    let mut flips = 0;
+    rng.with(true, Stream::Bots, |rng| {
+        for _ in 0..400 {
+            let (before, held) = (strafe, hold);
+            flip_strafe(&mut strafe, &mut hold, rng);
+            if held > 0 {
+                assert_eq!(strafe, before, "flipped {held} thinks into a hold");
+            } else if strafe != before {
+                assert_eq!(hold, STRAFE_HOLD_THINKS);
+                flips += 1;
+            }
+        }
+    });
+    assert!(flips > 0, "never strafes at all");
+}
