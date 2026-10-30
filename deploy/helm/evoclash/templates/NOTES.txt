@@ -1,17 +1,8 @@
-{{- if and (dig "enabled" false .Values.single) (not (dig "hostNetwork" true .Values.single)) }}
-EvoClash {{ .Chart.AppVersion }} (single pod, no hostNetwork, no match StatefulSet) is deploying to {{ .Release.Namespace }}.
+{{- if dig "enabled" false .Values.single }}
+EvoClash {{ .Chart.AppVersion }} (single pod, no match StatefulSet) is deploying to {{ .Release.Namespace }}.
 
 Play: https://{{ .Values.single.nodePort.ingress.host }}/play/
 Players' WebTransport uses UDP NodePorts {{ .Values.single.ports }} on {{ .Values.single.publicHost }} directly.
-{{- else if dig "enabled" false .Values.single }}
-EvoClash {{ .Chart.AppVersion }} (single node, no match StatefulSet) is deploying to {{ .Release.Namespace }}.
-
-HTTPS terminates in the pod (host port {{ .Values.single.httpsPort }}, Cloudflare origin pull).
-Players' WebTransport uses UDP {{ .Values.single.ports }} on {{ .Values.single.publicHost }} directly.
-
-The origin certificate is not in this chart. Create it before the pod can start:
-  kubectl create namespace {{ .Release.Namespace }}
-  kubectl -n {{ .Release.Namespace }} create secret tls {{ .Values.single.tls.secretName }} --cert=origin.pem --key=origin.key
 {{- else }}
 EvoClash {{ .Chart.AppVersion }} is deploying to namespace {{ .Release.Namespace }}.
 

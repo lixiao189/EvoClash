@@ -1,0 +1,19 @@
+# Findings already in history before CI ran gitleaks (fake test IPs and since-removed hosts).
+# Fingerprints only: commit:path:rule:line. New findings must be fixed, not added here.
+1b32d52d6ee9fed3e24a2e4cc0fe912e5057f324:.github/workflows/deploy.yml:public-ipv4:101
+1b32d52d6ee9fed3e24a2e4cc0fe912e5057f324:deploy/k3s/README.md:public-ipv4:45
+1b32d52d6ee9fed3e24a2e4cc0fe912e5057f324:deploy/k3s/README.md:public-ipv4:46
+1b32d52d6ee9fed3e24a2e4cc0fe912e5057f324:deploy/k3s/values-k3s.yaml:public-ipv4:10
+1ba952945c2af3cc03c95271a65c307f3b10cce7:crates/matchmaker/src/registry.rs:public-ipv4:653
+1ba952945c2af3cc03c95271a65c307f3b10cce7:crates/matchmaker/src/registry.rs:public-ipv4:660
+1ba952945c2af3cc03c95271a65c307f3b10cce7:crates/matchmaker/src/registry.rs:public-ipv4:664
+1ba952945c2af3cc03c95271a65c307f3b10cce7:crates/matchmaker/src/registry.rs:public-ipv4:682
+1ba952945c2af3cc03c95271a65c307f3b10cce7:crates/matchmaker/src/registry.rs:public-ipv4:689
+1ba952945c2af3cc03c95271a65c307f3b10cce7:crates/matchmaker/src/registry.rs:public-ipv4:744
+496562b58c902739c7b60f00f003a756cfcb8885:crates/matchmaker/src/registry.rs:public-ipv4:916
+c035c345a7f24b2284644146b4ca478e7dcbb79f:crates/matchmaker/src/registry.rs:public-ipv4:1384
+c035c345a7f24b2284644146b4ca478e7dcbb79f:crates/matchmaker/src/registry.rs:public-ipv4:1387
+c035c345a7f24b2284644146b4ca478e7dcbb79f:crates/matchmaker/src/registry.rs:public-ipv4:1391
+c035c345a7f24b2284644146b4ca478e7dcbb79f:crates/matchmaker/src/registry.rs:public-ipv4:1394
+c3158ac32faf4617265464acbce501cacbaf5922:crates/matchmaker/src/proxy.rs:public-ipv4:64
+c3158ac32faf4617265464acbce501cacbaf5922:deploy/sealos/values-sealos.yaml:public-ipv4:11

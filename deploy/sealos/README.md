@@ -1,6 +1,6 @@
 # Sealos（广州 gzg.sealos.run）
 
-一个 Sealos 命名空间（默认 `ns-80h1uphq`）。只用单机模式（`single.enabled`），PodSecurity 是 baseline，**不允许 hostNetwork**；配额里 NodePort 只有 10 个。图表开 `single.enabled` + `single.hostNetwork: false`，只渲染 netcode Secret、一个 Deployment（matchmaker 拉起对局子进程）、ClusterIP Service、UDP NodePort Service 和 Ingress。
+一个 Sealos 命名空间（默认 `ns-80h1uphq`）。只用单机模式（`single.enabled`），PodSecurity 是 baseline；配额里 NodePort 只有 10 个。图表开 `single.enabled`，只渲染 netcode Secret、一个 Deployment（matchmaker 拉起对局子进程）、ClusterIP Service、UDP NodePort Service 和 Ingress。
 
 ## 流量
 
@@ -16,13 +16,13 @@
 
 ## GitHub
 
-Environment 名 `sealos`。`main` 上 CI 通过后，Deploy 的 `sealos` 任务和 k3s 任务并行：下载 CI 冒烟测试过的镜像（artifact `server-image`），推到 `ghcr.io/<owner>/evoclash-server:<tag>`，再 `helm upgrade --install evoclash … -f deploy/sealos/values-sealos.yaml --set image.tag=<tag> --wait`。标签不变时 Pod 不重建。
+Environment 名 `sealos`。`main` 上 CI 通过后，Deploy 的 `deploy` 任务（environment `sealos`）：下载 CI 冒烟测试过的镜像（artifact `server-image`），推到 `ghcr.io/<owner>/evoclash-server:<tag>`，再 `helm upgrade --install evoclash … -f deploy/sealos/values-sealos.yaml --set image.tag=<tag> --wait`。标签不变时 Pod 不重建。
 
 | 名字 | 种类 | 内容 |
 |---|---|---|
 | `SEALOS_KUBECONFIG` | secret | kubeconfig 全文 |
 | `SEALOS_NAMESPACE` | variable | 可选，默认 `ns-80h1uphq` |
-| `SEALOS_PUBLIC_HOST` | variable | 可选，覆盖 `single.publicHost`（IP，不是域名） |
+| `SEALOS_PUBLIC_HOST` | variable | 必填，`single.publicHost`（IP，不是域名；不要写进仓库） |
 | `SEALOS_HOST` | variable | 可选，覆盖 Ingress 域名（须在 `*.gzg.sealos.run` 下） |
 
 ## 手动部署
@@ -30,7 +30,8 @@ Environment 名 `sealos`。`main` 上 CI 通过后，Deploy 的 `sealos` 任务�
 ```bash
 export KUBECONFIG=~/Downloads/kubeconfig.yaml
 helm upgrade --install evoclash deploy/helm/evoclash -n ns-80h1uphq \
-  -f deploy/sealos/values-sealos.yaml --set image.tag=<tag> --wait
+  -f deploy/sealos/values-sealos.yaml --set image.tag=<tag> \
+  --set single.publicHost="$SEALOS_PUBLIC_HOST" --wait
 ```
 
 ## 销毁

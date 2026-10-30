@@ -87,7 +87,7 @@ CI 的镜像冒烟测试会确认匹配服务能提供网页客户端，并拉�
 
 ## CI / CD
 
-- **CI**（`.github/workflows/ci.yml`）：每次 push 到 `main` 和每个 PR 运行 rustfmt、clippy（`-D warnings`，含 wasm 客户端）、`cargo test`、cargo-deny（漏洞 / 许可证 / 来源）、`helm lint`，并构建服务端 Docker 镜像（不推送）后实际运行：匹配服务拉起一局，等它发回心跳才算通过。这样 `Dockerfile` 写坏了，或者二进制在 distroless 基础镜像里起不来，PR 阶段就能发现。分支保护只需要勾选 `CI success` 这一项。
+- **CI**（`.github/workflows/ci.yml`）：每次 push 到 `main` 和每个 PR 运行 rustfmt、clippy（`-D warnings`，含 wasm 客户端）、`cargo test`、cargo-deny（漏洞 / 许可证 / 来源）、gitleaks 敏感信息扫描（`.gitleaks.toml`：默认密钥规则 + 公网 IPv4）、`helm lint`，并构建服务端 Docker 镜像（不推送）后实际运行：匹配服务拉起一局，等它发回心跳才算通过。这样 `Dockerfile` 写坏了，或者二进制在 distroless 基础镜像里起不来，PR 阶段就能发现。分支保护只需要勾选 `CI success` 这一项。
 - **发布**（`.github/workflows/release.yml`）：先把 `Cargo.toml` 的 `workspace.package.version` 和 `deploy/helm/evoclash/Chart.yaml` 的 `version` / `appVersion` 改成新版本并合入，然后推送同名 tag：
 
   ```bash

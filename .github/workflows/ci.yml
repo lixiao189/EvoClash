@@ -97,6 +97,28 @@ jobs:
           command: check
           arguments: --all-features
 
+  # Secrets and public IPv4 addresses in the pushed / PR commits (.gitleaks.toml).
+  # gitleaks-action does not support merge_group; the PR run already scanned those commits.
+  secrets:
+    name: Secret scan (gitleaks)
+    if: github.event_name != 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # The action comments on the PR lines it flags.
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+          GITLEAKS_VERSION: 8.30.1
+
   helm:
     name: Helm chart
     runs-on: ubuntu-latest
@@ -217,7 +239,7 @@ jobs:
   ci-success:
     name: CI success
     if: always()
-    needs: [fmt, clippy, test, deny, helm, image]
+    needs: [fmt, clippy, test, deny, secrets, helm, image]
     runs-on: ubuntu-latest
     steps:
       - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
