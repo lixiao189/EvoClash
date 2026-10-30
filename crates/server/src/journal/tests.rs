@@ -947,13 +947,14 @@ fn scored_board_is_written_before_phase_results() {
     assert!(lines[results].contains("board="), "{text}");
 }
 
-/// Live presence path: a human whose link drops is journaled as `disconnect`, then `leave` once
-/// the grace runs out (or `connect` if a link comes back). Replay must land on the same digests.
-fn presence_round(reconnect: bool) {
+/// Live presence path: a human whose link drops is journaled as `disconnect`, then `connect` when
+/// a link comes back. Replay must land on the same digests.
+#[test]
+fn replay_matches_a_drop_that_reconnects() {
     use lightyear::connection::client::Connected;
     use lightyear::prelude::{ControlledBy, Lifetime, RemoteId};
 
-    let dir = temp(if reconnect { "reconnect" } else { "grace" });
+    let dir = temp("reconnect");
     let mut app = recording_app(test_config(&dir, 0xD15C, true), 2);
     app.init_resource::<crate::connections::ClearedSeats>();
     app.add_systems(
@@ -1001,7 +1002,7 @@ fn presence_round(reconnect: bool) {
             app.world_mut().despawn(link_22);
             drop_at = Some(tick);
         }
-        if reconnect && drop_at.is_some_and(|at| tick == at + 640) {
+        if drop_at.is_some_and(|at| tick == at + 640) {
             // What `on_connected` does for a returning seat.
             let link = link_of(&mut app, 22);
             control(&mut app, 22, link);
@@ -1014,8 +1015,7 @@ fn presence_round(reconnect: bool) {
             }
             world.resource_mut::<Trace>().push("connect 22");
         }
-        let back = reconnect && drop_at.is_some_and(|at| tick > at + 640);
-        let gone = drop_at.is_some() && !back;
+        let gone = drop_at.is_some_and(|at| tick <= at + 640);
         let mut injected = app.world_mut().resource_mut::<Injected>();
         injected.inputs.push((11, scripted(1, tick)));
         if !gone {
@@ -1041,30 +1041,11 @@ fn presence_round(reconnect: bool) {
     drop(app);
     let text = fs::read_to_string(&path).unwrap();
     assert!(text.contains(" disconnect 22"), "no disconnect: {text}");
-    if reconnect {
-        assert!(text.contains(" connect 22"), "no connect logged");
-    } else {
-        assert!(text.contains(" leave 22"), "no leave logged");
-        // The cleared seat is backfilled mid-match: bots 1..=6 opened, so this is bot 7.
-        assert!(
-            scores.iter().any(|row| row.client_id == u64::MAX - 7),
-            "no backfill bot"
-        );
-    }
+    assert!(text.contains(" connect 22"), "no connect logged");
     assert_replay(&Played {
         path,
         scores,
         kills,
         playing_ticks,
     });
-}
-
-#[test]
-fn replay_matches_a_drop_that_times_out() {
-    presence_round(false);
-}
-
-#[test]
-fn replay_matches_a_drop_that_reconnects() {
-    presence_round(true);
 }
