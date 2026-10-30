@@ -148,10 +148,9 @@ fn launch(registry: &mut Registry, fleet: &Fleet) -> Result<(String, SocketAddr)
 
 /// Client address for the join / room-create rate limit.
 ///
-/// The TCP peer when the listener recorded one. The single-node nginx proxies from loopback
-/// and sets `x-real-ip` to Cloudflare's connecting IP; only a loopback peer, or one inside a
-/// `--trusted-proxy` block (a cluster ingress), may supply that header, and only when it parses
-/// as an IP. Any other peer keeps the socket address.
+/// The TCP peer when the listener recorded one. Only a loopback peer, or one inside a
+/// `--trusted-proxy` block (a reverse proxy or cluster ingress), may supply `x-real-ip` as the
+/// client address, and only when it parses as an IP. Any other peer keeps the socket address.
 /// Missing peer info (tests, odd proxies) is `"unknown"` and still rate-limits.
 struct ClientIp(String);
 

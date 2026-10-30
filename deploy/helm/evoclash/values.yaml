@@ -97,47 +97,29 @@ fleet:
     minReplicas: 3
     maxReplicas: 300
 
-# One small node, no Agones. The matchmaker launches match servers as child processes and
-# nginx terminates HTTPS on the host network. Off by default: the Fleet / HPA chart is unchanged.
-# Browsers come in through Cloudflare (proxied HTTPS). WebTransport is UDP straight to publicHost;
-# Cloudflare cannot proxy it. See deploy/k3s/.
+# One small pod, no Agones. The matchmaker launches match servers as child processes in the same
+# container; a namespace Ingress terminates HTTPS and one NodePort Service carries match UDP.
+# Off by default: the Fleet / HPA chart is unchanged. See deploy/sealos/.
 single:
   enabled: false
   # IP written into connect tokens. Required when enabled. Not a hostname.
   publicHost: ""
-  # false: no hostNetwork and no nginx sidecar, for namespaces that forbid host networking
-  # (Sealos). The matchmaker listens on the pod network behind an Ingress (`nodePort.ingress`);
-  # match UDP goes through one NodePort Service whose nodePorts equal `ports`, so the advertised
-  # port is the one players reach. `ports` must then sit in 30000-32767. See deploy/sealos/.
-  hostNetwork: true
-  # Inclusive host UDP range the match servers bind. Open it to players.
-  ports: "37000-37063"
-  maxMatches: 4
+  # Inclusive UDP range the match servers bind. Every port is also a NodePort, so the range must
+  # sit in 30000-32767 and contain at least `maxMatches` ports. See deploy/sealos/.
+  ports: "31700-31707"
+  maxMatches: 8
   # Empty matches kept running so a join never waits on a process start.
   warmMatches: 1
   # Pod grace period. Child match processes die with the container; raise this to let a match finish.
   terminationGracePeriodSeconds: 30
-  # Host port nginx binds (hostNetwork). Above 1024 so the unprivileged image can listen.
-  httpsPort: 38443
   extraArgs: []
   # The limit covers the matchmaker and the match servers it spawns inside this container.
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { memory: 768Mi }
-  nginx:
-    image: nginxinc/nginx-unprivileged:1.27-alpine
-    # Not the game image: this one is pulled. The game image often uses pullPolicy Never.
-    pullPolicy: IfNotPresent
-    resources:
-      requests: { cpu: 10m, memory: 16Mi }
-      limits: { memory: 64Mi }
-  tls:
-    # Created out of band (Cloudflare origin certificate):
-    #   kubectl -n <ns> create secret tls evoclash-origin-tls --cert=origin.pem --key=origin.key
-    secretName: evoclash-origin-tls
-    # Require Cloudflare's authenticated origin pull client certificate.
-    originPull: true
-  # Used only when hostNetwork is false.
+  # The matchmaker listens on the pod network behind an Ingress (HTTPS for browsers); match UDP
+  # goes through one NodePort Service whose nodePorts equal `ports`, so the advertised port is the
+  # one players reach.
   nodePort:
     # Peers (besides loopback) whose X-Real-IP names the player, for the per-IP room rate
     # limit: the ingress gateway's source range. Comma-separated CIDRs; empty trusts none.
