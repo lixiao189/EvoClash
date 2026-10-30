@@ -398,14 +398,14 @@ fn preview_poses() {
 }
 
 /// Dev aid: `EVOCLASH_CITY_PREVIEW=out.bmp cargo test -p evoclash -- --ignored preview_city`
-/// lays out the procedural city tiles (2x2 repeats, to check seams); props are LPC now.
+/// lays out the procedural city tiles (2x2 repeats, to check seams); props are LPC sprites.
 #[test]
 #[ignore]
 fn preview_city() {
     let Ok(path) = std::env::var("EVOCLASH_CITY_PREVIEW") else {
         return;
     };
-    // Ground, roofs and most walls are LPC tiles now (`assets/lpc/`); these are what's left.
+    // Ground, roofs and most walls are LPC tiles (`assets/lpc/`); these are the procedural ones.
     let tiles = [
         paint_rad_ground(),
         paint_planks(),
@@ -490,7 +490,7 @@ fn preview_monsters() {
             }
         }
     };
-    // Dogs, ghouls, spitters, raiders and the behemoth are LPC sheets now (`preview_poses`).
+    // Dogs, ghouls, spitters, raiders and the behemoth are LPC sheets (`preview_poses`).
     let row1 = [paint_roach(0), paint_pod(), paint_crawler()];
     let mut x = 4;
     for c in &row1 {

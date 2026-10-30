@@ -549,9 +549,9 @@ const INITIAL_MARKER_FRAMES: u32 = 8;
 /// Floor matches lightyear's default (5ms). It only wins if the server ever sends
 /// faster than the ratio below; replication is every other tick (31.25ms), so it doesn't.
 const INTERP_MIN_DELAY: Duration = Duration::from_millis(5);
-/// 1.5× the send interval ≈ 47ms, against the default 1.2× (≈ 37ms). One lost packet is
-/// covered by render extrapolation (`render/smoothing.rs`), not a deeper buffer, so a
-/// LAN client stays near the old delay (~53ms → ~62ms, the extra being this half interval).
+/// 1.5× the send interval ≈ 47ms, against lightyear's default 1.2× (≈ 37ms). One lost packet
+/// is covered by render extrapolation (`render/smoothing.rs`), not a deeper buffer, so a LAN
+/// client buffers about 62ms: the 47ms plus this half interval.
 const INTERP_SEND_INTERVAL_RATIO: f32 = 1.5;
 /// Ticks of error ignored before the presentation clock speeds up or slows down.
 /// The default 1.0 tick is smaller than server-tick noise at high RTT, which pulsed
@@ -709,8 +709,8 @@ fn reload_keeps_seat(
 }
 
 /// `run_once` is checked even on frames where `assets_ready` is false, and that burns it.
-/// Only arm once the files are loaded, so the first `/v1/join` is this system and not the
-/// later "no client entity" retry (which used to send `match_id: null`).
+/// Only arm once the files are loaded, so the first `/v1/join` is this system's, not the later
+/// "no client entity" retry's, which sends no `match_id`.
 fn connect_when_ready(mut started: Local<bool>, pending: Res<PendingAssets>) -> bool {
     if pending.state != Loading::Ready {
         return false;
@@ -757,7 +757,8 @@ fn build_join(intent: JoinIntent, listed_closed: bool, args: &ClientArgs) -> (Jo
     )
 }
 
-/// A listed-room join never falls through to quick start. Other joins keep the old actions.
+/// A listed-room join never falls through to quick start; other joins use the action their
+/// error calls for.
 fn room_join_failure(
     listed: bool,
     error: &str,
@@ -1806,8 +1807,8 @@ mod tests {
 
     #[test]
     fn first_join_request_keeps_the_page_match_id() {
-        // Fresh session: `connect`'s old `run_once` was spent while assets loaded, so the
-        // first POST was the no-entity retry and never saw `prefer_listed`.
+        // Fresh session: `connect`'s `run_once` is spent while assets load, so the first POST
+        // is the no-entity retry, which never sees `prefer_listed`.
         let session = Session::default();
         assert!(!session.listed_closed);
         assert_eq!(session.intent, JoinIntent::FromArgs);

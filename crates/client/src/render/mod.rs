@@ -2,7 +2,8 @@
 //! monsters and walls stand up out of it. Everything upright is depth-sorted by where its
 //! feet touch the ground, so walking behind a wall hides you and in front of it doesn't.
 //!
-//! Collision is unchanged: every position is still the point on the ground under the feet.
+//! Collision uses the point on the ground under the feet: an entity's position is where it
+//! stands.
 
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::image::{ImageLoaderSettings, ImageSampler};
