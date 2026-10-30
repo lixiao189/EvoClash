@@ -4,11 +4,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Instant;
 
 use bevy::prelude::*;
-use evoclash_game::evolution::Evolution;
 use evoclash_game::net::{self, CONNECTION_TIMEOUT_SECS, PROTOCOL_ID};
-use evoclash_game::protocol::{
-    Departed, Departure, MAX_SPECTATORS, MatchState, Phase, Player, Stats,
-};
+use evoclash_game::protocol::{MAX_SPECTATORS, MatchState, Phase, Player, Stats};
 use lightyear::connection::client::Connected;
 use lightyear::netcode::{NetcodeServer, TokenUserData};
 use lightyear::prelude::server::*;
@@ -22,12 +19,8 @@ use crate::journal::{CatchingUp, Trace};
 use crate::ops::OpsState;
 use crate::spectate::{self, Admit, NewSpectator, SpectateSeq, SpectatorSession, first_id};
 
-/// A disconnected player's body stays in the arena this long so a flaky
-/// connection can resume with its gear intact.
-pub const RECONNECT_GRACE_TICKS: u32 = 64 * 20;
-
-/// Names of humans whose reconnect grace ran out. A rejoin after that is a new body (the seat is
-/// gone) but the same player, so it gets its name back instead of a fresh `幸存者N`.
+/// Names of humans whose held seat ran out. A rejoin after that is a new body (the seat is gone)
+/// but the same player, so it gets its name back instead of a fresh `幸存者N`.
 #[derive(Resource, Default)]
 pub struct ClearedSeats {
     names: std::collections::HashMap<u64, (String, u32)>,
@@ -37,7 +30,7 @@ impl ClearedSeats {
     /// Keep a cleared name this long (10 minutes at 64 Hz) at most.
     const KEEP_TICKS: u32 = 64 * 600;
 
-    fn remember(&mut self, client_id: u64, name: &str, tick: u32) {
+    pub(crate) fn remember(&mut self, client_id: u64, name: &str, tick: u32) {
         self.names.insert(client_id, (name.to_string(), tick));
     }
 
@@ -58,16 +51,19 @@ impl ClearedSeats {
 #[derive(Component)]
 pub struct Human {
     pub peer: PeerId,
-    pub disconnected_ticks: u32,
+    /// 0 while the link is up. Otherwise how many `Results -> Lobby` transitions the seat is
+    /// still held for: 1 for a drop in Lobby, Starting or Playing, 2 for a drop in Results
+    /// (the results screen that is already up does not count). The seat goes at 0.
+    pub holds: u8,
     /// Tick they first connected. A reconnect keeps it, so host handoff can pick the oldest.
     pub joined_at: u32,
-    /// Leave: drop now, don't wait out the reconnect grace.
+    /// Leave: drop the seat now instead of holding it.
     pub left: bool,
 }
 
 impl Human {
     pub fn connected(&self) -> bool {
-        self.disconnected_ticks == 0
+        self.holds == 0
     }
 }
 
@@ -109,7 +105,13 @@ impl Plugin for ConnectionsPlugin {
         app.add_observer(on_new_link);
         app.add_observer(on_connected);
         app.add_observer(hide_orphaned_control);
-        app.add_systems(FixedUpdate, track_presence.in_set(SimSet::Input));
+        // Before `sync_seats`, so a body leaves the map on the tick its link goes.
+        app.add_systems(
+            FixedUpdate,
+            track_presence
+                .in_set(SimSet::Input)
+                .before(crate::gameplay::sync_seats),
+        );
         app.init_resource::<ClearedSeats>();
         #[cfg(debug_assertions)]
         {
@@ -244,7 +246,8 @@ fn on_connected(
         .iter_mut()
         .find(|(_, _, player)| player.client_id == client_id)
     {
-        human.disconnected_ticks = 0;
+        human.holds = 0;
+        human.peer = peer;
         commands.entity(entity).insert(control);
         info!("{} ({peer:?}) reconnected", player.name);
         outbox.announce(format!("{} 重新连线", player.name));
@@ -306,7 +309,7 @@ fn on_connected(
                 control,
                 Human {
                     peer,
-                    disconnected_ticks: 0,
+                    holds: 0,
                     joined_at: now,
                     left: false,
                 },
@@ -361,75 +364,46 @@ pub fn color_for(id: u64) -> [f32; 3] {
     [c.red, c.green, c.blue]
 }
 
-/// Count down the grace period of humans whose link went away; remove them once it expires.
+/// Mark humans whose link went away. The seat is held until the results screen after the
+/// drop (`gameplay::seats`), not on a clock, and the body leaves the map with the link.
 fn track_presence(
-    mut commands: Commands,
     state: Query<&MatchState>,
     catching: Option<Res<CatchingUp>>,
     tick: Option<Res<SimTick>>,
     mut cleared: ResMut<ClearedSeats>,
-    mut departed: Query<&mut Departed>,
-    mut humans: Query<(
-        Entity,
-        &mut Human,
-        &Player,
-        &Stats,
-        &Evolution,
-        Option<&ControlledBy>,
-    )>,
+    mut humans: Query<(&mut Human, &Player, Option<&ControlledBy>)>,
     live_links: Query<(), With<Connected>>,
-    mut outbox: ResMut<Outbox>,
     mut trace: Option<ResMut<Trace>>,
 ) {
-    // Catch-up has no links yet. Recovering keeps its own 20s grace.
-    if catching.is_some() || state.iter().any(|s| s.phase == Phase::Recovering) {
+    // Catch-up has no links yet; `begin_wait` seeds the hold instead. Recovering still marks
+    // whoever did not come back, so their seats are held like any other drop.
+    if catching.is_some() {
         return;
     }
-    let playing = state.iter().any(|s| s.phase == Phase::Playing);
+    let phase = state.iter().next().map(|s| s.phase).unwrap_or(Phase::Lobby);
     let now = tick.as_ref().map(|tick| tick.0).unwrap_or(0);
     cleared.prune(now);
-    let mut expired = Vec::new();
-    for (entity, mut human, player, stats, evo, control) in &mut humans {
+    for (mut human, player, control) in &mut humans {
         if human.left {
             continue;
         }
-        let online = control.is_some_and(|c| live_links.contains(c.owner));
-        if online {
-            human.disconnected_ticks = 0;
+        if control.is_some_and(|c| live_links.contains(c.owner)) {
+            human.holds = 0;
             continue;
         }
-        if human.disconnected_ticks == 0 {
-            info!("{} lost connection, holding slot", player.name);
+        if human.connected() {
+            info!("{} lost connection, holding the seat", player.name);
+            human.holds = crate::gameplay::hold_rounds(phase);
             if let Some(trace) = trace.as_mut() {
                 trace.push(format!("disconnect {}", player.client_id));
             }
         }
-        human.disconnected_ticks += 1;
-        if human.disconnected_ticks > RECONNECT_GRACE_TICKS {
-            info!("{} timed out", player.name);
-            outbox.announce(format!("{} 离开了废土", player.name));
-            if let Some(trace) = trace.as_mut() {
-                trace.push(format!("leave {}", player.client_id));
-            }
-            if playing {
-                expired.push(Departure::from_combatant(player, stats, evo));
-            }
-            // A rejoin after this point is a new body; keep the name so it is still them.
-            cleared.remember(player.client_id, &player.name, now);
-            commands.entity(entity).despawn();
-        }
-    }
-    if !expired.is_empty()
-        && let Ok(mut departed) = departed.single_mut()
-    {
-        departed.0.extend(expired);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use evoclash_game::protocol::GameEvent;
 
     #[test]
     fn a_cleared_seat_keeps_its_name_for_one_rejoin() {
@@ -476,15 +450,13 @@ mod tests {
         assert!(!body.contains::<ControlledSend>());
     }
 
-    /// A human whose link dies keeps their seat (gear, score) for the grace window, then is
-    /// removed and their name remembered for a late rejoin.
+    /// A human whose link dies keeps their seat, counted in whole results screens, until the
+    /// one after the drop ends. Nothing clears it on a clock.
     #[test]
-    fn a_dropped_seat_is_held_for_the_grace_then_cleared() {
+    fn a_dropped_seat_is_held_past_the_reconnect_window() {
         let mut app = App::new();
-        app.init_resource::<Outbox>();
         app.init_resource::<ClearedSeats>();
         app.init_resource::<SimTick>();
-        app.init_resource::<NetworkingMetadata>();
         app.world_mut().spawn(MatchState {
             phase: Phase::Playing,
             ..default()
@@ -505,10 +477,10 @@ mod tests {
                     bot: false,
                 },
                 Stats::default(),
-                Evolution::default(),
+                evoclash_game::evolution::Evolution::default(),
                 Human {
                     peer: PeerId::Netcode(42),
-                    disconnected_ticks: 0,
+                    holds: 0,
                     joined_at: 0,
                     left: false,
                 },
@@ -519,59 +491,64 @@ mod tests {
             ))
             .id();
 
-        // Still connected: nothing counts down.
+        // Still connected: no hold.
         app.update();
-        assert_eq!(
-            app.world()
-                .entity(body)
-                .get::<Human>()
-                .unwrap()
-                .disconnected_ticks,
-            0
-        );
+        assert_eq!(app.world().entity(body).get::<Human>().unwrap().holds, 0);
 
-        // Link gone: the seat is held for the grace.
+        // Link gone: one results screen, no matter how long the link stays down.
         app.world_mut().despawn(link);
-        for _ in 0..RECONNECT_GRACE_TICKS {
+        for _ in 0..(64 * 600) {
             app.update();
         }
+        let human = app.world().entity(body).get::<Human>().unwrap();
+        assert_eq!(human.holds, 1, "a Playing drop holds one results screen");
+        assert!(!human.connected());
         assert!(
             app.world().get_entity(body).is_ok(),
-            "seat held during grace"
-        );
-        assert!(!app.world().entity(body).get::<Human>().unwrap().connected());
-
-        // Past the grace: removed, and the name is kept for the rejoin that follows.
-        app.update();
-        assert!(
-            app.world().get_entity(body).is_err(),
-            "seat cleared after grace"
-        );
-        let tick = app.world().resource::<SimTick>().0;
-        assert_eq!(
-            app.world_mut()
-                .resource_mut::<ClearedSeats>()
-                .take(42, tick),
-            Some("Alice".into())
-        );
-        // Everyone still in the match is told.
-        assert!(
-            app.world()
-                .resource::<Outbox>()
-                .reliable
-                .iter()
-                .any(|event| matches!(event, GameEvent::Announce(text) if text.contains("Alice")))
+            "the seat is still there"
         );
     }
 
-    /// A link that comes back inside the grace keeps the same body: no new spawn, no lost gear.
+    /// A drop in Results does not count the screen that is already up.
     #[test]
-    fn a_link_that_returns_inside_the_grace_keeps_the_seat() {
+    fn a_results_drop_holds_two_results_screens() {
         let mut app = App::new();
-        app.init_resource::<Outbox>();
         app.init_resource::<ClearedSeats>();
         app.init_resource::<SimTick>();
-        app.init_resource::<NetworkingMetadata>();
+        app.world_mut().spawn(MatchState {
+            phase: Phase::Results,
+            ..default()
+        });
+        app.add_systems(Update, track_presence);
+        let body = app
+            .world_mut()
+            .spawn((
+                Player {
+                    client_id: 9,
+                    name: "Dana".into(),
+                    color: [0.5, 0.5, 1.0],
+                    bot: false,
+                },
+                Stats::default(),
+                evoclash_game::evolution::Evolution::default(),
+                Human {
+                    peer: PeerId::Netcode(9),
+                    holds: 0,
+                    joined_at: 0,
+                    left: false,
+                },
+            ))
+            .id();
+        app.update();
+        assert_eq!(app.world().entity(body).get::<Human>().unwrap().holds, 2);
+    }
+
+    /// A link that comes back keeps the same body: no new spawn, no lost gear.
+    #[test]
+    fn a_link_that_returns_keeps_the_seat() {
+        let mut app = App::new();
+        app.init_resource::<ClearedSeats>();
+        app.init_resource::<SimTick>();
         app.world_mut().spawn(MatchState {
             phase: Phase::Playing,
             ..default()
@@ -592,10 +569,10 @@ mod tests {
                     bot: false,
                 },
                 Stats::default(),
-                Evolution::default(),
+                evoclash_game::evolution::Evolution::default(),
                 Human {
                     peer: PeerId::Netcode(7),
-                    disconnected_ticks: 0,
+                    holds: 0,
                     joined_at: 0,
                     left: false,
                 },
@@ -607,11 +584,12 @@ mod tests {
             .id();
         app.update();
 
-        // Ten seconds down, then the same client id connects on a new link.
+        // A minute down, then the same client id connects on a new link.
         app.world_mut().despawn(link);
-        for _ in 0..(64 * 10) {
+        for _ in 0..(64 * 60) {
             app.update();
         }
+        assert_eq!(app.world().entity(body).get::<Human>().unwrap().holds, 1);
         let returning = app
             .world_mut()
             .spawn((Connected, RemoteId(PeerId::Netcode(7))))

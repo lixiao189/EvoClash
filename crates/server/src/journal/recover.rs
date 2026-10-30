@@ -143,10 +143,24 @@ fn catch_up_playing(
     }
     gameplay::begin_wait(world);
     let tick = world.resource::<SimTick>().0;
+    // The seats are held from the first tick the recovered room simulates. A replay of this
+    // log learns the same holds from these lines, one tick after the freeze.
+    let mut away: Vec<u64> = {
+        let mut humans = world.query::<&evoclash_game::protocol::Player>();
+        humans
+            .iter(world)
+            .filter(|player| !player.bot)
+            .map(|player| player.client_id)
+            .collect()
+    };
+    away.sort_unstable();
     if let Some(mut journal) = world.get_resource_mut::<Journal>() {
         journal.adopt_match(snap.match_index, path);
         journal.record_plain(&format!("recover {tick}"));
         journal.mark(tick, "freeze");
+        for id in &away {
+            journal.mark(tick.saturating_add(1), &format!("disconnect {id}"));
+        }
         journal.flush();
     }
     let left = world

@@ -169,7 +169,7 @@ fn spawn_humans(app: &mut App, ids: &[u64]) {
         commands.entity(entity).insert((
             Human {
                 peer: PeerId::Netcode(*id),
-                disconnected_ticks: 0,
+                holds: 0,
                 joined_at: 0,
                 left: false,
             },
@@ -220,6 +220,74 @@ fn replay_two_humans_matches_scores_kills_and_digests() {
         "inventory move was not logged: {text}"
     );
     assert_replay(&played);
+}
+
+/// A human drops mid-match, the seat is held, the same client comes back: the match log has to
+/// replay to the same digests and scores.
+#[test]
+fn replay_holds_a_dropped_seat_and_takes_it_back() {
+    let dir = temp("seat-hold");
+    let mut app = recording_app(test_config(&dir, 0x5EA, false), 2);
+    spawn_humans(&mut app, &[11, 22]);
+    let mut playing_ticks = 0;
+    let mut dropped = false;
+    let mut back = false;
+    for _ in 0..1280 + 8_000 {
+        let tick = tick_of(&app);
+        let playing = phase_of(&mut app) == Phase::Playing;
+        let mut lines: Vec<String> = Vec::new();
+        {
+            let mut injected = app.world_mut().resource_mut::<Injected>();
+            injected.inputs.push((11, scripted(1, tick)));
+            injected.inputs.push((22, scripted(-1, tick)));
+            if playing && !dropped && tick >= 200 {
+                injected.disconnects.push(11);
+                lines.push("disconnect 11".to_string());
+                dropped = true;
+            }
+            if dropped && !back && tick >= 900 {
+                injected.connects.push(11);
+                lines.push("connect 11".to_string());
+                back = true;
+            }
+        }
+        // What the live presence path writes to the log for the same events.
+        if !lines.is_empty() {
+            let mut trace = app.world_mut().resource_mut::<Trace>();
+            for line in lines {
+                trace.push(line);
+            }
+        }
+        app.world_mut().run_schedule(FixedUpdate);
+        let phase = phase_of(&mut app);
+        let tick = tick_of(&app);
+        if phase == Phase::Playing {
+            playing_ticks = playing_ticks.max(tick);
+        }
+        if playing_ticks >= 1280 || phase == Phase::Results {
+            break;
+        }
+    }
+    app.world_mut().resource_mut::<Journal>().flush();
+    let path = app
+        .world()
+        .resource::<Journal>()
+        .match_path
+        .clone()
+        .expect("match log");
+    let scores = scoreboard(app.world_mut());
+    let kills = app.world().resource::<Journal>().kills.clone();
+    drop(app);
+    assert!(dropped && back, "the seat was dropped and taken back");
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains("disconnect 11"), "drop not logged: {text}");
+    assert!(text.contains("connect 11"), "reconnect not logged: {text}");
+    assert_replay(&Played {
+        path,
+        scores,
+        kills,
+        playing_ticks,
+    });
 }
 
 #[test]
@@ -519,7 +587,7 @@ fn recover_matches_the_truncated_tick_and_a_second_pass() {
         let world = recovered.world_mut();
         let mut humans = world.query::<&crate::connections::Human>();
         for human in humans.iter(world) {
-            assert_eq!(human.disconnected_ticks, 1);
+            assert_eq!(human.holds, 1);
         }
         let (frozen_clock, frozen_vault, frozen_eta) = {
             let mut states = world.query::<&mut MatchState>();
@@ -584,11 +652,18 @@ fn recover_matches_the_truncated_tick_and_a_second_pass() {
             .1;
         assert!(!vitals.alive);
         assert_eq!(vitals.deploy_in, 80);
-        // Those pokes are not in the log. Put the body back before play continues.
+        // Those pokes are not in the log. Put the body back before play continues, including
+        // the snapshot the held seat restores from.
         let mut dead = world.query::<(&Player, &mut Vitals)>();
         for (player, mut vitals) in dead.iter_mut(world) {
             if player.client_id == 11 {
                 *vitals = saved;
+            }
+        }
+        let mut held = world.query::<(&Player, &mut crate::gameplay::Withdrawn)>();
+        for (player, mut seat) in held.iter_mut(world) {
+            if player.client_id == 11 {
+                seat.body = saved;
             }
         }
         let mut idles = world.query::<&mut crate::gameplay::Idle>();
@@ -600,11 +675,24 @@ fn recover_matches_the_truncated_tick_and_a_second_pass() {
             state.boss_eta = frozen_eta;
         }
     }
+    // Both humans come back before the grace runs out. A real reconnect logs the same line.
     {
         let world = recovered.world_mut();
+        let mut ids: Vec<u64> = Vec::new();
+        {
+            let mut humans = world.query::<(&crate::connections::Human, &Player)>();
+            for (_, player) in humans.iter(world) {
+                ids.push(player.client_id);
+            }
+        }
+        ids.sort_unstable();
         let mut humans = world.query::<&mut crate::connections::Human>();
         for mut human in humans.iter_mut(world) {
-            human.disconnected_ticks = 0;
+            human.holds = 0;
+        }
+        let mut trace = world.resource_mut::<Trace>();
+        for id in ids {
+            trace.push(format!("connect {id}"));
         }
     }
     let mut resumed_at = None;

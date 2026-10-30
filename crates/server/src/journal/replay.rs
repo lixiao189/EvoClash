@@ -338,7 +338,7 @@ fn spawn_roster(world: &mut World, roster: &[RosterEntry]) {
                 commands.entity(entity).insert((
                     Human {
                         peer: PeerId::Netcode(entry.client_id),
-                        disconnected_ticks: 0,
+                        holds: 0,
                         joined_at: 0,
                         left: false,
                     },

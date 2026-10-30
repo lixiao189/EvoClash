@@ -450,13 +450,18 @@ pub(super) fn apply_presence(
     let connects = std::mem::take(&mut injected.connects);
     let disconnects = std::mem::take(&mut injected.disconnects);
     let leaves = std::mem::take(&mut injected.leaves);
-    let playing = state.iter().any(|s| s.phase == Phase::Playing);
+    let phase = state
+        .iter()
+        .next()
+        .map(|state| state.phase)
+        .unwrap_or(Phase::Lobby);
+    let playing = phase == Phase::Playing;
     for id in connects {
         if let Some((_, mut human, _, _, _)) = humans
             .iter_mut()
             .find(|(_, _, player, _, _)| player.client_id == id)
         {
-            human.disconnected_ticks = 0;
+            human.holds = 0;
             human.left = false;
         }
     }
@@ -466,7 +471,7 @@ pub(super) fn apply_presence(
             .find(|(_, _, player, _, _)| player.client_id == id)
             && human.connected()
         {
-            human.disconnected_ticks = 1;
+            human.holds = crate::gameplay::hold_rounds(phase);
         }
     }
     let mut gone = Vec::new();
@@ -564,7 +569,12 @@ pub(super) fn journal_flow(
         }
     }
     let lines = std::mem::take(&mut trace.lines);
-    if state.phase == Phase::Playing || state.phase == Phase::Results {
+    // Recovering records presence too: a reconnect during the wait decides whether the seat
+    // is held when play resumes, and a replay has to reach the same holds.
+    if matches!(
+        state.phase,
+        Phase::Playing | Phase::Results | Phase::Recovering
+    ) {
         for line in &lines {
             journal.record(tick.0, line);
         }

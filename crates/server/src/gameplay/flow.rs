@@ -427,14 +427,17 @@ pub fn reset_match(
 pub(super) fn place_starters(
     mut pending: ResMut<PendingStart>,
     arena: Res<Arena>,
-    mut players: Query<(
-        Entity,
-        &Player,
-        &mut Pos,
-        &mut Vitals,
-        &mut Dash,
-        &mut PosHistory,
-    )>,
+    mut players: Query<
+        (
+            Entity,
+            &Player,
+            &mut Pos,
+            &mut Vitals,
+            &mut Dash,
+            &mut PosHistory,
+        ),
+        Without<Withdrawn>,
+    >,
 ) {
     if !std::mem::take(&mut pending.0) {
         return;
