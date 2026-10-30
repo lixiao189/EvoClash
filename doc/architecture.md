@@ -19,7 +19,7 @@ Rust · Bevy 0.20（客户端只在浏览器里跑，目标 `wasm32`）· lighty
 | `crates/client` | `evoclash` | 浏览器客户端：输入、预测、渲染、特效、HUD、会话。原生 `main` 直接退出，只为了让测试和 clippy 能编 |
 | `crates/matchmaker` | `evoclash-matchmaker` | 席位、令牌、房间码、心跳注册表、本地拉起进程，并在 `/play/` 提供网页 |
 
-安装步骤和 Helm 命令仍在仓库根的 [README.md](../README.md)。这里只记设计。
+安装步骤和 Helm 命令在 [deployment.md](deployment.md)。这里只记设计。
 
 ## 共享层 `crates/game`
 
