@@ -22,7 +22,7 @@ Environment 名 `sealos`。`main` 上 CI 通过后，Deploy 的 `deploy` 任务�
 |---|---|---|
 | `SEALOS_KUBECONFIG` | secret | kubeconfig 全文 |
 | `SEALOS_NAMESPACE` | variable | 可选，默认 `ns-80h1uphq` |
-| `SEALOS_PUBLIC_HOST` | variable | 可选，覆盖 `single.publicHost`（IP，不是域名） |
+| `SEALOS_PUBLIC_HOST` | variable | 必填，`single.publicHost`（IP，不是域名；不要写进仓库） |
 | `SEALOS_HOST` | variable | 可选，覆盖 Ingress 域名（须在 `*.gzg.sealos.run` 下） |
 
 ## 手动部署
@@ -30,7 +30,8 @@ Environment 名 `sealos`。`main` 上 CI 通过后，Deploy 的 `deploy` 任务�
 ```bash
 export KUBECONFIG=~/Downloads/kubeconfig.yaml
 helm upgrade --install evoclash deploy/helm/evoclash -n ns-80h1uphq \
-  -f deploy/sealos/values-sealos.yaml --set image.tag=<tag> --wait
+  -f deploy/sealos/values-sealos.yaml --set image.tag=<tag> \
+  --set single.publicHost="$SEALOS_PUBLIC_HOST" --wait
 ```
 
 ## 销毁

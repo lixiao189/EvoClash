@@ -1,0 +1,27 @@
+# gitleaks config for CI's `secrets` job: the default secret rules plus public IPv4 addresses.
+# Server addresses, ports and credentials go in GitHub environment secrets / variables, not here.
+# A finding that is genuinely fine goes in .gitleaksignore (its fingerprint), not an allowlist
+# entry naming the address.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "public-ipv4"
+description = "Public IPv4 address (keep hosts in GitHub environment variables)"
+regex = '''\b(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b'''
+
+[[rules.allowlists]]
+description = "Loopback, private, link-local, CGNAT, unspecified, multicast and documentation ranges"
+regexTarget = "match"
+regexes = [
+  '''^(?:0|10|127|22[4-9]|23\d|24\d|25[0-5])\.''',
+  '''^100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.''',
+  '''^169\.254\.''',
+  '''^172\.(?:1[6-9]|2\d|3[01])\.''',
+  '''^192\.168\.''',
+  '''^(?:192\.0\.2|198\.51\.100|203\.0\.113)\.''',
+  '''^198\.1[89]\.''',
+  # Well-known public DNS resolvers in docs and commands.
+  '''^(?:1\.1\.1\.1|1\.0\.0\.1|8\.8\.8\.8|8\.8\.4\.4)$''',
+]

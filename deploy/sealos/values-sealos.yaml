@@ -6,8 +6,7 @@ image:
 
 single:
   enabled: true
-  # 任一节点公网 IP 都转发 NodePort（externalTrafficPolicy: Cluster）；这是 gzg.sealos.run 的 A 记录之一。
-  publicHost: 106.52.89.241
+  # publicHost 不写在仓库里：CD 用 environment sealos 的变量 SEALOS_PUBLIC_HOST 传入（见 README）。
   # 8 个 NodePort（配额 10）。nodePort == 容器端口 == matchmaker 下发的端口。
   ports: "31700-31707"
   maxMatches: 8
