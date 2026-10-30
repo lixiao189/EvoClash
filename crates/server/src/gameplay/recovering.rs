@@ -19,12 +19,15 @@ pub const RECOVER_RESUME_TICKS: u32 = 3 * TICKS_PER_SEC;
 pub struct ResumePending(pub bool);
 
 /// After a Playing catch-up: every human and watcher counts as just disconnected, and the
-/// 20s grace starts now.
+/// 20s grace starts now. A human who does not make it back keeps the seat (`track_presence`
+/// marks the drop); only watchers are dropped when the wait runs out.
 pub fn begin_wait(world: &mut World) {
     let mut humans = world.query::<&mut Human>();
     let mut total = 0u8;
     for mut human in humans.iter_mut(world) {
-        human.disconnected_ticks = 1;
+        // Everyone counts as away until their link comes back; a seat that is never reclaimed
+        // is held like any other drop instead of being cleared here.
+        human.holds = 1;
         if !human.left {
             total = total.saturating_add(1);
         }
@@ -81,10 +84,8 @@ pub(super) fn apply_resume(
 pub(super) fn step_recovering(
     mut commands: Commands,
     mut state: Query<&mut MatchState>,
-    humans: Query<(Entity, &Human, &Player, &Stats, &Evolution)>,
+    humans: Query<&Human>,
     sessions: Query<(Entity, &SpectatorSession)>,
-    mut departed: Query<&mut Departed>,
-    mut outbox: ResMut<Outbox>,
     mut journal: Option<ResMut<Journal>>,
     tick: Res<SimTick>,
     replaying: Option<Res<Replaying>>,
@@ -101,7 +102,7 @@ pub(super) fn step_recovering(
     }
     let back = humans
         .iter()
-        .filter(|(_, human, ..)| human.connected() && !human.left)
+        .filter(|human| human.connected() && !human.left)
         .count();
     state.recover.back = u8::try_from(back).unwrap_or(u8::MAX);
     if !state.recover.resuming {
@@ -112,38 +113,12 @@ pub(super) fn step_recovering(
                 return;
             }
         }
-        let mut gone = Vec::new();
-        for (entity, human, player, stats, evo) in &humans {
-            if human.left || human.connected() {
-                continue;
-            }
-            gone.push((
-                entity,
-                player.client_id,
-                player.name.clone(),
-                Departure::from_combatant(player, stats, evo),
-            ));
-        }
         let mut watchers = Vec::new();
         for (entity, session) in &sessions {
             if session.disconnected_ticks == 0 {
                 continue;
             }
             watchers.push((entity, session.client_id));
-        }
-        if !gone.is_empty()
-            && let Ok(mut departed) = departed.single_mut()
-        {
-            for (_, _, _, snap) in &gone {
-                departed.0.push(snap.clone());
-            }
-        }
-        for (entity, id, name, _) in &gone {
-            outbox.announce(format!("{name} 离开了废土"));
-            if let Some(journal) = journal.as_mut() {
-                journal.mark(tick.0, &format!("leave {id}"));
-            }
-            commands.entity(*entity).despawn();
         }
         for (entity, id) in &watchers {
             if let Some(journal) = journal.as_mut() {

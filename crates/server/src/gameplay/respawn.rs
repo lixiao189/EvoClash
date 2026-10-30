@@ -135,19 +135,22 @@ pub fn respawn(
     tick: Res<SimTick>,
     state: Query<&MatchState>,
     rng: Option<Res<SimRng>>,
-    mut players: Query<(
-        Entity,
-        &mut Pos,
-        &mut Vitals,
-        &mut Dash,
-        &mut PosHistory,
-        &mut Loadout,
-        &mut Evolution,
-        &mut SkillState,
-        &mut Wallet,
-        &mut LifeLog,
-        Option<&Player>,
-    )>,
+    mut players: Query<
+        (
+            Entity,
+            &mut Pos,
+            &mut Vitals,
+            &mut Dash,
+            &mut PosHistory,
+            &mut Loadout,
+            &mut Evolution,
+            &mut SkillState,
+            &mut Wallet,
+            &mut LifeLog,
+            Option<&Player>,
+        ),
+        Without<Withdrawn>,
+    >,
 ) {
     if state.iter().any(|s| s.phase == Phase::Recovering) {
         return;

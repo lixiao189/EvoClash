@@ -67,7 +67,7 @@ spec:
             - --min
             - {{ .Values.server.autoscaler.minReplicas | quote }}
             - --max
-            - {{ .Values.server.autoscaler.maxReplicas | quote }}
+            - {{ .Values.server.maxRooms | quote }}
             {{- end }}
             {{- range $mm.extraArgs }}
             - {{ . | quote }}

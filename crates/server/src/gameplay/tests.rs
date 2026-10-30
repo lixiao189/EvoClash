@@ -741,7 +741,7 @@ fn run_public_tick(phase: Phase, ticks_left: u32, match_index: u32) -> MatchStat
         ));
         app.world_mut().spawn(Human {
             peer: PeerId::Netcode(id),
-            disconnected_ticks: 0,
+            holds: 0,
             joined_at: 0,
             left: false,
         });
@@ -814,7 +814,7 @@ fn run_public_humans(humans: u64, countdown_active: bool, ticks_left: u32) -> Ma
             Stats::default(),
             Human {
                 peer: PeerId::Netcode(id),
-                disconnected_ticks: 0,
+                holds: 0,
                 joined_at: 0,
                 left: false,
             },
@@ -876,7 +876,7 @@ fn a_full_private_lobby_still_waits_for_the_host() {
             Stats::default(),
             Human {
                 peer: PeerId::Netcode(id),
-                disconnected_ticks: 0,
+                holds: 0,
                 joined_at: 0,
                 left: false,
             },
@@ -958,7 +958,7 @@ fn playing_leave_is_recorded_and_lobby_leave_is_not() {
         },
         Human {
             peer: PeerId::Netcode(1),
-            disconnected_ticks: 0,
+            holds: 0,
             joined_at: 0,
             left: false,
         },
@@ -1002,7 +1002,7 @@ fn playing_leave_is_recorded_and_lobby_leave_is_not() {
         },
         Human {
             peer: PeerId::Netcode(1),
-            disconnected_ticks: 0,
+            holds: 0,
             joined_at: 0,
             left: false,
         },
@@ -1062,7 +1062,7 @@ fn idle_app(alive: bool) -> (App, Entity) {
             },
             Human {
                 peer: PeerId::Netcode(3),
-                disconnected_ticks: 0,
+                holds: 0,
                 joined_at: 0,
                 left: false,
             },
@@ -1259,7 +1259,7 @@ fn run_private_tick(
             Stats::default(),
             Human {
                 peer: PeerId::Netcode(id),
-                disconnected_ticks: 0,
+                holds: 0,
                 joined_at: 0,
                 left: false,
             },
@@ -1801,7 +1801,7 @@ fn room_closes_with(
         // Link gone, seat still on the reconnect clock (a page refresh, a blackout).
         app.world_mut().spawn(Human {
             peer: PeerId::Netcode(7),
-            disconnected_ticks: 1,
+            holds: 1,
             joined_at: 0,
             left: false,
         });
@@ -2024,7 +2024,7 @@ fn prune_app(rows: Vec<BoardRow>, humans: &[(u64, u32)], watchers: &[u64]) -> Ap
             },
             Human {
                 peer: PeerId::Netcode(*id),
-                disconnected_ticks: *disconnected,
+                holds: u8::from(*disconnected != 0),
                 joined_at: 0,
                 left: false,
             },
@@ -2119,4 +2119,311 @@ fn a_watcher_who_leaves_drops_their_row() {
     app.world_mut().despawn(gone);
     app.update();
     assert!(board_ids(&mut app).is_empty());
+}
+
+// ---- Seat hold: a dropped human keeps the seat until the results screen after the drop ----
+
+fn set_phase(app: &mut App, phase: Phase) {
+    let world = app.world_mut();
+    let mut states = world.query::<&mut MatchState>();
+    states.iter_mut(world).next().unwrap().phase = phase;
+}
+
+fn seat_app(phase: Phase) -> App {
+    let mut app = App::new();
+    app.init_resource::<SimTick>()
+        .init_resource::<Outbox>()
+        .init_resource::<crate::connections::ClearedSeats>()
+        .init_resource::<crate::journal::Trace>();
+    app.world_mut().spawn(MatchState { phase, ..default() });
+    app.add_systems(Update, (sync_seats, expire_seats).chain());
+    app
+}
+
+/// A human body standing at `pos`, on the map, with its link up.
+fn seat_body(app: &mut App, id: u64, pos: Vec2) -> Entity {
+    app.world_mut()
+        .spawn((
+            Player {
+                client_id: id,
+                name: format!("h{id}"),
+                color: [1.0; 3],
+                bot: false,
+            },
+            Pos(pos),
+            Aim(Vec2::X),
+            Dash::default(),
+            Vitals::default(),
+            CurrentInput::default(),
+            Cooldowns::default(),
+            PosHistory::default(),
+            Stats::default(),
+            Evolution::default(),
+            SkillState::default(),
+            Loadout::default(),
+            Wallet::default(),
+            LifeLog::default(),
+            Human {
+                peer: PeerId::Netcode(id),
+                holds: 0,
+                joined_at: 0,
+                left: false,
+            },
+        ))
+        .id()
+}
+
+fn drop_seat(app: &mut App, body: Entity, phase: Phase) {
+    app.world_mut()
+        .entity_mut(body)
+        .get_mut::<Human>()
+        .unwrap()
+        .holds = hold_rounds(phase);
+}
+
+/// One `Results -> Lobby` transition.
+fn end_results(app: &mut App) {
+    set_phase(app, Phase::Results);
+    app.update();
+    set_phase(app, Phase::Lobby);
+    app.update();
+}
+
+#[test]
+fn a_seat_is_held_for_the_first_results_after_the_drop() {
+    for (phase, screens) in [
+        (Phase::Playing, 1),
+        (Phase::Lobby, 1),
+        (Phase::Starting, 1),
+        (Phase::Results, 2),
+    ] {
+        let mut app = seat_app(phase);
+        let body = seat_body(&mut app, 5, Vec2::new(10.0, 20.0));
+        drop_seat(&mut app, body, phase);
+        app.update();
+        assert!(
+            app.world().entity(body).contains::<Withdrawn>(),
+            "{phase:?}: the body leaves the map on the drop"
+        );
+        for screen in 1..=screens {
+            end_results(&mut app);
+            if screen < screens {
+                assert!(
+                    app.world().get_entity(body).is_ok(),
+                    "{phase:?}: still held after {screen} results screen(s)"
+                );
+            }
+        }
+        assert!(
+            app.world().get_entity(body).is_err(),
+            "{phase:?}: the seat goes after {screens} results screen(s)"
+        );
+    }
+}
+
+#[test]
+fn a_withdrawn_body_is_off_the_map_and_frozen() {
+    let mut app = seat_app(Phase::Playing);
+    let body = seat_body(&mut app, 7, Vec2::new(100.0, 40.0));
+    app.world_mut()
+        .entity_mut(body)
+        .insert(Replicate::to_clients(NetworkTarget::All));
+    {
+        let mut entity = app.world_mut().entity_mut(body);
+        *entity.get_mut::<Stats>().unwrap() = Stats {
+            score: 12,
+            kills: 3,
+            deaths: 2,
+            streak: 2,
+            level: 4,
+            last_score_tick: 90,
+        };
+        *entity.get_mut::<Evolution>().unwrap() = {
+            let mut evo = Evolution::default();
+            evo.add_xp(500);
+            evo
+        };
+    }
+    let frozen = app.world().get::<Evolution>(body).unwrap().clone();
+    drop_seat(&mut app, body, Phase::Playing);
+    app.update();
+
+    let entity = app.world().entity(body);
+    assert!(entity.contains::<Withdrawn>());
+    assert!(
+        !entity.get::<Vitals>().unwrap().alive,
+        "dead, so no path can reach it"
+    );
+    assert_ne!(
+        entity.get::<Replicate>(),
+        Some(&Replicate::to_clients(NetworkTarget::None)),
+        "still replicated: the seat stays on every scoreboard and results table"
+    );
+    assert_eq!(entity.get::<Stats>().unwrap().score, 12);
+    assert_eq!(entity.get::<Stats>().unwrap().kills, 3);
+    assert_eq!(entity.get::<Evolution>().unwrap(), &frozen);
+
+    // Monsters only ever chase `prey`, which is the living.
+    let prey = {
+        let world = app.world_mut();
+        let mut query = world.query::<(Entity, &Pos, &Vitals)>();
+        crate::monsters::prey(query.iter(world))
+    };
+    assert!(prey.is_empty(), "a withdrawn body is not prey");
+
+    // It does not move, and the respawn system does not bring it back.
+    app.insert_resource(Arena(ArenaMap::generate(4)))
+        .init_resource::<Obstacles>();
+    app.add_systems(Update, (movement, respawn));
+    {
+        let mut input = app.world_mut().get_mut::<CurrentInput>(body).unwrap();
+        input.0.move_x = 1;
+        input.0.fire = true;
+    }
+    for _ in 0..10 {
+        app.update();
+    }
+    assert_eq!(
+        app.world().get::<Pos>(body).unwrap().0,
+        Vec2::new(100.0, 40.0)
+    );
+    assert!(!app.world().get::<Vitals>(body).unwrap().alive);
+}
+
+#[test]
+fn a_reconnect_in_playing_stands_on_a_spawn_point_behind_the_spawn_shield() {
+    let mut app = seat_app(Phase::Playing);
+    app.insert_resource(Arena(ArenaMap::generate(9)));
+    app.insert_resource(SimRng::from_match_seed(9));
+    {
+        // Start of a round: the respawn picks one of the map's spawn points.
+        let world = app.world_mut();
+        let mut states = world.query::<&mut MatchState>();
+        states.iter_mut(world).next().unwrap().ticks_left = MATCH_TICKS;
+    }
+    app.add_systems(Update, respawn);
+    let body = seat_body(&mut app, 8, Vec2::new(100.0, 40.0));
+    drop_seat(&mut app, body, Phase::Playing);
+    app.update();
+    assert!(app.world().entity(body).contains::<Withdrawn>());
+
+    app.world_mut()
+        .entity_mut(body)
+        .get_mut::<Human>()
+        .unwrap()
+        .holds = 0;
+    // The marker goes first, then `respawn` stands the body up on the next resolve.
+    for _ in 0..3 {
+        app.update();
+    }
+    let entity = app.world().entity(body);
+    assert!(!entity.contains::<Withdrawn>(), "back on the map");
+    let vitals = entity.get::<Vitals>().unwrap();
+    assert!(vitals.alive);
+    assert_eq!(vitals.shield, SPAWN_SHIELD_TICKS);
+    let arena = app.world().resource::<Arena>();
+    assert!(
+        arena
+            .0
+            .spawn_points
+            .contains(&entity.get::<Pos>().unwrap().0),
+        "a Playing reconnect respawns on a spawn point"
+    );
+}
+
+#[test]
+fn a_reconnect_outside_playing_puts_the_body_back_where_it_stood() {
+    let mut app = seat_app(Phase::Lobby);
+    let body = seat_body(&mut app, 9, Vec2::new(-30.0, 12.5));
+    app.world_mut()
+        .entity_mut(body)
+        .insert(Replicate::to_clients(NetworkTarget::All));
+    {
+        let mut vitals = app.world_mut().get_mut::<Vitals>(body).unwrap();
+        vitals.hp = 61.0;
+    }
+    drop_seat(&mut app, body, Phase::Lobby);
+    app.update();
+    assert!(!app.world().get::<Vitals>(body).unwrap().alive);
+
+    app.world_mut()
+        .entity_mut(body)
+        .get_mut::<Human>()
+        .unwrap()
+        .holds = 0;
+    app.update();
+    let entity = app.world().entity(body);
+    assert!(!entity.contains::<Withdrawn>());
+    assert_eq!(entity.get::<Pos>().unwrap().0, Vec2::new(-30.0, 12.5));
+    let vitals = entity.get::<Vitals>().unwrap();
+    assert!(vitals.alive, "the seat is back exactly as it was");
+    assert_eq!(vitals.hp, 61.0);
+    assert_eq!(
+        entity.get::<Replicate>(),
+        Some(&Replicate::to_clients(NetworkTarget::All))
+    );
+}
+
+#[test]
+fn an_expired_seat_is_filled_by_a_bot_on_the_next_lobby_tick() {
+    let mut app = App::new();
+    app.insert_resource(ServerConfig {
+        port: 0,
+        match_id: "seat-hold".into(),
+        public_addr: "127.0.0.1:0".parse().unwrap(),
+        max_players: 8,
+        min_combatants: 8,
+        matchmakers: Vec::new(),
+        single_match: false,
+        monsters: false,
+        threads: 1,
+        statefulset: false,
+        room_seed: 1,
+        private: false,
+        room_code: String::new(),
+        log_dir: std::env::temp_dir(),
+        replay: None,
+        recover: false,
+        logging: false,
+    });
+    app.init_resource::<SimTick>()
+        .init_resource::<Outbox>()
+        .init_resource::<crate::connections::ClearedSeats>()
+        .init_resource::<crate::journal::Trace>()
+        .insert_resource(SimRng::from_match_seed(1));
+    app.world_mut().spawn((
+        MatchState {
+            phase: Phase::Lobby,
+            ..default()
+        },
+        RoomSettings {
+            bots: Some(ROOM_COMBATANTS),
+            ..default()
+        },
+    ));
+    app.add_systems(
+        Update,
+        (sync_seats, expire_seats, crate::bots::balance_bots).chain(),
+    );
+    let body = seat_body(&mut app, 5, Vec2::ZERO);
+    app.update();
+    set_phase(&mut app, Phase::Playing);
+    app.update();
+    let bots = |app: &mut App| {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<&Player, With<crate::bots::Bot>>();
+        query.iter(world).count()
+    };
+    assert_eq!(bots(&mut app), 7, "the held seat keeps its slot");
+
+    drop_seat(&mut app, body, Phase::Playing);
+    app.update();
+    assert_eq!(bots(&mut app), 7, "a held seat is not filled");
+
+    set_phase(&mut app, Phase::Results);
+    app.update();
+    set_phase(&mut app, Phase::Lobby);
+    app.update();
+    assert!(app.world().get_entity(body).is_err(), "the seat is gone");
+    assert_eq!(bots(&mut app), 8, "the bot roster fills the free seat");
 }

@@ -474,6 +474,32 @@ mod tests {
         );
     }
 
+    /// A held seat is out of the map: it walks over a gun without taking it.
+    #[test]
+    fn a_withdrawn_body_picks_nothing_up() {
+        let mut app = app();
+        app.add_systems(Update, pickups);
+        let p = spawn_player(&mut app, 1, Vec2::ZERO, Loadout::default());
+        {
+            let mut vitals = app.world_mut().get_mut::<Vitals>(p).unwrap();
+            // What `gameplay::seats` does to a dropped body.
+            vitals.alive = false;
+        }
+        let mut commands = app.world_mut().commands();
+        spawn_pickup(
+            &mut commands,
+            Item::weapon(WeaponKind::Railgun),
+            Vec2::X,
+            None,
+        );
+        app.update();
+        assert_eq!(
+            pickups_on_ground(&mut app),
+            [Item::weapon(WeaponKind::Railgun)],
+            "a withdrawn body takes nothing"
+        );
+    }
+
     #[test]
     fn the_fallen_drop_one_bag_and_the_killer_salvages_ammo() {
         let mut app = app();

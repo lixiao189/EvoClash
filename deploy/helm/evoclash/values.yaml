@@ -69,8 +69,12 @@ server:
   threads: 1
   # UDP port of pod ordinal 0. Pod N binds basePort + N on its node's network (hostNetwork), so
   # two matches on one node never share a port and clients reach a match by node IP and port.
-  # Open basePort .. basePort + replicas - 1 to players (WebTransport runs over UDP).
+  # Players must be able to reach basePort .. basePort + maxRooms - 1 (WebTransport runs over
+  # UDP): that whole range is the firewall / security-group rule to open.
   basePort: 7000
+  # Hard ceiling on rooms, and therefore on pods of the match StatefulSet: one pod is one room.
+  # The scaler never goes above it, and `replicas` (autoscaling off) may not exceed it.
+  maxRooms: 300
   # IP written into connect tokens. Empty = the pod's status.hostIP (the node it runs on), which
   # is right whenever nodes have public IPs. Set it when the node's public address differs from
   # the internal one (NAT, a cloud load balancer in front): every match on every node then
@@ -81,6 +85,21 @@ server:
   # SIGTERM drains (finish the match, then exit): one 8-minute match plus warmup and intermission.
   # A pod is a long-lived room that loops matches, so this only bounds a drain, not a restart.
   terminationGracePeriodSeconds: 540
+  # One PersistentVolumeClaim per pod for the room journal (room and match logs). A restarted
+  # container resumes the room it finds there: same match id, same address, same port, players
+  # rejoin and the room replays its journal. Claims are deleted with their pod, so scaling down
+  # does not leave volumes behind.
+  journal:
+    persistence:
+      # Off: the journal lives on an emptyDir, which only survives a container restart inside the
+      # same pod. If the pod is deleted or moved to another node (eviction, node drain, scale-down
+      # then up) the room is gone and the pod opens a new one. On: a PVC per pod, which also
+      # survives pod deletion and rescheduling.
+      enabled: true
+      # Size per pod. Room and match logs are tiny (a few MB per match, pruned after 16 minutes).
+      size: 1Gi
+      # Empty: the cluster's default StorageClass.
+      storageClass: ""
   # Pods share the node's network, so no single probe port fits every pod: the probe runs the
   # server binary against a health file the simulation refreshes while it ticks (--healthcheck).
   livenessProbe:
@@ -91,14 +110,13 @@ server:
     failureThreshold: 3
   # Buffer autoscaling, done by the matchmaker through the StatefulSet's scale subresource
   # (crates/matchmaker/src/scaler/): replicas = matches with players + bufferSize, clamped to
-  # min..max. Scale-down only removes empty, highest-ordinal pods; a player on the top pod holds
-  # it until their match ends. An idle pod is a warm room between matches, so joins never wait
-  # for a pod start.
+  # minReplicas..maxRooms (the `--max` the matchmaker gets). Scale-down only removes empty,
+  # highest-ordinal pods; a player on the top pod holds it until their match ends. An idle pod is
+  # a warm room between matches, so joins never wait for a pod start.
   autoscaler:
     enabled: true
     bufferSize: 3
     minReplicas: 3
-    maxReplicas: 300
   extraArgs: []
   resources:
     requests: { cpu: 100m, memory: 64Mi }
@@ -119,6 +137,8 @@ single:
   # Inclusive UDP range the match servers bind. Every port is also a NodePort, so the range must
   # sit in 30000-32767 and contain at least `maxMatches` ports. See deploy/sealos/.
   ports: "31700-31707"
+  # Room cap for single mode: one match process per room, all in this one pod. The range above
+  # must contain at least this many ports.
   maxMatches: 8
   # Empty matches kept running so a join never waits on a process start.
   warmMatches: 1

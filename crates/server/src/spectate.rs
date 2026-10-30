@@ -13,9 +13,9 @@ use lightyear::prelude::*;
 
 use crate::bots::PlainBots;
 use crate::config::ServerConfig;
-use crate::connections::{Human, RECONNECT_GRACE_TICKS, color_for};
+use crate::connections::{Human, color_for};
 use crate::gameplay::{
-    Idle, Outbox, SimSet, SimTick, final_rank, read_human_inputs, read_room_commands,
+    Idle, Outbox, SimSet, SimTick, Withdrawn, final_rank, read_human_inputs, read_room_commands,
     spawn_combatant, spawn_plain_combatant,
 };
 use crate::journal::{Injected, Trace};
@@ -36,6 +36,10 @@ pub enum SeatSet {
     Promote,
     Bots,
 }
+
+/// How long a dropped watcher's seat is kept. Combat seats are held by results screens
+/// instead (`gameplay::seats`); a watcher keeps the old 20s clock.
+pub const SPECTATE_GRACE_TICKS: u32 = 64 * 20;
 
 /// Server-only. The replicated [`Spectator`] sits on the same entity.
 #[derive(Component, Debug)]
@@ -276,6 +280,7 @@ fn update_spectators(
     state: Query<&MatchState>,
     players: Query<(&Player, &Stats)>,
     humans: Query<&Human>,
+    away: Query<&Player, With<Withdrawn>>,
     mut sessions: Query<(Entity, &mut SpectatorSession, &mut Spectator)>,
     live_links: Query<(), With<Connected>>,
     mut inbox: ResMut<SpectateInbox>,
@@ -289,11 +294,16 @@ fn update_spectators(
     let recovering = state
         .iter()
         .any(|match_state| match_state.phase == Phase::Recovering);
-    let ids = ranked_ids(
+    // A held seat is off the map: nobody watches an invisible body, so it is not a subject.
+    let away: Vec<u64> = away.iter().map(|player| player.client_id).collect();
+    let ids: Vec<u64> = ranked_ids(
         players
             .iter()
             .map(|(player, stats)| (player.client_id, stats)),
-    );
+    )
+    .into_iter()
+    .filter(|id| !away.contains(id))
+    .collect();
     let cmds = std::mem::take(&mut inbox.commands);
     let mut ordered: Vec<(u64, u64, Entity)> = sessions
         .iter()
@@ -321,7 +331,7 @@ fn update_spectators(
             continue;
         };
         session.disconnected_ticks = session.disconnected_ticks.saturating_add(1);
-        if session.disconnected_ticks > RECONNECT_GRACE_TICKS {
+        if session.disconnected_ticks > SPECTATE_GRACE_TICKS {
             drop_grace.push(*entity);
         }
     }
@@ -426,7 +436,8 @@ fn update_spectators(
         body.insert((
             Human {
                 peer,
-                disconnected_ticks,
+                // A watcher that is promoted while its link is down keeps the seat held.
+                holds: u8::from(disconnected_ticks != 0),
                 joined_at: tick.0,
                 left: false,
             },
@@ -628,7 +639,7 @@ mod tests {
             },
             Human {
                 peer: PeerId::Netcode(client_id),
-                disconnected_ticks: 0,
+                holds: 0,
                 joined_at: 0,
                 left: false,
             },
@@ -792,6 +803,61 @@ mod tests {
         assert_eq!(following(&mut app), 3, "a lost target snaps back to first");
     }
 
+    /// A held seat is off the map, so it is not something a watcher can be looking at.
+    #[test]
+    fn follow_skips_a_held_seat() {
+        let mut app = App::new();
+        app.insert_resource(test_config());
+        app.init_resource::<SimTick>();
+        app.init_resource::<Outbox>();
+        app.init_resource::<SpectateSeq>();
+        app.init_resource::<SpectateInbox>();
+        app.world_mut().spawn(MatchState {
+            phase: Phase::Playing,
+            ..default()
+        });
+        for (id, score) in [(1u64, 1u32), (2, 9), (3, 4)] {
+            let mut body = app.world_mut().spawn((
+                Player {
+                    client_id: id,
+                    name: format!("p{id}"),
+                    color: [1.0; 3],
+                    bot: false,
+                },
+                Stats { score, ..default() },
+            ));
+            if id == 2 {
+                body.insert(crate::gameplay::Withdrawn {
+                    body: evoclash_game::protocol::Vitals::default(),
+                    pos: Vec2::ZERO,
+                    dash: evoclash_game::protocol::Dash::default(),
+                });
+            }
+        }
+        app.world_mut().spawn((
+            Spectator::default(),
+            SpectatorSession {
+                client_id: 50,
+                name: "eye".into(),
+                peer: PeerId::Netcode(50),
+                link: Entity::PLACEHOLDER,
+                order: 1,
+                watched: false,
+                disconnected_ticks: 0,
+            },
+        ));
+        app.add_systems(Update, update_spectators);
+        app.update();
+        let following = app
+            .world_mut()
+            .query::<&Spectator>()
+            .iter(app.world())
+            .next()
+            .unwrap()
+            .following;
+        assert_eq!(following, 3, "first place is held, so second place it is");
+    }
+
     #[test]
     fn watcher_inputs_are_ignored() {
         use crate::gameplay::{CurrentInput, read_human_inputs, spawn_plain_combatant};
@@ -854,7 +920,7 @@ mod tests {
             );
             commands.entity(entity).insert(Human {
                 peer: PeerId::Netcode(1),
-                disconnected_ticks: 0,
+                holds: 0,
                 joined_at: 0,
                 left: false,
             });

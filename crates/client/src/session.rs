@@ -25,7 +25,9 @@ use crate::connect_ui::{ConnectionStatus, LinkStatus};
 
 /// How long a dropped link is retried before the session gives up. Time, not tries: a
 /// matchmaker restart or a long outage then costs seconds instead of the whole budget.
-const RECONNECT_BUDGET_SECS: f32 = 180.0;
+/// The server holds the seat until the first results screen after the drop ends, at most
+/// about 9 minutes (a drop as results begin waits out the next lobby, match and results).
+const RECONNECT_BUDGET_SECS: f32 = 600.0;
 /// A first handshake that never comes up is not a dropped match (wrong port, a rejecting
 /// server), so it gives up sooner than a reconnect does.
 const FIRST_JOIN_BUDGET_SECS: f32 = 45.0;
@@ -39,11 +41,6 @@ const GONE_RETRY_SECS: f32 = 10.0;
 /// Pace of those retries. Every client of a restarted matchmaker hits it at once; a beat
 /// (2 s) is the soonest it can know the match again.
 const GONE_RETRY_EVERY_SECS: f32 = 1.0;
-/// The server holds a dropped seat this long (`connections::RECONNECT_GRACE_TICKS`). An outage
-/// longer than this comes back as a new body, and the player is told so.
-const SERVER_GRACE_SECS: f32 = 20.0;
-/// How long that line stays up.
-const NEW_BODY_NOTICE_SECS: f32 = 6.0;
 /// A matchmaker call that has not answered by now is treated as lost (browser fetch can hang).
 const CALL_TIMEOUT_SECS: f32 = 12.0;
 /// Hold the link open this long after 离开 so `RoomCommand::Leave` leaves the client.
@@ -243,12 +240,6 @@ fn reconnect_exhausted(down_for: f32, ever_connected: bool) -> bool {
     down_for >= reconnect_budget(ever_connected)
 }
 
-/// A reconnect that outlived the server's grace came back to a new body: the old seat, gear and
-/// score are gone, which the player should be told instead of silently playing on.
-fn outage_lost_the_seat(was_connected: bool, down_for: f32) -> bool {
-    was_connected && down_for >= SERVER_GRACE_SECS
-}
-
 /// What a `gone` reply to a rejoin means.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GoneDecision {
@@ -357,6 +348,8 @@ struct Seat {
     client_id: u64,
     token: Vec<u8>,
     reconnect_key: String,
+    /// Private room code, if this seat is in one. A reload of a `?room=` page matches on it.
+    room_code: Option<String>,
 }
 
 impl Seat {
@@ -374,6 +367,7 @@ impl Seat {
             client_id: response.client_id,
             token,
             reconnect_key: response.reconnect_key,
+            room_code: response.room_code,
         })
     }
 }
@@ -393,6 +387,7 @@ fn stored_seat() -> Option<Seat> {
         client_id: stored.client_id,
         token: Vec::new(),
         reconnect_key: stored.reconnect_key,
+        room_code: stored.room_code,
     })
 }
 
@@ -445,8 +440,6 @@ enum NoticeWait {
 pub(crate) const RECOVERING: &str = "服务器恢复中…";
 /// 410 `abandoned`: this match was voided. The player picks 快速开始; we do not requeue.
 pub(crate) const ABANDONED: &str = "服务器出错，本局已作废。";
-/// The outage outlived the server's grace, so the seat (and its gear and score) was cleared.
-pub(crate) const NEW_BODY: &str = "离开太久，已重新加入对局（新的角色）。";
 /// 410 `gone` for a match this client was seated in: the process restarted (a StatefulSet pod
 /// comes back with a new match id) or the match was closed. Never join a fresh match silently.
 pub(crate) const MATCH_GONE: &str = "这一局已经结束了。\n点击 快速开始 重新加入";
@@ -472,9 +465,6 @@ pub struct Session {
     listed_closed: bool,
     /// The call in flight is that listed-room join (not a rejoin or a quick start).
     listed_join: bool,
-    /// Seconds left on a one-off line in [`JoinNotice`] (`NEW_BODY`). The link being live
-    /// clears the notice every frame, so a timed one has to outrank that.
-    notice_left: f32,
     /// Listed-room join failed: leave for `/play/?notice=`.
     home_notice: Option<String>,
 }
@@ -682,9 +672,16 @@ fn spawn_client(commands: &mut Commands, seat: &Seat, args: &ClientArgs) -> Resu
 
 fn connect(mut session: ResMut<Session>, args: Res<ClientArgs>, time: Res<Time>) {
     // A reload keeps the seat: the tab remembers its reconnect key, so 刷新 rejoins the match it
-    // was in instead of queueing for a new one. A page that names a room or match wants that.
-    let page_seat = args.match_id.is_none() && args.room.is_none() && !args.create_room;
-    if page_seat && let Some(seat) = stored_seat() {
+    // was in (gear and all) instead of joining again as a new body. The URL still carries how
+    // the tab got in (`?match=`, `?room=`, `?create=1`); the seat wins whenever it is that place.
+    if let Some(seat) = stored_seat().filter(|seat| {
+        reload_keeps_seat(
+            args.match_id.as_deref(),
+            args.room.as_deref(),
+            &seat.match_id,
+            seat.room_code.as_deref(),
+        )
+    }) {
         info!(
             "rejoining {} as client {} after a reload",
             seat.match_id, seat.client_id
@@ -694,6 +691,21 @@ fn connect(mut session: ResMut<Session>, args: Res<ClientArgs>, time: Res<Time>)
         return;
     }
     session.dispatch(&args, time.elapsed_secs());
+}
+
+/// Whether a reload of this page should rejoin the stored seat. A page naming another match or
+/// room code means the player went somewhere else; `?create=1` names nothing, so the room the
+/// tab created (its stored seat) is the one to go back to instead of creating another.
+fn reload_keeps_seat(
+    page_match: Option<&str>,
+    page_room: Option<&str>,
+    seat_match: &str,
+    seat_room: Option<&str>,
+) -> bool {
+    let same_match = page_match.is_none_or(|id| id == seat_match);
+    let same_room =
+        page_room.is_none_or(|code| seat_room.is_some_and(|seat| seat.eq_ignore_ascii_case(code)));
+    same_match && same_room
 }
 
 /// `run_once` is checked even on frames where `assets_ready` is false, and that burns it.
@@ -1231,7 +1243,14 @@ fn watch_connection(
                         match_id: seat.match_id.clone(),
                         client_id: seat.client_id,
                         reconnect_key: seat.reconnect_key.clone(),
+                        room_code: seat.room_code.clone(),
                     });
+                    if args.create_room {
+                        crate::seat_store::settle_created_url(
+                            &seat.match_id,
+                            seat.room_code.as_deref(),
+                        );
+                    }
                 }
             }
             Err(e) => {
@@ -1349,17 +1368,8 @@ fn watch_connection(
         if link.attempts > 0 {
             info!("connection restored");
         }
-        // Tell the player once when the outage outlived the grace: the body is new.
-        if outage_lost_the_seat(link.ever_connected, down_for) {
-            warn!("outage outlived the grace; back in as a new body");
-            session.notice_left = NEW_BODY_NOTICE_SECS;
-        }
-        if session.notice_left > 0.0 {
-            session.notice_left = (session.notice_left - time.delta_secs()).max(0.0);
-            notice.0 = NEW_BODY.to_string();
-        } else {
-            notice.0.clear();
-        }
+        // A seat that expired while away is announced by the server, which alone knows.
+        notice.0.clear();
         link.attempts = 0;
         link.counted = false;
         link.since_change = 0.0;
@@ -1907,17 +1917,16 @@ mod tests {
     }
 
     #[test]
-    fn a_long_outage_comes_back_as_a_new_body() {
-        // A blip (inside the server's 20s grace) keeps the seat: no line, no new body.
-        assert!(!outage_lost_the_seat(true, 0.0));
-        assert!(!outage_lost_the_seat(true, 15.0));
-        assert!(!outage_lost_the_seat(true, SERVER_GRACE_SECS - 0.1));
-        // Past the grace the server cleared the seat.
-        assert!(outage_lost_the_seat(true, SERVER_GRACE_SECS));
-        assert!(outage_lost_the_seat(true, 25.0));
-        // A first join that never came up has no seat to lose.
-        assert!(!outage_lost_the_seat(false, 60.0));
-        assert_eq!(NEW_BODY, "离开太久，已重新加入对局（新的角色）。");
+    fn a_reload_rejoins_the_seat_the_page_was_in() {
+        // Quick start and 创建房间 (`?create=1`) name no place: the stored seat is it.
+        assert!(reload_keeps_seat(None, None, "m1", None));
+        // Joined from the room list (`?match=`) or by code (`?room=`): same place, same seat.
+        assert!(reload_keeps_seat(Some("m1"), None, "m1", None));
+        assert!(reload_keeps_seat(None, Some("abcd"), "m1", Some("ABCD")));
+        // The page now names somewhere else: join that instead.
+        assert!(!reload_keeps_seat(Some("m2"), None, "m1", None));
+        assert!(!reload_keeps_seat(None, Some("WXYZ"), "m1", Some("ABCD")));
+        assert!(!reload_keeps_seat(None, Some("ABCD"), "m1", None));
     }
 
     #[test]

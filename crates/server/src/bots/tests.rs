@@ -131,7 +131,7 @@ fn spawn_humans(app: &mut App, n: usize) -> Vec<Entity> {
                     },
                     Human {
                         peer: PeerId::Netcode(client_id),
-                        disconnected_ticks: 0,
+                        holds: 0,
                         joined_at: 0,
                         left: false,
                     },

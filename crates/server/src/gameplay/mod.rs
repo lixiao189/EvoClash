@@ -35,6 +35,7 @@ mod movement;
 mod recovering;
 mod respawn;
 mod room;
+mod seats;
 mod spawning;
 #[cfg(test)]
 mod tests;
@@ -50,6 +51,8 @@ pub use recovering::{begin_wait, resume_playing};
 pub use respawn::*;
 pub(crate) use room::read_room_commands;
 use room::{maintain_host, private_idle_cap};
+pub use seats::{Withdrawn, hold_rounds};
+pub(crate) use seats::{expire_seats, sync_seats};
 pub use spawning::*;
 
 pub const TICKS_PER_SEC: u32 = 64;
@@ -136,6 +139,12 @@ impl Plugin for GameplayPlugin {
                     .in_set(SimSet::Input)
                     .before(read_human_inputs),
                 read_human_inputs.in_set(SimSet::Input),
+                // After every presence system of this tick: a drop takes the body out of the
+                // map, a reconnect puts it back. A hold that ran out goes before the sim too.
+                (sync_seats, expire_seats)
+                    .chain()
+                    .in_set(SimSet::Input)
+                    .after(read_human_inputs),
                 read_room_commands.in_set(SimSet::Input),
                 (
                     drop_shield_on_attack,
