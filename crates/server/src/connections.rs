@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use bevy::prelude::*;
 use evoclash_game::net::{self, CONNECTION_TIMEOUT_SECS, PROTOCOL_ID};
-use evoclash_game::protocol::{MAX_SPECTATORS, MatchState, Phase, Player, Stats};
+use evoclash_game::protocol::{GameEvent, MAX_SPECTATORS, MatchState, Phase, Player, Stats};
 use lightyear::connection::client::Connected;
 use lightyear::netcode::{NetcodeServer, TokenUserData};
 use lightyear::prelude::server::*;
@@ -46,6 +46,9 @@ impl ClearedSeats {
             .retain(|_, (_, cleared)| tick.saturating_sub(*cleared) <= Self::KEEP_TICKS);
     }
 }
+
+/// Sent to a player whose held seat expired before they came back.
+const SEAT_EXPIRED: &str = "座位保留已到期，已作为新角色重新加入。";
 
 /// Server-side marker for human-controlled combatants.
 #[derive(Component)]
@@ -315,6 +318,12 @@ fn on_connected(
                 },
                 crate::gameplay::Idle::default(),
             ));
+            if returning.is_some() {
+                // Only the server knows the hold ran out; tell the player why they start over.
+                outbox
+                    .direct
+                    .push((entity, GameEvent::Announce(SEAT_EXPIRED.to_string())));
+            }
             if let Some(trace) = trace.as_mut() {
                 trace.push(format!("connect {client_id}"));
             }

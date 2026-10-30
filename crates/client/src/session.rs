@@ -25,7 +25,9 @@ use crate::connect_ui::{ConnectionStatus, LinkStatus};
 
 /// How long a dropped link is retried before the session gives up. Time, not tries: a
 /// matchmaker restart or a long outage then costs seconds instead of the whole budget.
-const RECONNECT_BUDGET_SECS: f32 = 180.0;
+/// The server holds the seat until the first results screen after the drop ends, at most
+/// about 9 minutes (a drop as results begin waits out the next lobby, match and results).
+const RECONNECT_BUDGET_SECS: f32 = 600.0;
 /// A first handshake that never comes up is not a dropped match (wrong port, a rejecting
 /// server), so it gives up sooner than a reconnect does.
 const FIRST_JOIN_BUDGET_SECS: f32 = 45.0;
@@ -39,11 +41,6 @@ const GONE_RETRY_SECS: f32 = 10.0;
 /// Pace of those retries. Every client of a restarted matchmaker hits it at once; a beat
 /// (2 s) is the soonest it can know the match again.
 const GONE_RETRY_EVERY_SECS: f32 = 1.0;
-/// The server holds a dropped seat this long (`connections::RECONNECT_GRACE_TICKS`). An outage
-/// longer than this comes back as a new body, and the player is told so.
-const SERVER_GRACE_SECS: f32 = 20.0;
-/// How long that line stays up.
-const NEW_BODY_NOTICE_SECS: f32 = 6.0;
 /// A matchmaker call that has not answered by now is treated as lost (browser fetch can hang).
 const CALL_TIMEOUT_SECS: f32 = 12.0;
 /// Hold the link open this long after 离开 so `RoomCommand::Leave` leaves the client.
@@ -243,12 +240,6 @@ fn reconnect_exhausted(down_for: f32, ever_connected: bool) -> bool {
     down_for >= reconnect_budget(ever_connected)
 }
 
-/// A reconnect that outlived the server's grace came back to a new body: the old seat, gear and
-/// score are gone, which the player should be told instead of silently playing on.
-fn outage_lost_the_seat(was_connected: bool, down_for: f32) -> bool {
-    was_connected && down_for >= SERVER_GRACE_SECS
-}
-
 /// What a `gone` reply to a rejoin means.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GoneDecision {
@@ -445,8 +436,6 @@ enum NoticeWait {
 pub(crate) const RECOVERING: &str = "服务器恢复中…";
 /// 410 `abandoned`: this match was voided. The player picks 快速开始; we do not requeue.
 pub(crate) const ABANDONED: &str = "服务器出错，本局已作废。";
-/// The outage outlived the server's grace, so the seat (and its gear and score) was cleared.
-pub(crate) const NEW_BODY: &str = "离开太久，已重新加入对局（新的角色）。";
 /// 410 `gone` for a match this client was seated in: the process restarted (a StatefulSet pod
 /// comes back with a new match id) or the match was closed. Never join a fresh match silently.
 pub(crate) const MATCH_GONE: &str = "这一局已经结束了。\n点击 快速开始 重新加入";
@@ -472,9 +461,6 @@ pub struct Session {
     listed_closed: bool,
     /// The call in flight is that listed-room join (not a rejoin or a quick start).
     listed_join: bool,
-    /// Seconds left on a one-off line in [`JoinNotice`] (`NEW_BODY`). The link being live
-    /// clears the notice every frame, so a timed one has to outrank that.
-    notice_left: f32,
     /// Listed-room join failed: leave for `/play/?notice=`.
     home_notice: Option<String>,
 }
@@ -1349,17 +1335,8 @@ fn watch_connection(
         if link.attempts > 0 {
             info!("connection restored");
         }
-        // Tell the player once when the outage outlived the grace: the body is new.
-        if outage_lost_the_seat(link.ever_connected, down_for) {
-            warn!("outage outlived the grace; back in as a new body");
-            session.notice_left = NEW_BODY_NOTICE_SECS;
-        }
-        if session.notice_left > 0.0 {
-            session.notice_left = (session.notice_left - time.delta_secs()).max(0.0);
-            notice.0 = NEW_BODY.to_string();
-        } else {
-            notice.0.clear();
-        }
+        // A seat that expired while away is announced by the server, which alone knows.
+        notice.0.clear();
         link.attempts = 0;
         link.counted = false;
         link.since_change = 0.0;
@@ -1904,20 +1881,6 @@ mod tests {
         assert!(reconnect_budget(false) < reconnect_budget(true));
         assert!(!reconnect_exhausted(25.0, false));
         assert!(reconnect_exhausted(FIRST_JOIN_BUDGET_SECS, false));
-    }
-
-    #[test]
-    fn a_long_outage_comes_back_as_a_new_body() {
-        // A blip (inside the server's 20s grace) keeps the seat: no line, no new body.
-        assert!(!outage_lost_the_seat(true, 0.0));
-        assert!(!outage_lost_the_seat(true, 15.0));
-        assert!(!outage_lost_the_seat(true, SERVER_GRACE_SECS - 0.1));
-        // Past the grace the server cleared the seat.
-        assert!(outage_lost_the_seat(true, SERVER_GRACE_SECS));
-        assert!(outage_lost_the_seat(true, 25.0));
-        // A first join that never came up has no seat to lose.
-        assert!(!outage_lost_the_seat(false, 60.0));
-        assert_eq!(NEW_BODY, "离开太久，已重新加入对局（新的角色）。");
     }
 
     #[test]
