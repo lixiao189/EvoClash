@@ -43,7 +43,7 @@ use evoclash_game::protocol::ROOM_COMBATANTS;
 use serde_json::json;
 use tower_http::services::ServeDir;
 
-use crate::fleet::{Fleet, FleetConfig};
+use crate::fleet::{Fleet, FleetConfig, Stopped};
 use crate::registry::{JoinPlan, MatchInfo, Registry};
 
 struct AppState {
@@ -432,14 +432,15 @@ async fn rejoin(State(state): State<Shared>, Json(request): Json<RejoinRequest>)
     };
     state.rejoins.fetch_add(1, Ordering::Relaxed);
     match found {
-        // The server knows the name from the original token; the body is kept on its side.
+        // A live server keeps the seat (and its name) on its side. A `--recover` process that
+        // did not restore this seat seats the token's name, so carry it.
         Some((addr, room_code)) => {
             issue(
                 &state,
                 request.match_id,
                 addr,
                 request.client_id,
-                "",
+                &sanitize_name(&request.name),
                 room_code,
                 false,
             )
@@ -573,10 +574,10 @@ async fn janitor(state: Shared) {
                     println!("match {id} exited ({code:?})");
                     steps.push(registry.on_process_exit(&id, code));
                 }
-                steps.extend(registry.poll_crashes(Instant::now()));
+                steps.extend(registry.poll_crashes(Instant::now(), |id| fleet.owns(id)));
             }
             for step in steps {
-                apply_step(&state, fleet, step);
+                apply_step(&state, fleet, step).await;
             }
             let mut registry = state.registry.lock().expect("registry lock");
             for _ in registry.idle_matches()..state.warm_matches {
@@ -586,7 +587,9 @@ async fn janitor(state: Shared) {
                 }
             }
         } else {
-            // Adopt-only: nothing to relaunch, so a missed heartbeat just drops the entry.
+            // Adopt-only (`--no-launch`): the servers are pods or external processes, so there is
+            // no child to kill and nothing to relaunch. A missed heartbeat just drops the entry,
+            // exactly as before: cluster recovery is the orchestrator's job, not ours.
             let dead = state.registry.lock().expect("registry lock").reap();
             for id in dead {
                 println!("match {id} stopped heartbeating; removed");
@@ -595,7 +598,7 @@ async fn janitor(state: Shared) {
     }
 }
 
-fn apply_step(state: &AppState, fleet: &Fleet, step: recovery::Step) {
+async fn apply_step(state: &AppState, fleet: &Fleet, step: recovery::Step) {
     match step {
         recovery::Step::None => {}
         recovery::Step::Dropped(id) => {
@@ -607,6 +610,20 @@ fn apply_step(state: &AppState, fleet: &Fleet, step: recovery::Step) {
             fleet.kill(&id);
         }
         recovery::Step::Relaunch(launch) => {
+            // A heartbeat timeout is not an exit: a frozen (SIGSTOP) or deadlocked server is
+            // still running and would write the same room log as its `--recover` replacement.
+            // Kill it and wait for the exit before the replacement starts.
+            match fleet.stop(&launch.id).await {
+                Stopped::Killed(code) => {
+                    println!("stopped hung match {} ({code:?})", launch.id)
+                }
+                Stopped::Linger => println!(
+                    "match {} did not exit within the stop timeout; relaunching anyway",
+                    launch.id
+                ),
+                // No child (adopt-only, or already reaped): the crash path is unchanged.
+                Stopped::NotOurs => {}
+            }
             let used = state.registry.lock().expect("registry lock").used_addrs();
             match fleet.launch_recover(
                 &launch.id,

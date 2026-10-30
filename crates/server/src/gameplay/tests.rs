@@ -1781,6 +1781,15 @@ fn room_closes_after(phase: Phase, watcher: bool) -> bool {
 }
 
 fn room_closes_after_with(phase: Phase, watcher: bool, config: ServerConfig) -> bool {
+    room_closes_with(phase, watcher, false, config)
+}
+
+fn room_closes_with(
+    phase: Phase,
+    watcher: bool,
+    dropped_human: bool,
+    config: ServerConfig,
+) -> bool {
     use crate::ops::OpsState;
     use crate::spectate::SpectatorSession;
 
@@ -1788,6 +1797,15 @@ fn room_closes_after_with(phase: Phase, watcher: bool, config: ServerConfig) -> 
     app.insert_resource(config);
     app.insert_resource(OpsState::for_test());
     app.world_mut().spawn(MatchState { phase, ..default() });
+    if dropped_human {
+        // Link gone, seat still on the reconnect clock (a page refresh, a blackout).
+        app.world_mut().spawn(Human {
+            peer: PeerId::Netcode(7),
+            disconnected_ticks: 1,
+            joined_at: 0,
+            left: false,
+        });
+    }
     if watcher {
         app.world_mut().spawn((
             Spectator {
@@ -1811,6 +1829,16 @@ fn room_closes_after_with(phase: Phase, watcher: bool, config: ServerConfig) -> 
     }
     let mut messages = app.world_mut().resource_mut::<Messages<AppExit>>();
     messages.drain().next().is_some()
+}
+
+#[test]
+fn a_seat_in_reconnect_grace_keeps_the_room_open() {
+    for phase in [Phase::Lobby, Phase::Playing, Phase::Results] {
+        assert!(
+            !room_closes_with(phase, false, true, server_config()),
+            "{phase:?}: the only human dropped but still holds a seat; the room must wait"
+        );
+    }
 }
 
 #[test]

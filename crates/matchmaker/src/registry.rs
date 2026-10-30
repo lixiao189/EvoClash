@@ -752,8 +752,14 @@ impl Registry {
         self.begin_crash(id)
     }
 
-    /// Heartbeat gap. A process already marked `exiting` is removed. Others crash.
-    pub fn poll_crashes(&mut self, now: Instant) -> Vec<recovery::Step> {
+    /// Heartbeat gap. A process already marked `exiting` is removed, and so is one we do not
+    /// `own`: an adopted server may still be running (frozen, or its last beat was lost), and a
+    /// `--recover` copy would run the same room twice. Owned ones crash.
+    pub fn poll_crashes(
+        &mut self,
+        now: Instant,
+        owns: impl Fn(&str) -> bool,
+    ) -> Vec<recovery::Step> {
         let ids: Vec<String> = self.matches.keys().cloned().collect();
         let mut steps = Vec::new();
         for id in ids {
@@ -767,7 +773,7 @@ impl Registry {
             if abandoned || healthy {
                 continue;
             }
-            if exiting {
+            if exiting || !owns(&id) {
                 self.forget(&id);
                 steps.push(recovery::Step::Dropped(id));
                 continue;

@@ -1,0 +1,470 @@
+#!/usr/bin/env bash
+# scripts/fault-inject — break the local fleet on purpose and check what reconnect does.
+#
+# The local fleet is what `make run` starts: a matchmaker that launches one `evoclash-server`
+# per room on demand. These commands kill, freeze and restart those processes, and drive
+# `/v1/join` + `/v1/rejoin` with curl the way the browser client does, so the reconnect path can
+# be exercised without a browser.
+#
+#   scripts/fault-inject start                 build, then run the matchmaker (like `make run`)
+#   scripts/fault-inject status                pids, matches, room processes
+#   scripts/fault-inject join NAME             → match_id / client_id / reconnect_key
+#   scripts/fault-inject rejoin MATCH ID KEY   → HTTP status + body of /v1/rejoin
+#   scripts/fault-inject kill-room [MATCH]     SIGKILL a match server (crash recovery)
+#   scripts/fault-inject freeze-room SECS [MATCH]   SIGSTOP it, wait, SIGCONT
+#   scripts/fault-inject restart-mm            SIGKILL the matchmaker, start it again
+#   scripts/fault-inject pod-up ID             server that heartbeats to the adopt-only
+#   scripts/fault-inject pod-down ID           matchmaker on :8081 (a StatefulSet pod)
+#   scripts/fault-inject scenario a|d|e|g|all  run the checks below
+#   scripts/fault-inject stop                  kill the matchmaker and every match server
+#
+# Scenarios this script can check from a shell (browser ones are noted in each case):
+#   a/b  the matchmaker hands the same seat back after a drop (the 20s server grace that keeps
+#        the body is covered by `cargo test -p evoclash-server connections`).
+#   c    a seat cleared by the grace reconnects as a new body with the same name
+#        (`cargo test -p evoclash-server connections`); the client then shows MATCH_GONE only if
+#        the match itself is gone.
+#   d    kill -9 a match server: `--recover` relaunches it with the same match id and the
+#        client's rejoin keeps working. A room is abandoned after two recoveries, which is why
+#        every scenario starts from a clean fleet.
+#   e    kill -9 the matchmaker: it answers `gone`/refuses connections until the running rooms
+#        heartbeat back in, then rejoins again. The client retries for 180s (RECONNECT_BUDGET).
+#   g    a StatefulSet pod restart: the old match id is gone for good and a new one appears, so
+#        the client gets `gone` and must go back to the room list.
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+LISTEN="${LISTEN:-127.0.0.1:8080}"
+BASE="http://$LISTEN"
+POD_LISTEN="${POD_LISTEN:-127.0.0.1:8081}"
+POD_BASE="http://$POD_LISTEN"
+STATE="$ROOT/logs/fault"
+MM_LOG="$STATE/matchmaker.log"
+POD_MM_LOG="$STATE/pod-matchmaker.log"
+SERVER_BIN="$ROOT/target/debug/evoclash-server"
+MM_BIN="$ROOT/target/debug/evoclash-matchmaker"
+BOTS="${BOTS:-8}"
+
+fail() {
+	echo "FAIL: $*" >&2
+	return 1
+}
+
+ok() { echo "ok   $*"; }
+
+mm_pid() {
+	local pid
+	pid="$(cat "$STATE/matchmaker.pid" 2>/dev/null)"
+	[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && echo "$pid"
+}
+
+pod_mm_pid() {
+	local pid
+	pid="$(cat "$STATE/pod-matchmaker.pid" 2>/dev/null)"
+	[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && echo "$pid"
+}
+
+# Every match server on this host, newest last. `--match-id` identifies them in `ps`.
+room_pids() {
+	ps -eo pid=,command= | grep -F "evoclash-server --port" | grep -v grep | awk '{print $1}'
+}
+
+room_pid_for() {
+	local id="$1"
+	ps -eo pid=,command= | grep -F "evoclash-server --port" | grep -F -- "--match-id $id" |
+		grep -v grep | awk '{print $1}' | head -1
+}
+
+newest_room_pid() {
+	room_pids | tail -1
+}
+
+# `logs/fault/matchmaker.log` accumulates across runs, so a check looks only at what was
+# appended after this offset.
+log_size() { wc -c <"$1" | tr -d ' '; }
+log_from() { tail -c "+$(($2 + 1))" "$1" 2>/dev/null; }
+
+wait_http() {
+	local url="$1" tries="${2:-40}"
+	for _ in $(seq "$tries"); do
+		if curl -fsS -m 1 "$url" >/dev/null 2>&1; then return 0; fi
+		sleep 0.25
+	done
+	return 1
+}
+
+start() {
+	if [ -n "$(mm_pid)" ]; then
+		echo "matchmaker already running (pid $(mm_pid))"
+		return 0
+	fi
+	echo "building…"
+	cargo build -q -p evoclash-server -p evoclash-matchmaker || return 1
+	mkdir -p "$STATE"
+	local web=()
+	[ -d "$ROOT/target/web" ] && web=(--web-dir "$ROOT/target/web")
+	nohup "$MM_BIN" --listen "$LISTEN" --bots "$BOTS" --log-dir "$ROOT/logs" "${web[@]}" \
+		>"$MM_LOG" 2>&1 &
+	echo $! >"$STATE/matchmaker.pid"
+	# Forget the job: bash would otherwise print "Killed: 9" when a later command kills it.
+	disown
+	wait_http "$BASE/v1/matches" || {
+		fail "matchmaker did not come up; see $MM_LOG"
+		return 1
+	}
+	ok "matchmaker on $BASE (pid $(mm_pid)), log $MM_LOG"
+}
+
+stop() {
+	if [ -n "$(pod_mm_pid)" ]; then
+		kill -9 "$(pod_mm_pid)" 2>/dev/null
+		ok "stopped the adopt-only matchmaker"
+	fi
+	rm -f "$STATE/pod-matchmaker.pid"
+	for pid in $(room_pids); do
+		kill -9 "$pid" 2>/dev/null
+	done
+	if [ -n "$(mm_pid)" ]; then
+		kill -9 "$(mm_pid)" 2>/dev/null
+		ok "stopped the matchmaker"
+	fi
+	rm -f "$STATE/matchmaker.pid"
+	for pid in $(room_pids); do
+		kill -9 "$pid" 2>/dev/null
+	done
+	ok "stopped every match server"
+}
+
+status() {
+	echo "matchmaker: $(mm_pid || echo none)  adopt-only: $(pod_mm_pid || echo none)"
+	echo "rooms:"
+	ps -eo pid=,command= | grep -F "evoclash-server --port" | grep -v grep | sed 's/^/  /' ||
+		echo "  none"
+	echo "matches:"
+	curl -fsS -m 2 "$BASE/v1/matches" 2>/dev/null | sed 's/^/  /' || echo "  (matchmaker down)"
+}
+
+join() {
+	local name="${1:-Tester}"
+	curl -sS -m 5 -X POST "$BASE/v1/join" -H 'Content-Type: application/json' \
+		-d "{\"name\":\"$name\",\"region\":null,\"match_id\":null,\"room\":null}"
+}
+
+# Prints the HTTP status on the first line and the body after it (without the connect token,
+# which is a page of base64).
+rejoin() {
+	local match="$1" client="$2" key="$3" base="${4:-$BASE}"
+	curl -sS -m 5 -o "$STATE/rejoin.body" -w '%{http_code}\n' -X POST "$base/v1/rejoin" \
+		-H 'Content-Type: application/json' \
+		-d "{\"match_id\":\"$match\",\"client_id\":$client,\"reconnect_key\":\"$key\"}" ||
+		echo 000
+	if jq -e . "$STATE/rejoin.body" >/dev/null 2>&1; then
+		jq -c 'del(.connect_token)' "$STATE/rejoin.body"
+	else
+		cat "$STATE/rejoin.body" 2>/dev/null
+	fi
+	echo
+}
+
+kill_room() {
+	local id="${1:-}" pid
+	if [ -n "$id" ]; then pid="$(room_pid_for "$id")"; else pid="$(newest_room_pid)"; fi
+	[ -n "$pid" ] || {
+		fail "no match server to kill"
+		return 1
+	}
+	echo "SIGKILL $pid ($(ps -o command= -p "$pid" | grep -o -- '--match-id [^ ]*'))"
+	kill -9 "$pid"
+}
+
+freeze_room() {
+	local secs="${1:?freeze-room SECS}" id="${2:-}" pid
+	if [ -n "$id" ]; then pid="$(room_pid_for "$id")"; else pid="$(newest_room_pid)"; fi
+	[ -n "$pid" ] || {
+		fail "no match server to freeze"
+		return 1
+	}
+	echo "SIGSTOP $pid for ${secs}s"
+	kill -STOP "$pid"
+	sleep "$secs"
+	kill -CONT "$pid"
+	echo "SIGCONT $pid"
+}
+
+restart_mm() {
+	local pid
+	pid="$(mm_pid)" || {
+		fail "no matchmaker to restart"
+		return 1
+	}
+	echo "SIGKILL matchmaker $pid (match servers keep running, the new one adopts them)"
+	kill -9 "$pid"
+	rm -f "$STATE/matchmaker.pid"
+	sleep 0.5
+	start
+}
+
+# --- adopt-only matchmaker + hand-launched servers: a StatefulSet pod restart --------------
+
+pod_mm_start() {
+	if [ -n "$(pod_mm_pid)" ]; then return 0; fi
+	local web=()
+	# Serve the built client too, so scenario g can be looked at in a browser.
+	[ -d "$ROOT/target/web" ] && web=(--web-dir "$ROOT/target/web")
+	nohup "$MM_BIN" --listen "$POD_LISTEN" --no-launch --log-dir "$ROOT/logs" "${web[@]}" \
+		>"$POD_MM_LOG" 2>&1 &
+	echo $! >"$STATE/pod-matchmaker.pid"
+	disown
+	wait_http "$POD_BASE/v1/matches" || {
+		fail "adopt-only matchmaker did not come up; see $POD_MM_LOG"
+		return 1
+	}
+	ok "adopt-only matchmaker on $POD_BASE (pid $(pod_mm_pid))"
+}
+
+# pod-up ID: one server of the StatefulSet, like `evoclash-server-0` after a restart.
+pod_up() {
+	local id="$1" port=7200
+	while ss -lun 2>/dev/null | grep -q ":$port "; do port=$((port + 1)); done
+	nohup "$SERVER_BIN" --port "$port" --public-addr "127.0.0.1:$port" --match-id "$id" \
+		--bots "$BOTS" --matchmaker "$POD_BASE" --room-seed 7 --log-dir "$ROOT/logs" \
+		>"$STATE/pod-$id.log" 2>&1 &
+	echo $! >"$STATE/pod-$id.pid"
+	disown
+	# The heartbeat is what puts the pod in the registry.
+	for _ in $(seq 40); do
+		if curl -fsS -m 1 "$POD_BASE/v1/matches" 2>/dev/null | grep -q "\"$id\""; then
+			ok "pod $id listening on $port, registered"
+			return 0
+		fi
+		sleep 0.25
+	done
+	fail "pod $id never registered"
+}
+
+pod_down() {
+	local id="$1" pid
+	pid="$(cat "$STATE/pod-$id.pid" 2>/dev/null)"
+	[ -n "$pid" ] || {
+		fail "pod $id is not running"
+		return 1
+	}
+	kill -9 "$pid" 2>/dev/null
+	rm -f "$STATE/pod-$id.pid"
+	ok "killed pod $id (pid $pid)"
+}
+
+# --- scenarios ----------------------------------------------------------------------------
+
+# a: join, then rejoin right away. The matchmaker must hand back the same match and client id
+# (the server-side 20s grace that keeps the body is a World test).
+scenario_a() {
+	echo "== a: short drop — the seat comes back"
+	local joined match client key
+	joined="$(join Alice)" || return 1
+	match="$(jq -r '.match_id' <<<"$joined")"
+	client="$(jq -r '.client_id' <<<"$joined")"
+	key="$(jq -r '.reconnect_key' <<<"$joined")"
+	echo "   joined $match as client $client"
+	sleep 3
+	local reply status
+	reply="$(rejoin "$match" "$client" "$key")"
+	status="$(head -1 <<<"$reply")"
+	local again
+	again="$(jq -r '.match_id // empty' <<<"$(tail -n +2 <<<"$reply")" 2>/dev/null)"
+	if [ "$status" = 200 ] && [ "$again" = "$match" ]; then
+		ok "rejoin after 3s: 200, same match $again"
+	else
+		fail "rejoin after 3s: $status $(tail -n +2 <<<"$reply")"
+	fi
+}
+
+# d: kill -9 the match server. The fleet relaunches it with `--recover` and the same match id;
+# rejoin answers 503 recovering until the fast-forward is done, then a normal token again.
+scenario_d() {
+	echo "== d: kill -9 a match server — --recover keeps the match id"
+	local joined match client key
+	joined="$(join Drew)" || return 1
+	match="$(jq -r '.match_id' <<<"$joined")"
+	client="$(jq -r '.client_id' <<<"$joined")"
+	key="$(jq -r '.reconnect_key' <<<"$joined")"
+	echo "   joined $match as client $client"
+	sleep 2
+	local offset
+	offset="$(log_size "$MM_LOG")"
+	kill_room "$match" || return 1
+	# The matchmaker notices on its next 2s janitor pass; until then it still hands out tokens
+	# for the dead process, which is why the client retries the handshake instead of the HTTP.
+	local relaunched=0
+	for _ in $(seq 30); do
+		if log_from "$MM_LOG" "$offset" | grep -q "recovering match $match"; then
+			relaunched=1
+			break
+		fi
+		sleep 0.5
+	done
+	[ "$relaunched" = 1 ] && ok "matchmaker relaunched $match" ||
+		fail "the matchmaker never relaunched $match"
+	if ps -eo command= | grep -F -- "--match-id $match" | grep -q -- "--recover"; then
+		ok "the replacement runs with --recover on the same match id"
+	else
+		fail "no replacement with --recover for $match"
+	fi
+	local statuses=() status body back=0 recovering=0
+	for _ in $(seq 60); do
+		body="$(rejoin "$match" "$client" "$key")"
+		status="$(head -1 <<<"$body")"
+		statuses+=("$status")
+		[ "$status" = 503 ] && recovering=$((recovering + 1))
+		# Only a 200 from the recovered entry counts: before the relaunch the matchmaker still
+		# hands out tokens for the dead process.
+		if [ "$status" = 200 ] && log_from "$MM_LOG" "$offset" | grep -q "recovering match $match"; then
+			back=1
+			break
+		fi
+		sleep 0.5
+	done
+	echo "   rejoin statuses after the crash: ${statuses[*]}"
+	if [ "$back" = 1 ]; then
+		ok "rejoin works again on $match ($recovering x 503 recovering while it caught up)"
+	else
+		fail "rejoin never succeeded after the crash"
+	fi
+}
+
+# e: kill -9 the matchmaker while a match runs. It has no state on disk, so it answers `gone`
+# for the running match until the servers heartbeat back in (2s each, 6s timeout).
+scenario_e() {
+	echo "== e: restart the matchmaker — rejoin must recover by itself"
+	local joined match client key
+	joined="$(join Erin)" || return 1
+	match="$(jq -r '.match_id' <<<"$joined")"
+	client="$(jq -r '.client_id' <<<"$joined")"
+	key="$(jq -r '.reconnect_key' <<<"$joined")"
+	echo "   joined $match as client $client"
+	sleep 2
+	restart_mm || return 1
+	local statuses=() status body back=0
+	for _ in $(seq 40); do
+		body="$(rejoin "$match" "$client" "$key")"
+		status="$(head -1 <<<"$body")"
+		statuses+=("$status")
+		if [ "$status" = 200 ]; then
+			back=1
+			break
+		fi
+		sleep 0.5
+	done
+	echo "   statuses: ${statuses[*]}"
+	if [ "$back" = 1 ]; then
+		ok "the new matchmaker re-adopted $match and rejoins it again"
+	else
+		fail "rejoin never came back after the matchmaker restart"
+	fi
+	# The room outlived the matchmaker, so the seat was never lost.
+	if grep -q "$match" <<<"$(ps -eo command= | grep evoclash-server)"; then
+		ok "the match server survived the matchmaker restart"
+	else
+		echo "   (match server not running any more)"
+	fi
+}
+
+# g: a StatefulSet pod restarts and gets a new match id. An old reconnect key must be `gone`,
+# never a seat in the new (empty) match.
+scenario_g() {
+	echo "== g: pod restart — the old match id is gone, not a fresh match"
+	pod_mm_start || return 1
+	pod_up evoclash-server-0-aaaaaa || return 1
+	local joined match client key
+	joined="$(curl -sS -m 5 -X POST "$POD_BASE/v1/join" -H 'Content-Type: application/json' \
+		-d '{"name":"Gale","region":null,"match_id":null,"room":null}')" || return 1
+	match="$(jq -r '.match_id' <<<"$joined")"
+	client="$(jq -r '.client_id' <<<"$joined")"
+	key="$(jq -r '.reconnect_key' <<<"$joined")"
+	echo "   joined $match as client $client"
+	pod_down "$match" || return 1
+	# Right after the crash the entry is unhealthy, not gone: 503 recovering.
+	local body status
+	body="$(rejoin "$match" "$client" "$key" "$POD_BASE")"
+	status="$(head -1 <<<"$body")"
+	if [ "$status" = 503 ]; then
+		ok "immediately after the crash: 503 $(jq -r '.error' <<<"$(tail -n +2 <<<"$body")") (client retries)"
+	else
+		echo "   immediately after the crash: $status $(tail -n +2 <<<"$body")"
+	fi
+	pod_up evoclash-server-0-bbbbbb || return 1
+	# The restarted pod has a new id; the old one times out of the registry after 6s.
+	local gone=0
+	for _ in $(seq 40); do
+		body="$(rejoin "$match" "$client" "$key" "$POD_BASE")"
+		status="$(head -1 <<<"$body")"
+		if [ "$status" = 410 ] && grep -q '"gone"' <<<"$body"; then
+			gone=1
+			break
+		fi
+		sleep 0.5
+	done
+	if [ "$gone" = 1 ]; then
+		ok "old match $match → 410 gone; the client goes back to the room list"
+	else
+		fail "old match never answered 410 gone: $status $(tail -n +2 <<<"$body")"
+	fi
+	local fresh
+	fresh="$(curl -sS -m 5 -X POST "$POD_BASE/v1/join" -H 'Content-Type: application/json' \
+		-d '{"name":"Gale","region":null,"match_id":null,"room":null}')"
+	if [ "$(jq -r '.match_id' <<<"$fresh")" != "$match" ]; then
+		ok "a fresh join lands in the new match $(jq -r '.match_id' <<<"$fresh"), not the old one"
+	else
+		fail "a fresh join reused the old match id"
+	fi
+}
+
+scenario() {
+	local which="${1:-all}"
+	local failed=0
+	# A room is abandoned after two recoveries (`recovery::MAX_RECOVERIES`), so every scenario
+	# run starts from a clean fleet: no registry, no match servers.
+	stop >/dev/null
+	start || return 1
+	case "$which" in
+	a) scenario_a || failed=1 ;;
+	d) scenario_d || failed=1 ;;
+	e) scenario_e || failed=1 ;;
+	g) scenario_g || failed=1 ;;
+	all)
+		scenario_a || failed=1
+		scenario_d || failed=1
+		scenario_e || failed=1
+		scenario_g || failed=1
+		;;
+	*)
+		fail "unknown scenario $which (a|d|e|g|all)"
+		return 1
+		;;
+	esac
+	[ "$failed" = 0 ] && echo "scenario $which: PASS" || echo "scenario $which: FAIL"
+	return "$failed"
+}
+
+case "${1:-}" in
+start) start ;;
+stop) stop ;;
+status) status ;;
+join) shift && join "${1:-Tester}" ;;
+rejoin)
+	shift
+	rejoin "${1:?match id}" "${2:?client id}" "${3:?reconnect key}" "${4:-$BASE}"
+	;;
+kill-room) shift && kill_room "${1:-}" ;;
+freeze-room) shift && freeze_room "${1:?secs}" "${2:-}" ;;
+restart-mm) restart_mm ;;
+pod-up) shift && pod_mm_start && pod_up "${1:?match id}" ;;
+pod-down) shift && pod_down "${1:?match id}" ;;
+scenario) shift && scenario "${1:-all}" ;;
+*)
+	sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+	exit 2
+	;;
+esac

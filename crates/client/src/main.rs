@@ -14,6 +14,7 @@ mod connect_ui;
 mod death_screen;
 mod effects;
 mod evo_panel;
+mod fault;
 mod finale_ui;
 mod hud;
 mod input;
@@ -28,6 +29,7 @@ mod predict;
 mod recover_ui;
 mod render;
 mod results_ui;
+mod seat_store;
 mod session;
 mod spectate_ui;
 mod textures;
@@ -52,6 +54,8 @@ pub struct ClientArgs {
     pub match_id: Option<String>,
     /// `?private=1` with `?create=1`: `CreateRoomRequest::private`.
     pub private_room: bool,
+    /// `?fault=blackout:15@5,close@40` link faults for testing reconnects. Debug builds only.
+    pub fault: crate::fault::FaultSpec,
 }
 
 /// Read the page URL. `None` until the player has picked a name (index.html asks for one).
@@ -81,6 +85,12 @@ fn page_args() -> Option<ClientArgs> {
         create_room: params.get("create").as_deref() == Some("1"),
         match_id,
         private_room: params.get("private").as_deref() == Some("1"),
+        // Like `?lag=`, a release build ignores the fault hook entirely.
+        fault: params
+            .get("fault")
+            .filter(|_| cfg!(debug_assertions))
+            .map(|fault| crate::fault::parse_fault(&fault))
+            .unwrap_or_default(),
     })
 }
 

@@ -23,7 +23,27 @@ use crate::ClientArgs;
 use crate::assets::{Loading, PendingAssets, assets_ready};
 use crate::connect_ui::{ConnectionStatus, LinkStatus};
 
-const MAX_RECONNECT_ATTEMPTS: u32 = 12;
+/// How long a dropped link is retried before the session gives up. Time, not tries: a
+/// matchmaker restart or a long outage then costs seconds instead of the whole budget.
+const RECONNECT_BUDGET_SECS: f32 = 180.0;
+/// A first handshake that never comes up is not a dropped match (wrong port, a rejecting
+/// server), so it gives up sooner than a reconnect does.
+const FIRST_JOIN_BUDGET_SECS: f32 = 45.0;
+/// Retry spacing starts here and doubles to [`RECONNECT_MAX_DELAY`], so a short blip costs one
+/// handshake and a long outage does not hammer a matchmaker that is still booting.
+const RECONNECT_FIRST_DELAY: f32 = 0.5;
+const RECONNECT_MAX_DELAY: f32 = 8.0;
+/// A seated rejoin answered `gone`. The matchmaker may have just restarted and not re-learned
+/// the running match from heartbeats yet, so retry this long before telling the player.
+const GONE_RETRY_SECS: f32 = 10.0;
+/// Pace of those retries. Every client of a restarted matchmaker hits it at once; a beat
+/// (2 s) is the soonest it can know the match again.
+const GONE_RETRY_EVERY_SECS: f32 = 1.0;
+/// The server holds a dropped seat this long (`connections::RECONNECT_GRACE_TICKS`). An outage
+/// longer than this comes back as a new body, and the player is told so.
+const SERVER_GRACE_SECS: f32 = 20.0;
+/// How long that line stays up.
+const NEW_BODY_NOTICE_SECS: f32 = 6.0;
 /// A matchmaker call that has not answered by now is treated as lost (browser fetch can hang).
 const CALL_TIMEOUT_SECS: f32 = 12.0;
 /// Hold the link open this long after 离开 so `RoomCommand::Leave` leaves the client.
@@ -203,6 +223,60 @@ fn error_is_gone(status: u16, error: Option<&str>) -> bool {
     status == 403 || (status == 410 && !matches!(error, Some("closed" | "abandoned")))
 }
 
+/// Delay before the next reconnect handshake. `attempts` is how many are already spent, so the
+/// first drop retries after half a second and a long outage settles at the cap.
+fn reconnect_delay(attempts: u32) -> f32 {
+    (RECONNECT_FIRST_DELAY * 2.0f32.powi(attempts.min(16) as i32)).min(RECONNECT_MAX_DELAY)
+}
+
+/// How long this episode may take: a reconnect gets [`RECONNECT_BUDGET_SECS`], a first join less.
+fn reconnect_budget(ever_connected: bool) -> f32 {
+    if ever_connected {
+        RECONNECT_BUDGET_SECS
+    } else {
+        FIRST_JOIN_BUDGET_SECS
+    }
+}
+
+/// True once a dropped link has been retried for the whole budget.
+fn reconnect_exhausted(down_for: f32, ever_connected: bool) -> bool {
+    down_for >= reconnect_budget(ever_connected)
+}
+
+/// A reconnect that outlived the server's grace came back to a new body: the old seat, gear and
+/// score are gone, which the player should be told instead of silently playing on.
+fn outage_lost_the_seat(was_connected: bool, down_for: f32) -> bool {
+    was_connected && down_for >= SERVER_GRACE_SECS
+}
+
+/// What a `gone` reply to a rejoin means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GoneDecision {
+    /// Keep the seat and try again: the matchmaker may still be learning about the match.
+    Retry,
+    /// The seat is really gone (a restarted pod gets a new match id). Ask the player.
+    Lost,
+}
+
+fn gone_decision(seated: bool, gone_for: f32) -> GoneDecision {
+    if seated && gone_for < GONE_RETRY_SECS {
+        GoneDecision::Retry
+    } else {
+        GoneDecision::Lost
+    }
+}
+
+/// Simulated latency from `?lag=`, on the same link `fault::apply_faults` replaces.
+pub(crate) fn link_conditioner(args: &ClientArgs) -> Option<RecvLinkConditioner> {
+    (args.fake_latency_ms > 0).then(|| {
+        RecvLinkConditioner::new(LinkConditionerConfig {
+            incoming_latency: Duration::from_millis(args.fake_latency_ms),
+            incoming_jitter: Duration::from_millis(args.fake_latency_ms / 10),
+            ..default()
+        })
+    })
+}
+
 struct Joined {
     response: JoinResponse,
     spectate: bool,
@@ -308,6 +382,20 @@ impl Seat {
 #[derive(Resource, Default)]
 pub struct JoinNotice(pub String);
 
+/// The seat this tab remembers from a previous page load, if any. Its address, certificate and
+/// token come from the `/v1/rejoin` reply before anything connects, so they are left empty here.
+fn stored_seat() -> Option<Seat> {
+    let stored = crate::seat_store::load()?;
+    Some(Seat {
+        match_id: stored.match_id,
+        server_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
+        cert_digest: String::new(),
+        client_id: stored.client_id,
+        token: Vec::new(),
+        reconnect_key: stored.reconnect_key,
+    })
+}
+
 /// The player pressed 离开 or chose 返回首页. Hold the link open long enough for
 /// `RoomCommand::Leave` to flush, then reload `/play/` (the name form) and do not reconnect.
 #[derive(Resource, Default)]
@@ -357,6 +445,11 @@ enum NoticeWait {
 pub(crate) const RECOVERING: &str = "服务器恢复中…";
 /// 410 `abandoned`: this match was voided. The player picks 快速开始; we do not requeue.
 pub(crate) const ABANDONED: &str = "服务器出错，本局已作废。";
+/// The outage outlived the server's grace, so the seat (and its gear and score) was cleared.
+pub(crate) const NEW_BODY: &str = "离开太久，已重新加入对局（新的角色）。";
+/// 410 `gone` for a match this client was seated in: the process restarted (a StatefulSet pod
+/// comes back with a new match id) or the match was closed. Never join a fresh match silently.
+pub(crate) const MATCH_GONE: &str = "这一局已经结束了。\n点击 快速开始 重新加入";
 
 /// True while a rejoin got 503 `recovering`. Cleared when that wait ends any other way.
 #[derive(Resource, Default)]
@@ -379,6 +472,9 @@ pub struct Session {
     listed_closed: bool,
     /// The call in flight is that listed-room join (not a rejoin or a quick start).
     listed_join: bool,
+    /// Seconds left on a one-off line in [`JoinNotice`] (`NEW_BODY`). The link being live
+    /// clears the notice every frame, so a timed one has to outrank that.
+    notice_left: f32,
     /// Listed-room join failed: leave for `/play/?notice=`.
     home_notice: Option<String>,
 }
@@ -419,6 +515,7 @@ impl Session {
                     match_id: seat.match_id.clone(),
                     client_id: seat.client_id,
                     reconnect_key: seat.reconnect_key.clone(),
+                    name: args.name.clone(),
                 };
                 self.pending = Some(post(&args.matchmaker, "/v1/rejoin", &request));
                 self.pending_since = Some(now);
@@ -446,6 +543,10 @@ struct LinkState {
     ever_connected: bool,
     /// Consecutive frames of the required `Disconnected` marker before `Connecting` lands.
     initial_frames: u32,
+    /// `Time::elapsed_secs` when the link went down. Drives the retry spacing and the budget.
+    down_since: Option<f32>,
+    /// `Time::elapsed_secs` when a seated rejoin first answered `gone`.
+    gone_since: Option<f32>,
 }
 
 /// Failed handshakes on a match we never got into (full, or died while starting) before
@@ -498,6 +599,7 @@ impl Plugin for SessionPlugin {
         app.init_resource::<Depart>();
         app.init_resource::<SpectateJoin>();
         app.init_resource::<RecoverHold>();
+        app.init_resource::<crate::fault::FaultRun>();
         app.insert_resource(LinkState {
             entity: None,
             since_change: 0.0,
@@ -505,6 +607,8 @@ impl Plugin for SessionPlugin {
             counted: false,
             ever_connected: false,
             initial_frames: 0,
+            down_since: None,
+            gone_since: None,
         });
         app.add_systems(Startup, |world: &mut World| {
             // Predict ourselves with no artificial input delay: lowest perceived latency.
@@ -529,7 +633,12 @@ impl Plugin for SessionPlugin {
         // Join only once the files the match needs have loaded.
         app.add_systems(
             Update,
-            (connect.run_if(connect_when_ready), watch_connection, depart)
+            (
+                connect.run_if(connect_when_ready),
+                watch_connection,
+                crate::fault::apply_faults,
+                depart,
+            )
                 .chain()
                 .run_if(assets_ready),
         );
@@ -537,13 +646,7 @@ impl Plugin for SessionPlugin {
 }
 
 fn spawn_client(commands: &mut Commands, seat: &Seat, args: &ClientArgs) -> Result<Entity, String> {
-    let conditioner = (args.fake_latency_ms > 0).then(|| {
-        RecvLinkConditioner::new(LinkConditionerConfig {
-            incoming_latency: Duration::from_millis(args.fake_latency_ms),
-            incoming_jitter: Duration::from_millis(args.fake_latency_ms / 10),
-            ..default()
-        })
-    });
+    let conditioner = link_conditioner(args);
     let token =
         ConnectToken::try_from_bytes(&seat.token).map_err(|e| format!("bad token: {e:?}"))?;
     let netcode = NetcodeClient::new(
@@ -578,6 +681,18 @@ fn spawn_client(commands: &mut Commands, seat: &Seat, args: &ClientArgs) -> Resu
 }
 
 fn connect(mut session: ResMut<Session>, args: Res<ClientArgs>, time: Res<Time>) {
+    // A reload keeps the seat: the tab remembers its reconnect key, so 刷新 rejoins the match it
+    // was in instead of queueing for a new one. A page that names a room or match wants that.
+    let page_seat = args.match_id.is_none() && args.room.is_none() && !args.create_room;
+    if page_seat && let Some(seat) = stored_seat() {
+        info!(
+            "rejoining {} as client {} after a reload",
+            seat.match_id, seat.client_id
+        );
+        session.seat = Some(seat);
+        session.refresh(&args, false, time.elapsed_secs());
+        return;
+    }
     session.dispatch(&args, time.elapsed_secs());
 }
 
@@ -871,6 +986,8 @@ fn depart(time: Res<Time>, mut depart: ResMut<Depart>) {
     };
     *since += time.delta_secs();
     if *since >= DEPART_FLUSH_SECS {
+        // Leaving on purpose: this tab must not rejoin the seat on the next page load.
+        crate::seat_store::clear();
         leave_page();
     }
 }
@@ -931,9 +1048,12 @@ fn watch_connection(
         )>,
     >,
 ) {
-    // The overlay reads this; attempts/max must stay accurate even while a request is in flight.
+    let now = time.elapsed_secs();
+    // The overlay reads this; attempts and the down time must stay accurate even while a
+    // request is in flight.
     status.attempts = link.attempts;
-    status.max = MAX_RECONNECT_ATTEMPTS;
+    status.down_secs = link.down_since.map_or(0.0, |since| now - since) as u32;
+    status.budget_secs = reconnect_budget(link.ever_connected) as u32;
     if depart.pending() {
         return;
     }
@@ -941,7 +1061,6 @@ fn watch_connection(
         leave_with_notice(&text);
         return;
     }
-    let now = time.elapsed_secs();
     if call_timed_out(session.pending_since, now) {
         warn!("matchmaker call timed out");
         session.pending = None;
@@ -981,11 +1100,15 @@ fn watch_connection(
                 session.intent = JoinIntent::FromArgs;
                 recover.0 = false;
                 link.counted = false;
+                link.gone_since = None;
                 notice.0.clear();
                 offers.buttons.clear();
                 session.wait = NoticeWait::Idle;
                 session.started_retried = false;
-                spectating.0 = joined.spectate;
+                // `/v1/rejoin` always answers `spectate: false` (the matchmaker does not track
+                // seats), so a reconnecting spectator keeps the flag from the seat it holds.
+                let rejoin = session.seat.is_some();
+                spectating.0 = joined.spectate || (rejoin && spectating.0);
                 Seat::from_response(joined.response)
             }
             Err(CallError::Gone(message)) => {
@@ -999,14 +1122,35 @@ fn watch_connection(
                     );
                     return;
                 }
-                warn!("match is gone, joining another one");
+                // The matchmaker knows no such match. Right after its own restart it has not
+                // re-learned the running matches from heartbeats yet, so retry briefly before
+                // telling the player. A StatefulSet pod that restarted comes back with a new
+                // match id, so an old seat never returns: never join a fresh match silently.
+                let gone_for = link.gone_since.map_or(0.0, |since| now - since);
+                if gone_decision(session.seat.is_some(), gone_for) == GoneDecision::Retry {
+                    link.gone_since = Some(link.gone_since.unwrap_or(now));
+                    link.counted = false;
+                    recover.0 = false;
+                    session.wait = NoticeWait::Rejoin(GONE_RETRY_EVERY_SECS);
+                    notice.0.clear();
+                    offers.buttons.clear();
+                    status.status = LinkStatus::Connecting;
+                    return;
+                }
+                warn!("match is gone, back to the room list");
                 session.seat = None;
                 spectating.0 = false;
                 recover.0 = false;
                 link.counted = false;
-                session.wait = NoticeWait::Idle;
-                offers.buttons.clear();
-                session.dispatch(&args, now);
+                link.gone_since = None;
+                link.down_since = None;
+                link.attempts = 0;
+                crate::seat_store::clear();
+                session.wait = NoticeWait::Hold;
+                notice.0 = MATCH_GONE.to_string();
+                offers.buttons = vec![JoinOffer::QuickStart, JoinOffer::ChangeRoom];
+                status.status = LinkStatus::Connecting;
+                status.attempts = 0;
                 return;
             }
             Err(CallError::Api(err)) => {
@@ -1050,6 +1194,23 @@ fn watch_connection(
             Err(CallError::Failed(e)) => {
                 // The try already counted. Don't let a later 503 refund it.
                 link.counted = false;
+                // A seated rejoin that cannot reach the matchmaker (restarting, or the network is
+                // still down) keeps retrying inside the reconnect budget instead of waiting for
+                // a click: the seat on the match server is still being held.
+                let down_for = link.down_since.map_or(0.0, |since| now - since);
+                if session.seat.is_some() && !reconnect_exhausted(down_for, link.ever_connected) {
+                    warn!("matchmaker unreachable, retrying: {e}");
+                    link.attempts += 1;
+                    recover.0 = false;
+                    session.wait = NoticeWait::Rejoin(reconnect_delay(link.attempts));
+                    notice.0.clear();
+                    offers.buttons.clear();
+                    status.status = LinkStatus::Reconnecting;
+                    status.attempts = link.attempts;
+                    link.since_change = 0.0;
+                    link.initial_frames = 0;
+                    return;
+                }
                 Err(e)
             }
         };
@@ -1064,6 +1225,14 @@ fn watch_connection(
                 // Later drops rejoin this seat; they must not target the list row again.
                 session.listed_closed = true;
                 session.listed_join = false;
+                // A reload of this tab rejoins the same seat instead of queueing again.
+                if let Some(seat) = session.seat.as_ref() {
+                    crate::seat_store::save(&crate::seat_store::StoredSeat {
+                        match_id: seat.match_id.clone(),
+                        client_id: seat.client_id,
+                        reconnect_key: seat.reconnect_key.clone(),
+                    });
+                }
             }
             Err(e) => {
                 warn!("could not get into a match: {e}");
@@ -1172,20 +1341,36 @@ fn watch_connection(
         link.initial_frames = 0;
     }
     let down = link_is_down(seen, link.initial_frames);
+    if down && link.down_since.is_none() {
+        link.down_since = Some(now);
+    }
+    let down_for = link.down_since.map_or(0.0, |since| now - since);
     if seen == SeenLink::Live {
         if link.attempts > 0 {
             info!("connection restored");
+        }
+        // Tell the player once when the outage outlived the grace: the body is new.
+        if outage_lost_the_seat(link.ever_connected, down_for) {
+            warn!("outage outlived the grace; back in as a new body");
+            session.notice_left = NEW_BODY_NOTICE_SECS;
+        }
+        if session.notice_left > 0.0 {
+            session.notice_left = (session.notice_left - time.delta_secs()).max(0.0);
+            notice.0 = NEW_BODY.to_string();
+        } else {
+            notice.0.clear();
         }
         link.attempts = 0;
         link.counted = false;
         link.since_change = 0.0;
         link.ever_connected = true;
+        link.down_since = None;
+        link.gone_since = None;
         session.started_retried = false;
         session.wait = NoticeWait::Idle;
         session.intent = JoinIntent::FromArgs;
         offers.buttons.clear();
         recover.0 = false;
-        notice.0.clear();
         status.status = LinkStatus::Connected;
         status.attempts = 0;
         return;
@@ -1193,18 +1378,20 @@ fn watch_connection(
     status.status = show_link_status(link.ever_connected, down, false, status.status);
     if status.status == LinkStatus::Reconnecting {
         // Show the attempt that is about to start, not the number that already failed.
-        status.attempts = (link.attempts + 1).min(MAX_RECONNECT_ATTEMPTS);
+        status.attempts = link.attempts + 1;
     }
     link.since_change += time.delta_secs();
-    // Give each attempt time to complete the handshake before retrying, backing off a little.
-    let wait = 1.0 + link.attempts.min(4) as f32;
-    if !down || link.since_change < wait {
+    // Give each attempt time to complete the handshake before retrying, backing off.
+    if !down || link.since_change < reconnect_delay(link.attempts) {
         return;
     }
-    if link.attempts >= MAX_RECONNECT_ATTEMPTS {
+    if reconnect_exhausted(down_for, link.ever_connected) {
         // Keep the app alive: the reconnect overlay offers 返回首页 instead of a hard exit.
         if status.status != LinkStatus::Failed {
-            error!("giving up after {} reconnect attempts", link.attempts);
+            error!(
+                "giving up after {}s and {} attempts",
+                down_for, link.attempts
+            );
         }
         status.status = LinkStatus::Failed;
         status.attempts = link.attempts;
@@ -1622,6 +1809,7 @@ mod tests {
             create_room: false,
             match_id: Some("m17000-4cab39".into()),
             private_room: false,
+            fault: crate::fault::FaultSpec::default(),
         };
         let (request, listed) = build_join(session.intent, session.listed_closed, &args);
         assert_eq!(request.name, "Drew");
@@ -1694,5 +1882,56 @@ mod tests {
     ) -> (SeenLink, bool) {
         let seen = seen_link(exists, connected, connecting, kind);
         (seen, link_is_down(seen, frames))
+    }
+
+    #[test]
+    fn reconnect_retries_back_off_to_a_cap_instead_of_a_try_count() {
+        assert_eq!(reconnect_delay(0), RECONNECT_FIRST_DELAY);
+        assert_eq!(reconnect_delay(1), 1.0);
+        assert_eq!(reconnect_delay(2), 2.0);
+        assert_eq!(reconnect_delay(3), 4.0);
+        assert_eq!(reconnect_delay(4), RECONNECT_MAX_DELAY);
+        assert_eq!(reconnect_delay(9), RECONNECT_MAX_DELAY);
+        assert_eq!(reconnect_delay(u32::MAX), RECONNECT_MAX_DELAY);
+        // Spacing never grows past the cap, so the budget alone ends the loop.
+        assert!(reconnect_delay(100) < RECONNECT_BUDGET_SECS);
+        assert!(!reconnect_exhausted(0.0, true));
+        assert!(!reconnect_exhausted(RECONNECT_BUDGET_SECS - 0.1, true));
+        assert!(reconnect_exhausted(RECONNECT_BUDGET_SECS, true));
+        // A matchmaker restart (~20s) leaves most of the budget for the rejoin.
+        assert!(!reconnect_exhausted(25.0, true));
+        // The first handshake is not a dropped match: it gives up sooner.
+        assert!(reconnect_budget(false) < reconnect_budget(true));
+        assert!(!reconnect_exhausted(25.0, false));
+        assert!(reconnect_exhausted(FIRST_JOIN_BUDGET_SECS, false));
+    }
+
+    #[test]
+    fn a_long_outage_comes_back_as_a_new_body() {
+        // A blip (inside the server's 20s grace) keeps the seat: no line, no new body.
+        assert!(!outage_lost_the_seat(true, 0.0));
+        assert!(!outage_lost_the_seat(true, 15.0));
+        assert!(!outage_lost_the_seat(true, SERVER_GRACE_SECS - 0.1));
+        // Past the grace the server cleared the seat.
+        assert!(outage_lost_the_seat(true, SERVER_GRACE_SECS));
+        assert!(outage_lost_the_seat(true, 25.0));
+        // A first join that never came up has no seat to lose.
+        assert!(!outage_lost_the_seat(false, 60.0));
+        assert_eq!(NEW_BODY, "离开太久，已重新加入对局（新的角色）。");
+    }
+
+    #[test]
+    fn a_gone_rejoin_retries_briefly_then_asks_the_player() {
+        // Right after a matchmaker restart the match is not registered yet: retry, keep the seat.
+        assert_eq!(gone_decision(true, 0.0), GoneDecision::Retry);
+        assert_eq!(
+            gone_decision(true, GONE_RETRY_SECS - 0.1),
+            GoneDecision::Retry
+        );
+        // Past the window the pod restarted (new match id) or the match closed.
+        assert_eq!(gone_decision(true, GONE_RETRY_SECS), GoneDecision::Lost);
+        // A page-load rejoin of a stale seat has nothing to retry for.
+        assert_eq!(gone_decision(false, 0.0), GoneDecision::Lost);
+        assert_eq!(gone_decision(false, 60.0), GoneDecision::Lost);
     }
 }

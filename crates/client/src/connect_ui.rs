@@ -38,8 +38,10 @@ pub struct ConnectionStatus {
     pub status: LinkStatus,
     /// Reconnect attempts started so far.
     pub attempts: u32,
-    /// Attempt budget (`MAX_RECONNECT_ATTEMPTS`).
-    pub max: u32,
+    /// Seconds the link has been down (0 while it is up).
+    pub down_secs: u32,
+    /// Reconnect budget in seconds: the session gives up after this long, not after N tries.
+    pub budget_secs: u32,
 }
 
 pub struct ConnectUiPlugin;
@@ -213,10 +215,14 @@ fn sync_overlay(
     // One dot per beat, then back to one: 正在重连… / …… / ……….
     let dots = 1 + (time.elapsed_secs() * 2.5) as usize % 3;
     let title = format!("连接中断，正在重连{}", "…".repeat(dots));
+    let line = format!(
+        "第 {} 次，已等 {} 秒（最多 {} 秒）",
+        status.attempts, status.down_secs, status.budget_secs
+    );
     let attempt = if spectate.0 {
-        format!("第 {}/{} 次\n{SPECTATE_JOIN}", status.attempts, status.max)
+        format!("{line}\n{SPECTATE_JOIN}")
     } else {
-        format!("第 {}/{} 次", status.attempts, status.max)
+        line
     };
     let detail = if spectate.0 {
         SPECTATE_JOIN

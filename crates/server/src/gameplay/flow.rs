@@ -95,6 +95,14 @@ fn seated_humans(presence: &Presence) -> usize {
         .count()
 }
 
+/// Watchers still in the room, including their reconnect grace.
+fn held_watchers(presence: &Presence) -> usize {
+    presence
+        .iter()
+        .filter(|(_, session)| session.is_some())
+        .count()
+}
+
 fn connected_watchers(presence: &Presence) -> usize {
     presence
         .iter()
@@ -475,7 +483,9 @@ pub(super) fn empty_close(
         return;
     };
     // Watchers count as people in the room. A match with no human combatant still finishes.
-    if connected_humans(&presence) > 0 || connected_watchers(&presence) > 0 {
+    // A seat on the reconnect clock counts too: a refresh or a dropped link must find the room
+    // still there. The countdown starts once the grace runs out and the seat is cleared.
+    if seated_humans(&presence) > 0 || held_watchers(&presence) > 0 {
         *empty_for = 0;
         return;
     }

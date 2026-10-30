@@ -5,6 +5,34 @@ use bevy::prelude::*;
 use evoclash_game::net::DEFAULT_GAME_PORT;
 use evoclash_game::protocol::ROOM_COMBATANTS;
 
+/// `--fault-drop-every` interval in milliseconds, 0 when off.
+///
+/// A debug hook for reconnect testing without a browser: it cuts one human link per interval so
+/// the drop/grace/rejoin path can be exercised with `scripts/fault-inject`. Release builds accept
+/// the flag and ignore it; the system that reads this is compiled out too.
+#[cfg(debug_assertions)]
+static FAULT_DROP_EVERY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(debug_assertions)]
+fn set_fault_drop_every(secs: f32) {
+    FAULT_DROP_EVERY_MS.store(
+        (secs.max(0.2) * 1000.0) as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+#[cfg(not(debug_assertions))]
+fn set_fault_drop_every(secs: f32) {
+    eprintln!("--fault-drop-every {secs} ignored: debug builds only");
+}
+
+/// How often to force a human link down, when `--fault-drop-every` asked for it.
+#[cfg(debug_assertions)]
+pub fn fault_drop_every() -> Option<std::time::Duration> {
+    let ms = FAULT_DROP_EVERY_MS.load(std::sync::atomic::Ordering::Relaxed);
+    (ms > 0).then(|| std::time::Duration::from_millis(ms))
+}
+
 #[derive(Resource, Clone, Debug)]
 pub struct ServerConfig {
     /// UDP port (WebTransport over QUIC) to bind on all interfaces.
@@ -151,6 +179,11 @@ impl ServerConfig {
                 "--log-dir" => log_dir = PathBuf::from(value("--log-dir")),
                 "--replay" => replay = Some(PathBuf::from(value("--replay"))),
                 "--recover" => recover = true,
+                "--fault-drop-every" => set_fault_drop_every(
+                    value("--fault-drop-every")
+                        .parse()
+                        .expect("invalid --fault-drop-every"),
+                ),
                 "--headless" => headless = true,
                 "--seeds" => seeds = Some(crate::headless::parse_seeds(&value("--seeds"))),
                 "--report" => report = Some(PathBuf::from(value("--report"))),
@@ -169,7 +202,9 @@ impl ServerConfig {
                          \x20               [--max-players 8] [--bots 8] [--matchmaker URL[,URL...]] [--single-match]\n\
                          \x20               [--no-monsters] [--threads 1] [--statefulset] [--room-seed U64]\n\
                          \x20               [--private] [--room-code CODE] [--log-dir logs] [--replay FILE] [--recover]\n\
-                         \x20               [--headless --seeds 0..200 --report out.json] [--jobs N] [--skills high:1,default:7]\n\n\
+                         \x20               [--fault-drop-every SECS] [--headless --seeds 0..200 --report out.json] [--jobs N] [--skills high:1,default:7]\n\n\
+                         --fault-drop-every disconnect one human link this often (debug builds only,\n\
+                         \x20                 for reconnect tests; ignored in release)\n\
                          --bots N          keep at least N combatants in the arena by adding bots (0 disables)\n\
                          --room-seed       fixed seed for this room; omitted once, from the OS\n\
                          --private         friends-only room; the host starts the match\n\
