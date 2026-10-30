@@ -13,7 +13,9 @@ Never commit or push directly to `main`. For every change:
 3. Open a PR against `main`.
 4. Enable auto-fix and auto-merge on the PR.
 
-Branch protection requires the single `CI success` check (it aggregates fmt, clippy (native + wasm), tests, cargo-deny, helm lint, and a Docker image build that runs the image and waits for a launched match to heartbeat).
+Branch protection requires the single `CI success` check (it aggregates fmt, clippy (native + wasm), tests, cargo-deny, a gitleaks secret scan, helm lint, and a Docker image build that runs the image and waits for a launched match to heartbeat).
+
+Never write server IPs, SSH ports, credentials or other deploy-host details in code, docs, commit messages or PR text; they live in GitHub environment secrets / variables. gitleaks (`.gitleaks.toml`) also flags any public IPv4, so test fixtures use documentation addresses (`192.0.2.x`, `198.51.100.x`, `203.0.113.x`) or private ranges.
 
 ## Commands
 

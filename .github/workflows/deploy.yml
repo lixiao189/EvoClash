@@ -93,8 +93,8 @@ jobs:
           TAG: ${{ steps.image.outputs.tag }}
         run: |
           set -euo pipefail
-          if [[ -z "${SEALOS_KUBECONFIG:-}" ]]; then
-            echo "::error::SEALOS_KUBECONFIG must be set on environment sealos"
+          if [[ -z "${SEALOS_KUBECONFIG:-}" || -z "${SEALOS_PUBLIC_HOST:-}" ]]; then
+            echo "::error::SEALOS_KUBECONFIG (secret) and SEALOS_PUBLIC_HOST (variable) must be set on environment sealos"
             exit 1
           fi
           ns=${SEALOS_NAMESPACE:-ns-80h1uphq}
@@ -103,10 +103,7 @@ jobs:
           trap 'rm -f "$KUBECONFIG"' EXIT
           chmod 600 "$KUBECONFIG"
           printf '%s\n' "$SEALOS_KUBECONFIG" > "$KUBECONFIG"
-          extra=()
-          if [[ -n "${SEALOS_PUBLIC_HOST:-}" ]]; then
-            extra+=(--set "single.publicHost=${SEALOS_PUBLIC_HOST}")
-          fi
+          extra=(--set "single.publicHost=${SEALOS_PUBLIC_HOST}")
           if [[ -n "${SEALOS_HOST:-}" ]]; then
             extra+=(--set "single.nodePort.ingress.host=${SEALOS_HOST}"
                     --set "single.nodePort.ingress.tls[0].hosts[0]=${SEALOS_HOST}"
