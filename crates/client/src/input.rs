@@ -8,12 +8,14 @@
 
 use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
+use evoclash_game::evolution::seen_from;
 use evoclash_game::items::{HOTBAR_SLOTS, MELEE_SLOT};
-use evoclash_game::protocol::{Loadout, Player, PlayerInput, Pos, Spectator};
+use evoclash_game::protocol::{Loadout, Monster, Player, PlayerInput, Pos, Spectator, Vitals};
 use lightyear::prelude::client::input::InputSystems;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
 use lightyear::prelude::*;
 
+use crate::aim_assist;
 use crate::buttons::PointerOverUi;
 use crate::evo_panel::EvoPanelOpen;
 use crate::input_mode::InputMode;
@@ -243,6 +245,29 @@ fn apply_panel_lock(
     input
 }
 
+/// What aim assist may bend the mouse aim toward: the aim points of the combatants and monsters
+/// this client can actually see. Roofs hide a body through its `Visibility`; 隐身 hides it from
+/// everyone past `STEALTH_SIGHT` ([`seen_from`]); 复活保护 targets are skipped since they cannot
+/// be hurt yet.
+fn aim_targets<'a>(
+    origin: Vec2,
+    players: impl Iterator<Item = (&'a Pos, &'a Vitals, &'a Visibility)>,
+    monsters: impl Iterator<Item = (&'a Pos, &'a Vitals, &'a Visibility)>,
+) -> impl Iterator<Item = Vec2> {
+    let seen = move |pos: &Pos, vitals: &Vitals, vis: &Visibility| {
+        vitals.alive
+            && vitals.shield == 0
+            && !matches!(vis, Visibility::Hidden)
+            && seen_from(vitals, pos.0, origin)
+    };
+    let bodies = players.filter(move |&(pos, vitals, vis)| seen(pos, vitals, vis));
+    let beasts = monsters.filter(move |&(pos, vitals, vis)| seen(pos, vitals, vis));
+    // The same muzzle-height point the cursor direction is measured from.
+    bodies
+        .chain(beasts)
+        .map(|(pos, _, _)| pos.0 + Vec2::Y * GUN_HEIGHT)
+}
+
 fn buffer_input(
     keys: Option<Res<ButtonInput<KeyCode>>>,
     mouse: Option<Res<ButtonInput<MouseButton>>>,
@@ -255,16 +280,21 @@ fn buffer_input(
     mode: Res<InputMode>,
     mut last_aim: Local<Vec2>,
     specs: Query<(), With<Spectator>>,
-    mut query: Query<(&mut ActionState<PlayerInput>, &Pos), With<InputMarker<PlayerInput>>>,
+    targets: Query<(&Pos, &Vitals, &Visibility), (With<Player>, Without<LocalPlayer>)>,
+    beasts: Query<(&Pos, &Vitals, &Visibility), With<Monster>>,
+    mut query: Query<
+        (&mut ActionState<PlayerInput>, &Pos, &Loadout),
+        With<InputMarker<PlayerInput>>,
+    >,
 ) {
     // A spectator must not emit `PlayerInput`. The server drops it; don't send it.
     if !specs.is_empty() {
-        if let Ok((mut action, _)) = query.single_mut() {
+        if let Ok((mut action, ..)) = query.single_mut() {
             action.0 = PlayerInput::default();
         }
         return;
     }
-    let Ok((mut action, pos)) = query.single_mut() else {
+    let Ok((mut action, pos, loadout)) = query.single_mut() else {
         return;
     };
     let mut input = PlayerInput::default();
@@ -295,10 +325,23 @@ fn buffer_input(
         input.skill_a = keys.pressed(KeyR);
         input.skill_b = keys.pressed(KeyT);
         if !ui {
-            input.aim = cursor
-                .0
-                .map(|c| (c - (pos.0 + Vec2::Y * GUN_HEIGHT)).normalize_or(Vec2::X))
-                .unwrap_or(Vec2::X);
+            let origin = pos.0 + Vec2::Y * GUN_HEIGHT;
+            // No cursor (outside the window, unfocused) means no assist either: only the mouse
+            // aiming bends.
+            input.aim = cursor.0.map_or(Vec2::X, |c| {
+                let aimed = (c - origin).normalize_or(Vec2::X);
+                // Only a gun in hand is assisted (a dry slot falls back to the melee weapon and
+                // the throwable slot throws). Everything that draws or predicts a shot reads
+                // this same `aim`, so the client's own tracers follow the pull.
+                aim_assist::reach(selection.apply(loadout).weapon()).map_or(aimed, |range| {
+                    aim_assist::assist(
+                        aimed,
+                        origin,
+                        aim_targets(origin, targets.iter(), beasts.iter()),
+                        range,
+                    )
+                })
+            });
         }
     }
     if ui {
@@ -382,6 +425,7 @@ mod tests {
             ActionState::<PlayerInput>::default(),
             InputMarker::<PlayerInput>::default(),
             Pos(Vec2::ZERO),
+            Loadout::default(),
         ));
         app.update();
         app

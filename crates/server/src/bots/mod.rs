@@ -43,8 +43,11 @@ const SKILL_RANGE: f32 = 500.0;
 
 const SIGHT: f32 = 820.0;
 const THINK_EVERY: u16 = 4;
+/// Bots walk this much slower than a human on the same kit, so a chase is winnable.
+/// Applied in `gameplay::movement`; a dash is not scaled.
+pub const BOT_SPEED_MULT: f32 = 0.9;
 /// How far ahead a bot checks its heading for walls: a bit more than it covers between thinks.
-const PROBE: f32 = PLAYER_SPEED * DT * (THINK_EVERY + 2) as f32;
+const PROBE: f32 = PLAYER_SPEED * BOT_SPEED_MULT * DT * (THINK_EVERY + 2) as f32;
 /// Think cycles a bot must keep a target before it opens fire (~0.3 s): a reaction time.
 const REACTION_THINKS: u16 = 3;
 
@@ -149,6 +152,16 @@ pub struct Bot {
     last_gun: WeaponKind,
     /// Skipped a gun they could afford, to pool scrap for a rifle.
     banked: bool,
+    /// Scavenge target this bot is walking to, kept across thinks so two equally good
+    /// pickups don't swap places every think. See `scavenge::hold_pick`.
+    pick: Option<scavenge::Desire>,
+    /// Fight distance band: -1 backing off, 0 circling, 1 closing in. Held across thinks
+    /// with separate enter/exit distances so a target on a line doesn't flip the heading.
+    band: i8,
+    /// Thinks left before the strafe side may flip again.
+    strafe_hold: u16,
+    /// Last 8-way heading chosen, so `steer` doesn't alternate between two neighbours.
+    heading: (i8, i8),
 }
 
 impl Bot {
@@ -174,6 +187,10 @@ impl Bot {
             focus: None,
             last_gun: WeaponKind::Stick,
             banked: false,
+            pick: None,
+            band: 0,
+            strafe_hold: 0,
+            heading: (0, 0),
         }
     }
 

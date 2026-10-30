@@ -4,8 +4,8 @@ use super::engage::{
     ranged_fauna, scavenging_now,
 };
 use super::scavenge::{
-    self, Spec, choose, cover_point, depart_dir, follow, gather, hazard_exit, hot_barrel,
-    retreat_point, shot_hits_barrel,
+    self, Spec, choose, cover_point, depart_dir, follow, gather, hazard_exit, hold_pick,
+    hot_barrel, retreat_point, shot_hits_barrel,
 };
 use super::*;
 use crate::evolution::Recovery;
@@ -68,14 +68,22 @@ pub fn aim_toward(to_enemy: Vec2, aim_error: f32, rng: &mut impl Rng) -> Vec2 {
     Vec2::from_angle(to_enemy.to_angle() + aim_error + wobble)
 }
 
+/// A heading this close to the best one is as good as it: keep the previous heading rather
+/// than alternating between two neighbours every think.
+const STEER_MARGIN: f32 = 0.15;
+
 /// Inputs only move in 8 directions: take the one closest to `dir` whose next stretch is free
 /// of walls and props, so a bot slides around corners instead of grinding into them.
+/// `last` is the heading picked last time: when the new pick is one grid step away from it and
+/// that heading is still free and nearly as aligned, the old one is kept, which stops a
+/// direction sitting on the boundary between two axes from flicking back and forth.
 pub(super) fn steer(
     input: &mut PlayerInput,
     dir: Vec2,
     arena: &Arena,
     obstacles: &[(Vec2, f32)],
     at: Vec2,
+    last: &mut (i8, i8),
 ) {
     let dir = dir.normalize_or_zero();
     if dir == Vec2::ZERO {
@@ -83,6 +91,16 @@ pub(super) fn steer(
         input.move_y = 0;
         return;
     }
+    let clear = |(x, y): (i8, i8)| {
+        clear_ahead(
+            arena,
+            obstacles,
+            at,
+            Vec2::new(x as f32, y as f32),
+            PLAYER_RADIUS,
+            PROBE,
+        )
+    };
     let mut axes: Vec<(i8, i8)> = (-1..=1)
         .flat_map(|x| (-1..=1).map(move |y| (x, y)))
         .filter(|&a| a != (0, 0))
@@ -94,11 +112,18 @@ pub(super) fn steer(
         .iter()
         .take(7)
         .copied()
-        .find(|&(x, y)| {
-            let d = Vec2::new(x as f32, y as f32);
-            clear_ahead(arena, obstacles, at, d, PLAYER_RADIUS, PROBE)
-        })
+        .find(|&(x, y)| clear((x, y)))
         .unwrap_or(axes[0]);
+    let held = *last;
+    let step = (x - held.0).abs().max((y - held.1).abs());
+    let (x, y) =
+        if held != (0, 0) && step == 1 && along(held) + STEER_MARGIN > along((x, y)) && clear(held)
+        {
+            held
+        } else {
+            (x, y)
+        };
+    *last = (x, y);
     input.move_x = x;
     input.move_y = y;
 }
@@ -185,6 +210,8 @@ pub(super) fn think(
             else {
                 continue;
             };
+            // Plain `&mut Bot`: lets the fight step borrow several fields at once.
+            let bot = &mut *bot;
             if !vitals.alive {
                 current.0 = PlayerInput::default();
                 bot.target = None;
@@ -193,6 +220,8 @@ pub(super) fn think(
                 bot.mind_until = 0;
                 bot.hide_since = 0;
                 bot.focus = None;
+                bot.pick = None;
+                bot.band = 0;
                 continue;
             }
             let sealed = vitals.armor == ArmorKind::PowerArmor && vitals.armor_points > 0.0;
@@ -211,7 +240,14 @@ pub(super) fn think(
             {
                 let mut input = PlayerInput::default();
                 let dir = next_waypoint(&nav.0, &arena, pos.0, exit, PLAYER_RADIUS) - pos.0;
-                steer(&mut input, dir, &arena, &obstacles.0, pos.0);
+                steer(
+                    &mut input,
+                    dir,
+                    &arena,
+                    &obstacles.0,
+                    pos.0,
+                    &mut bot.heading,
+                );
                 input.aim = dir.normalize_or(Vec2::X);
                 current.0 = input;
                 bot.target = None;
@@ -220,7 +256,14 @@ pub(super) fn think(
             }
             if let Some(barrel) = hot_barrel(pos.0, &barrels) {
                 let mut input = PlayerInput::default();
-                steer(&mut input, pos.0 - barrel, &arena, &obstacles.0, pos.0);
+                steer(
+                    &mut input,
+                    pos.0 - barrel,
+                    &arena,
+                    &obstacles.0,
+                    pos.0,
+                    &mut bot.heading,
+                );
                 input.aim = (pos.0 - barrel).normalize_or(Vec2::X);
                 current.0 = input;
                 bot.think_in = 0;
@@ -411,25 +454,46 @@ pub(super) fn think(
                     .flatten();
                 if let Some(cover) = cover {
                     let dir = next_waypoint(&nav.0, &arena, pos.0, cover, PLAYER_RADIUS) - pos.0;
-                    steer(&mut input, dir, &arena, &obstacles.0, pos.0);
+                    steer(
+                        &mut input,
+                        dir,
+                        &arena,
+                        &obstacles.0,
+                        pos.0,
+                        &mut bot.heading,
+                    );
                 } else if break_los {
                     let away = (pos.0 - hide_at).normalize_or(Vec2::Y).perp();
-                    steer(&mut input, away, &arena, &obstacles.0, pos.0);
+                    steer(
+                        &mut input,
+                        away,
+                        &arena,
+                        &obstacles.0,
+                        pos.0,
+                        &mut bot.heading,
+                    );
                 } else {
                     let desires = gather(&spec, &items, &props, |item, bag| {
                         interest(item, bag, vitals, &loadout, evo)
                     });
-                    let goal = choose(&desires, Some(enemy_pos), |p| {
-                        !arena.line_of_sight(enemy_pos, p)
-                    })
-                    .map(|d| d.pos)
-                    .unwrap_or_else(|| retreat_point(pos.0, enemy_pos));
+                    // Held across thinks too: two loot spots on opposite sides would
+                    // otherwise trade places and walk the bot back and forth.
+                    let picked = hold_pick(&desires, bot.pick, |pool| {
+                        choose(pool, Some(enemy_pos), |p| {
+                            !arena.line_of_sight(enemy_pos, p)
+                        })
+                    });
+                    bot.pick = picked;
+                    let goal = picked
+                        .map(|d| d.pos)
+                        .unwrap_or_else(|| retreat_point(pos.0, enemy_pos));
                     steer(
                         &mut input,
                         depart_dir(to_enemy, goal - pos.0),
                         &arena,
                         &obstacles.0,
                         pos.0,
+                        &mut bot.heading,
                     );
                 }
                 if mind == MIND_RETREAT
@@ -446,6 +510,7 @@ pub(super) fn think(
                 bot.target = Some(enemy_e);
                 if bot.target != previous {
                     bot.locked_for = 0;
+                    bot.band = 0;
                 }
                 bot.locked_for = bot.locked_for.saturating_add(1);
                 threat_dist = Some(dist);
@@ -472,6 +537,7 @@ pub(super) fn think(
                     &nav.0,
                     &arena,
                     &obstacles.0,
+                    (&mut bot.band, &mut bot.strafe_hold, &mut bot.heading),
                     rng,
                 );
             } else {
@@ -484,7 +550,8 @@ pub(super) fn think(
                 let desires = gather(&spec, &items, &props, |item, bag| {
                     interest(item, bag, vitals, &loadout, evo)
                 });
-                let picked = choose(&desires, None, |_| false);
+                let picked = hold_pick(&desires, bot.pick, |pool| choose(pool, None, |_| false));
+                bot.pick = picked;
                 let (crack, stuck) = follow(
                     &mut input,
                     &nav.0,
@@ -496,6 +563,7 @@ pub(super) fn think(
                     bot.stuck,
                     &mut bot.goal,
                     safe,
+                    &mut bot.heading,
                     rng,
                 );
                 bot.crack = crack;
