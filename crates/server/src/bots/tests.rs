@@ -103,6 +103,7 @@ fn balance_app() -> App {
         logging: false,
     });
     app.insert_resource(SimRng::from_match_seed(1));
+    app.init_resource::<SimTick>();
     app.world_mut().spawn((
         MatchState {
             phase: Phase::Lobby,
@@ -196,19 +197,29 @@ fn a_playing_seat_is_refilled_by_a_fresh_bot() {
     app.update();
     assert_eq!(roster(&mut app), (8, 1));
     assert!(app.world_mut().despawn(humans[0]));
-    // Outside the lobby the fill waits out the one-second cooldown, then adds one bot.
-    for _ in 0..64 {
+    // Outside the lobby the fill waits for the next whole second of sim time, then adds one bot.
+    for tick in 1..64 {
+        app.world_mut().resource_mut::<SimTick>().0 = tick;
         app.update();
+        assert_eq!(roster(&mut app), (7, 1), "no fill before tick 64");
     }
+    app.world_mut().resource_mut::<SimTick>().0 = 64;
     app.update();
     assert_eq!(roster(&mut app), (8, 2));
     let world = app.world_mut();
     let mut bots = world.query_filtered::<(&Player, &Stats), With<Bot>>();
-    let rows: Vec<(u32, u8)> = bots
+    let rows: Vec<(u64, u32, u8)> = bots
         .iter(world)
-        .map(|(_, stats)| (stats.score, stats.level))
+        .map(|(player, stats)| (player.client_id, stats.score, stats.level))
         .collect();
-    assert!(rows.iter().all(|(score, level)| *score == 0 && *level == 1));
+    assert!(
+        rows.iter()
+            .all(|(_, score, level)| *score == 0 && *level == 1)
+    );
+    // The backfill continues the numbering of the bots on the field, so a replay names it the same.
+    let mut ids: Vec<u64> = rows.iter().map(|(id, ..)| *id).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec![u64::MAX - 2, u64::MAX - 1]);
 }
 
 #[test]

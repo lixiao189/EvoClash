@@ -362,7 +362,7 @@ pub fn color_for(id: u64) -> [f32; 3] {
 }
 
 /// Count down the grace period of humans whose link went away; remove them once it expires.
-fn track_presence(
+pub(crate) fn track_presence(
     mut commands: Commands,
     state: Query<&MatchState>,
     catching: Option<Res<CatchingUp>>,

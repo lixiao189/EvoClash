@@ -15,7 +15,9 @@ use rand::Rng;
 use crate::config::ServerConfig;
 use crate::connections::Human;
 use crate::evolution::{LifeLog, apply_evolution, handle_command};
-use crate::gameplay::{Aggressors, CurrentInput, SimSet, spawn_combatant, spawn_plain_combatant};
+use crate::gameplay::{
+    Aggressors, CurrentInput, SimSet, SimTick, spawn_combatant, spawn_plain_combatant,
+};
 use crate::inventory::{BagContents, auto_wants};
 use crate::rng::{SimRng, Stream};
 use evoclash_game::evolution::seen_from;
