@@ -1,4 +1,5 @@
-{{- if dig "enabled" false .Values.single }}
+{{- /* hostNetwork: false renders single-nodeport.yaml instead. */ -}}
+{{- if and (dig "enabled" false .Values.single) (dig "hostNetwork" true .Values.single) }}
 {{- $single := .Values.single }}
 {{- if not $single.publicHost }}
 {{- fail "single.publicHost is required when single.enabled (IP players' WebTransport connects to)" }}

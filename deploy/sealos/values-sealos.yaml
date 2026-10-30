@@ -1,0 +1,32 @@
+# Sealos 广州（gzg.sealos.run）命名空间：PodSecurity baseline 禁止 hostNetwork，配额 10 个 NodePort。
+# matchmaker 走平台 Ingress（*.gzg.sealos.run 通配证书），对局 UDP 走 NodePort。见 deploy/sealos/README.md。
+image:
+  repository: ghcr.io/lixiao189/evoclash-server
+  pullPolicy: IfNotPresent
+
+single:
+  enabled: true
+  hostNetwork: false
+  # 任一节点公网 IP 都转发 NodePort（externalTrafficPolicy: Cluster）；这是 gzg.sealos.run 的 A 记录之一。
+  publicHost: 106.52.89.241
+  # 8 个 NodePort（配额 10）。nodePort == 容器端口 == matchmaker 下发的端口。
+  ports: "31700-31707"
+  maxMatches: 8
+  warmMatches: 1
+  # LimitRange 默认每个容器只有 50m CPU / 64Mi / 100Mi 临时存储，必须写全 limits。
+  # 一个容器里跑 matchmaker 和它拉起的全部对局进程。
+  resources:
+    requests: { cpu: 200m, memory: 256Mi, ephemeral-storage: 256Mi }
+    limits: { cpu: "4", memory: 3Gi, ephemeral-storage: 2Gi }
+  nodePort:
+    # 网关（Envoy）从 172.17.x 回源，并把 X-Real-IP 改写成玩家 IP。
+    trustedProxies: "172.16.0.0/12"
+    ingress:
+      annotations:
+        kubernetes.io/ingress.class: nginx
+      host: evoclash-80h1uphq.gzg.sealos.run
+      # 网关只在有 tls 段时为该域名开 HTTPS 路由。wildcard-cert 不在本命名空间，
+      # 网关回落到平台的 *.gzg.sealos.run 证书。
+      tls:
+        - hosts: [evoclash-80h1uphq.gzg.sealos.run]
+          secretName: wildcard-cert
